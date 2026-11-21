@@ -1,0 +1,8 @@
+{
+  "name": "Astras of Bharata",
+  "description": "An interactive Indian mythology action-adventure chronicle of ancient temples, celestial cities, dynamic puzzles, and mythical guardians inspired by the Mahabharata.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
