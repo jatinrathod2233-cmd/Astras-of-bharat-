@@ -94,6 +94,14 @@ export default function App() {
 
   // Always wipe lingering movement/action inputs when leaving PLAYING state or losing window focus
   useEffect(() => {
+    try {
+      const bridge = (
+        window as unknown as { AndroidBridge?: { setGameMode?: (m: string) => void } }
+      ).AndroidBridge;
+      bridge?.setGameMode?.(mode);
+    } catch {
+      // Ignore outside native Android WebView
+    }
     if (mode !== 'PLAYING') {
       resetAllInputs();
     }
@@ -122,8 +130,10 @@ export default function App() {
       onModeChange: (nextMode) => setMode(nextMode),
     });
     engineRef.current = engine;
+    (window as unknown as { __ramayanaEngine?: RamayanaWorldEngine }).__ramayanaEngine = engine;
 
     return () => {
+      (window as unknown as { __ramayanaEngine?: RamayanaWorldEngine }).__ramayanaEngine = undefined;
       engine.dispose();
       engineRef.current = null;
     };

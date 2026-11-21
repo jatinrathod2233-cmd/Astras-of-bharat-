@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer Solar Ring (Sudarshan Chakra Rim) -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,24 A30,30 0 1,1 53.99,24 Z"
+        android:strokeColor="#FFF5B742"
+        android:strokeWidth="4.2" />
+    <!-- Inner Chakra Ring -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,37 A17,17 0 1,1 53.99,37 Z"
+        android:strokeColor="#FFFFD875"
+        android:strokeWidth="2.2" />
+    <!-- 8 Celestial Spokes / Flames -->
+    <path
+        android:fillColor="#FFF5B742"
+        android:pathData="M54,14 L57.5,24 L50.5,24 Z
+                          M54,94 L57.5,84 L50.5,84 Z
+                          M14,54 L24,50.5 L24,57.5 Z
+                          M94,54 L84,50.5 L84,57.5 Z
+                          M25.7,25.7 L34.5,31.2 L31.2,34.5 Z
+                          M82.3,82.3 L73.5,76.8 L76.8,73.5 Z
+                          M82.3,25.7 L76.8,34.5 L73.5,31.2 Z
+                          M25.7,82.3 L31.2,73.5 L34.5,76.8 Z" />
+    <!-- Golden Arrow Spearhead Centered -->
+    <path
+        android:fillColor="#FFFFE394"
+        android:pathData="M54,33 L60,56 L54,52 L48,56 Z" />
+    <path
+        android:fillColor="#FFF5B742"
+        android:pathData="M52.6,51 L55.4,51 L55.4,74 L52.6,74 Z" />
+</vector>

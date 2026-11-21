@@ -1,5 +1,22 @@
 // Procedural Web Audio API sound effects (zero external files)
 
+interface AndroidNativeBridge {
+  vibrate?: (durationMs: number, amplitude: number) => void;
+  setGameMode?: (mode: string) => void;
+  keepScreenAwake?: (enabled: boolean) => void;
+  isNativeAndroid?: () => boolean;
+}
+
+function pulseAndroidHaptic(durationMs: number, amplitude: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const bridge = (window as unknown as { AndroidBridge?: AndroidNativeBridge }).AndroidBridge;
+    bridge?.vibrate?.(durationMs, amplitude);
+  } catch {
+    // Ignore when running outside native Android WebView
+  }
+}
+
 class SoundEngine {
   private ctx: AudioContext | null = null;
   private muted: boolean = false;
@@ -41,6 +58,7 @@ class SoundEngine {
   }
 
   public playBowShot(): void {
+    pulseAndroidHaptic(16, 90);
     const ctx = this.getContext();
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -58,6 +76,7 @@ class SoundEngine {
   }
 
   public playAstraBlast(): void {
+    pulseAndroidHaptic(65, 220);
     const ctx = this.getContext();
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -82,6 +101,7 @@ class SoundEngine {
   }
 
   public playHit(): void {
+    pulseAndroidHaptic(28, 165);
     const ctx = this.getContext();
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -99,6 +119,7 @@ class SoundEngine {
   }
 
   public playMountChariot(): void {
+    pulseAndroidHaptic(24, 120);
     const ctx = this.getContext();
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -116,6 +137,7 @@ class SoundEngine {
   }
 
   public playMissionChime(): void {
+    pulseAndroidHaptic(45, 150);
     const ctx = this.getContext();
     if (!ctx) return;
     const now = ctx.currentTime;
