@@ -1,9 +1,26 @@
 import java.io.File
+import java.util.Properties
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
+}
+
+val envKeystorePath: String? = System.getenv("ANDROID_KEYSTORE_PATH")
+val configuredStoreFile: File? = when {
+    !envKeystorePath.isNullOrBlank() -> file(envKeystorePath)
+    keystorePropertiesFile.exists() && !keystoreProperties.getProperty("storeFile").isNullOrBlank() ->
+        rootProject.file(keystoreProperties.getProperty("storeFile"))
+    else -> null
+}
+val hasReleaseKeystore = configuredStoreFile != null && configuredStoreFile.exists()
 
 android {
     namespace = "com.bharata.astras"
@@ -15,6 +32,20 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = configuredStoreFile
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                    ?: keystoreProperties.getProperty("storePassword")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                    ?: keystoreProperties.getProperty("keyAlias")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+                    ?: keystoreProperties.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
@@ -29,10 +60,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Uses debug keystore by default if no release keystore is configured,
-            // allowing immediate local APK generation in Android Studio.
-            // Replace with your release signingConfig before Play Store upload.
-            signingConfig = signingConfigs.getByName("debug")
+            // Uses release keystore when keystore.properties or ANDROID_KEYSTORE_* env vars are present;
+            // falls back to debug keystore so local/CI `./gradlew assembleRelease` always produces an installable APK.
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -60,14 +94,21 @@ android {
     }
 }
 
-// Automatically syncs fresh Vite production build (../dist) into app assets when present,
-// while still compiling cleanly standalone using the already-bundled assets folder.
-val syncDistAssets by tasks.registering(Copy::class) {
-    val distDir = file("${rootProject.projectDir.parentFile}/dist")
-    val targetAssetsDir = file("src/main/assets")
-    onlyIf { distDir.exists() && File(distDir, "index.html").exists() }
-    from(distDir)
-    into(targetAssetsDir)
+// Automatically syncs fresh Vite production build (../dist) into app assets when present
+// and prunes stale hashed JS/CSS chunks, while building cleanly standalone if only android/ is imported.
+val distSourceDir = rootProject.file("../dist")
+val appAssetsDir = layout.projectDirectory.dir("src/main/assets").asFile
+
+val syncDistAssets by tasks.registering {
+    onlyIf { distSourceDir.exists() && File(distSourceDir, "index.html").exists() }
+    doLast {
+        val staleAssetsDir = File(appAssetsDir, "assets")
+        if (staleAssetsDir.exists()) {
+            staleAssetsDir.deleteRecursively()
+        }
+        appAssetsDir.mkdirs()
+        distSourceDir.copyRecursively(appAssetsDir, overwrite = true)
+    }
 }
 
 tasks.named("preBuild") {
@@ -79,5 +120,4 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.webkit:webkit:1.12.1")
-    implementation("androidx.constraintlayout:constraintlayout:2.2.0")
 }

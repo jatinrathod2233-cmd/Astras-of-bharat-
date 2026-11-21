@@ -54,9 +54,7 @@ class MainActivity : AppCompatActivity() {
         setupGameWebView()
         registerBackHandler()
 
-        if (savedInstanceState != null) {
-            gameWebView.restoreState(savedInstanceState)
-        } else {
+        if (savedInstanceState == null || gameWebView.restoreState(savedInstanceState) == null) {
             gameWebView.loadUrl(ENTRY_URL)
         }
     }
@@ -64,8 +62,13 @@ class MainActivity : AppCompatActivity() {
     private fun configureImmersiveFullscreen() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = Color.TRANSPARENT
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            @Suppress("DEPRECATION")
+            window.statusBarColor = Color.TRANSPARENT
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = Color.TRANSPARENT
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val lp = window.attributes
@@ -117,11 +120,12 @@ class MainActivity : AppCompatActivity() {
             ): WebResourceResponse? {
                 val url = request.url
                 if (url.host == APP_ASSET_DOMAIN) {
-                    return assetLoader.shouldInterceptRequest(url)
+                    return resolveAssetWithStrictMime(url)
                 }
                 return super.shouldInterceptRequest(view, request)
             }
 
+            @Suppress("DEPRECATION")
             @Deprecated("Required for API 24 compatibility fallback")
             override fun shouldInterceptRequest(
                 view: WebView,
@@ -129,7 +133,7 @@ class MainActivity : AppCompatActivity() {
             ): WebResourceResponse? {
                 val parsed = Uri.parse(url)
                 if (parsed.host == APP_ASSET_DOMAIN) {
-                    return assetLoader.shouldInterceptRequest(parsed)
+                    return resolveAssetWithStrictMime(parsed)
                 }
                 return super.shouldInterceptRequest(view, url)
             }
@@ -160,6 +164,23 @@ class MainActivity : AppCompatActivity() {
                 return BuildConfig.DEBUG
             }
         }
+    }
+
+    private fun resolveAssetWithStrictMime(url: Uri): WebResourceResponse? {
+        val response = assetLoader.shouldInterceptRequest(url) ?: return null
+        val path = url.path?.lowercase() ?: return response
+        when {
+            path.endsWith(".js") || path.endsWith(".mjs") -> response.mimeType = "application/javascript"
+            path.endsWith(".css") -> response.mimeType = "text/css"
+            path.endsWith(".html") || path.endsWith(".htm") -> response.mimeType = "text/html"
+            path.endsWith(".json") -> response.mimeType = "application/json"
+            path.endsWith(".jpg") || path.endsWith(".jpeg") -> response.mimeType = "image/jpeg"
+            path.endsWith(".png") -> response.mimeType = "image/png"
+            path.endsWith(".webp") -> response.mimeType = "image/webp"
+            path.endsWith(".svg") -> response.mimeType = "image/svg+xml"
+            path.endsWith(".woff2") -> response.mimeType = "font/woff2"
+        }
+        return response
     }
 
     private fun registerBackHandler() {
