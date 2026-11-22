@@ -23,7 +23,7 @@ jobs:
 
       - name: Build and sync web game assets into Android assets
         run: |
-          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund --legacy-peer-deps
           npm run android:sync
 
       - name: Set up JDK 17
