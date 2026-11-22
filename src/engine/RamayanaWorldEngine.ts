@@ -17,6 +17,7 @@ import {
 } from '../types/world';
 import { soundEngine } from '../utils/audio';
 import { ObjectPoolManager, swapRemoveAt } from './ObjectPoolManager';
+import { StaticColliderSpatialGrid } from './StaticColliderSpatialGrid';
 import {
   ChariotRig,
   CharacterRig,
@@ -204,6 +205,68 @@ const _tmpSkySample = new THREE.Color();
 const _tmpHorizonSample = new THREE.Color();
 const _ikScratchL = { hipPitch: 0, kneeFlex: 0.06 };
 const _ikScratchR = { hipPitch: 0, kneeFlex: 0.06 };
+const _footL = { z: 0, yLift: 0, isStance: true, ankleRoll: 0 };
+const _footR = { z: 0, yLift: 0, isStance: true, ankleRoll: 0 };
+const _staticRes = { x: 0, z: 0 };
+const _sweptRes = { x: 0, z: 0 };
+const _chariotCcdRes = { x: 0, z: 0, blocked: false };
+const _sepRes = { ax: 0, az: 0, bx: 0, bz: 0, collided: false };
+const _chariotHullOffsets = [
+  { zLocal: -1.15, r: 1.38 },
+  { zLocal: 0.1, r: 1.38 },
+  { zLocal: 1.4, r: 1.05 },
+  { zLocal: 2.5, r: 0.9 },
+];
+const _chariotSpheresA = [
+  { x: 0, z: 0, r: 1.38 },
+  { x: 0, z: 0, r: 1.38 },
+  { x: 0, z: 0, r: 1.05 },
+  { x: 0, z: 0, r: 0.9 },
+];
+const _chariotSpheresB = [
+  { x: 0, z: 0, r: 1.38 },
+  { x: 0, z: 0, r: 1.38 },
+  { x: 0, z: 0, r: 1.05 },
+  { x: 0, z: 0, r: 0.9 },
+];
+const _nearestMountOut: {
+  kind: 'RATHA' | 'HORSE' | 'ELEPHANT';
+  index: number;
+  label: string;
+} = { kind: 'RATHA', index: 0, label: '' };
+const _topLampIndices = new Int32Array(8);
+const _topLampDistSq = new Float64Array(8);
+const _curseOffsets = [-0.24, 0, 0.24];
+const DEMON_VARIANTS: readonly DemonVariant[] = [
+  'BOAR_DEMON',
+  'RABBIT_DEMON',
+  'BRUTE_HUMAN',
+  'SORCERER_HUMAN',
+  'SHADOW_GHOST',
+];
+const TWO_PI = Math.PI * 2;
+
+function evalFootTargetInto(
+  legPhase: number,
+  halfStep: number,
+  liftH: number,
+  out: { z: number; yLift: number; isStance: boolean; ankleRoll: number }
+): void {
+  const p = ((legPhase % TWO_PI) + TWO_PI) % TWO_PI;
+  if (p < Math.PI) {
+    const u = p / Math.PI;
+    out.z = halfStep * (1 - 2 * u);
+    out.yLift = 0;
+    out.isStance = true;
+    out.ankleRoll = THREE.MathUtils.lerp(-0.08, 0.14, u);
+  } else {
+    const u = (p - Math.PI) / Math.PI;
+    out.z = -halfStep * Math.cos(Math.PI * u);
+    out.yLift = liftH * Math.pow(Math.sin(Math.PI * u), 0.85);
+    out.ankleRoll = Math.sin(u * Math.PI) * 0.24 - 0.1;
+    out.isStance = false;
+  }
+}
 
 /**
  * Exact Analytical Planar Two-Bone Leg Inverse Kinematics (Zero GC).
@@ -433,6 +496,9 @@ export class RamayanaWorldEngine {
   private blasts: BlastEffect[] = [];
   private colliders: BoxCollider[] = [];
   private circleColliders: CircleCollider[] = [];
+  private colliderGrid!: StaticColliderSpatialGrid;
+  private maxAnisotropy = 1;
+  private simFrameCounter = 0;
   private beaconGroup: THREE.Group;
   private waterMesh: THREE.Mesh;
   private skyDome: THREE.Mesh | null = null;
@@ -568,7 +634,6 @@ export class RamayanaWorldEngine {
   }> = [];
   private nightLampLights: THREE.PointLight[] = [];
   private lampBulbMat: THREE.MeshStandardMaterial | null = null;
-  private activeLampPoolIndices: Array<{ idx: number; distSq: number }> = [];
   private dayTime = 0.34; // Cycles 0..1 continuously through Day -> Sunset -> Starry Night -> Dawn
   private nightFactor = 0;
   private daylightFactor = 1;
@@ -667,11 +732,14 @@ export class RamayanaWorldEngine {
       }
     })();
 
-    const nativePixelRatio = this.isSoftwareGl ? 1 : Math.max(1, window.devicePixelRatio || 1);
+    const nativePixelRatio = this.isSoftwareGl
+      ? 1
+      : Math.min(2, Math.max(1, window.devicePixelRatio || 1));
     this.renderer = new THREE.WebGLRenderer({
       antialias: !this.isSoftwareGl,
       powerPreference: 'high-performance',
     });
+    this.maxAnisotropy = Math.max(1, this.renderer.capabilities.getMaxAnisotropy());
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -739,9 +807,9 @@ export class RamayanaWorldEngine {
     this.keyLight = new THREE.DirectionalLight(0xfff1d6, 2.25);
     this.keyLight.position.set(48, 72, 36);
     this.keyLight.castShadow = !this.isSoftwareGl;
-    const shadowSize = this.isSoftwareGl ? 1024 : 4096;
+    const shadowSize = this.isSoftwareGl ? 1024 : 2048;
     this.keyLight.shadow.mapSize.set(shadowSize, shadowSize);
-    const d = 26;
+    const d = 22;
     this.keyLight.shadow.camera.left = -d;
     this.keyLight.shadow.camera.right = d;
     this.keyLight.shadow.camera.top = d;
@@ -759,9 +827,9 @@ export class RamayanaWorldEngine {
     this.scene.add(this.rimLight);
     this.scene.add(this.rimLight.target);
 
-    // Secondary Dynamic Shadow-Casting SpotLight for nearest active Street Lamp / Torch flame at night (total shadow casters <= 2)
+    // Secondary Dynamic Shadow-Casting SpotLight for nearest active Street Lamp / Torch flame at night (disabled in daytime for 60 FPS)
     this.torchShadowLight = new THREE.SpotLight(0xff9b38, 0, 28, Math.PI * 0.44, 0.6, 1.4);
-    this.torchShadowLight.castShadow = !this.isSoftwareGl;
+    this.torchShadowLight.castShadow = false;
     this.torchShadowLight.shadow.mapSize.set(this.isSoftwareGl ? 512 : 1024, this.isSoftwareGl ? 512 : 1024);
     this.torchShadowLight.shadow.camera.near = 0.4;
     this.torchShadowLight.shadow.camera.far = 28;
@@ -806,6 +874,7 @@ export class RamayanaWorldEngine {
     this.textures = createProceduralTextures(this.renderer, this.isSoftwareGl);
 
     this.waterMesh = this.buildWorldEnvironment();
+    this.colliderGrid = new StaticColliderSpatialGrid(this.colliders, this.circleColliders);
     this.ramRig = createLordRamModel(this.textures);
     this.scene.add(this.ramRig.root);
     this.enforcePbrAndAnisotropy(this.scene);
@@ -1315,14 +1384,9 @@ export class RamayanaWorldEngine {
   }
 
   private enforcePbrAndAnisotropy(root: THREE.Object3D): void {
-    const maxAniso = Math.max(1, this.renderer.capabilities.getMaxAnisotropy());
-    const tuneTex = (tex: THREE.Texture | null | undefined) => {
-      if (!tex) return;
-      tex.generateMipmaps = true;
-      tex.minFilter = THREE.LinearMipmapLinearFilter;
-      tex.magFilter = THREE.LinearFilter;
-      tex.anisotropy = maxAniso;
-    };
+    if (root.userData._pbrTuned) return;
+    root.userData._pbrTuned = true;
+    const maxAniso = this.maxAnisotropy;
     root.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       if (!mesh.material) return;
@@ -1331,11 +1395,11 @@ export class RamayanaWorldEngine {
         const m = mats[i] as THREE.MeshPhysicalMaterial;
         if (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) {
           m.envMapIntensity = Math.max(1.0, m.envMapIntensity || 1.0);
-          tuneTex(m.map);
-          tuneTex(m.normalMap);
-          tuneTex(m.roughnessMap);
-          tuneTex(m.metalnessMap);
-          tuneTex(m.emissiveMap);
+          if (m.map) { m.map.generateMipmaps = true; m.map.minFilter = THREE.LinearMipmapLinearFilter; m.map.magFilter = THREE.LinearFilter; m.map.anisotropy = maxAniso; }
+          if (m.normalMap) { m.normalMap.generateMipmaps = true; m.normalMap.minFilter = THREE.LinearMipmapLinearFilter; m.normalMap.magFilter = THREE.LinearFilter; m.normalMap.anisotropy = maxAniso; }
+          if (m.roughnessMap) { m.roughnessMap.generateMipmaps = true; m.roughnessMap.minFilter = THREE.LinearMipmapLinearFilter; m.roughnessMap.magFilter = THREE.LinearFilter; m.roughnessMap.anisotropy = maxAniso; }
+          if (m.metalnessMap) { m.metalnessMap.generateMipmaps = true; m.metalnessMap.minFilter = THREE.LinearMipmapLinearFilter; m.metalnessMap.magFilter = THREE.LinearFilter; m.metalnessMap.anisotropy = maxAniso; }
+          if (m.emissiveMap) { m.emissiveMap.generateMipmaps = true; m.emissiveMap.minFilter = THREE.LinearMipmapLinearFilter; m.emissiveMap.magFilter = THREE.LinearFilter; m.emissiveMap.anisotropy = maxAniso; }
         }
       }
     });
@@ -3551,6 +3615,17 @@ export class RamayanaWorldEngine {
     const margin = 0.34;
     let safeFrac = 1.0;
 
+    const minQx = Math.min(tx, desiredX) - margin;
+    const maxQx = Math.max(tx, desiredX) + margin;
+    const minQz = Math.min(tz, desiredZ) - margin;
+    const maxQz = Math.max(tz, desiredZ) + margin;
+    const grid = this.colliderGrid;
+    grid.queryAABB(minQx, maxQx, minQz, maxQz);
+    const outB = grid.outBoxes;
+    const outBLen = grid.outBoxesLength;
+    const outC = grid.outCircles;
+    const outCLen = grid.outCirclesLength;
+
     for (let s = 1; s <= steps; s++) {
       const frac = s / steps;
       const sx = tx + (desiredX - tx) * frac;
@@ -3558,8 +3633,8 @@ export class RamayanaWorldEngine {
       const sz = tz + (desiredZ - tz) * frac;
 
       let hit = false;
-      for (let i = 0; i < this.colliders.length; i++) {
-        const box = this.colliders[i];
+      for (let i = 0; i < outBLen; i++) {
+        const box = this.colliders[outB[i]];
         // Allow unobstructed sightlines over low window sills, dado walls, cots & balcony balustrades
         if (box.height <= 1.65) continue;
         const baseY = box.baseY ?? 0;
@@ -3579,8 +3654,8 @@ export class RamayanaWorldEngine {
       }
 
       if (!hit) {
-        for (let i = 0; i < this.circleColliders.length; i++) {
-          const c = this.circleColliders[i];
+        for (let i = 0; i < outCLen; i++) {
+          const c = this.circleColliders[outC[i]];
           if (c.height <= 1.65) continue;
           const baseY = c.baseY ?? 0;
           if (sy > baseY + c.height || sy < baseY + 0.15) continue;
@@ -3680,6 +3755,13 @@ export class RamayanaWorldEngine {
   ): { x: number; z: number } {
     let nx = x;
     let nz = z;
+    const grid = this.colliderGrid;
+    const qPad = radius + 2.5;
+    let qX = nx;
+    let qZ = nz;
+    grid.queryAABB(qX - qPad, qX + qPad, qZ - qPad, qZ + qPad);
+    const radiusSq = radius * radius;
+    const bridgeMargin = BRIDGE_HALF_WIDTH - 0.55 - radius;
 
     for (let iter = 0; iter < 4; iter++) {
       // 1. Open-world rectangular bounds clamp (covering full 5 km realm)
@@ -3715,9 +3797,13 @@ export class RamayanaWorldEngine {
 
       // 2. Keep Rathas, Demons, and non-swimming units outside deep Sarayu river outside bridge decks
       if (!allowWater || isDemon || isChariot) {
-        const onAnyBridgeCorridor = BRIDGE_Z_LIST.some(
-          (bz) => Math.abs(nz - bz) <= BRIDGE_HALF_WIDTH - 0.55 - radius
-        );
+        let onAnyBridgeCorridor = false;
+        for (let b = 0; b < BRIDGE_Z_LIST.length; b++) {
+          if (Math.abs(nz - BRIDGE_Z_LIST[b]) <= bridgeMargin) {
+            onAnyBridgeCorridor = true;
+            break;
+          }
+        }
         const rc = riverCenterX(nz);
         const rw = riverHalfWidth(nz);
         if (!onAnyBridgeCorridor && Math.abs(nx - rc) < rw + radius) {
@@ -3729,9 +3815,17 @@ export class RamayanaWorldEngine {
         }
       }
 
-      // 3. Oriented Bounding Box (OBB) Colliders (strict bottom + top elevation band filtering + smooth stair ramps)
-      for (let i = 0; i < this.colliders.length; i++) {
-        const box = this.colliders[i];
+      if (Math.abs(nx - qX) > 1.8 || Math.abs(nz - qZ) > 1.8) {
+        qX = nx;
+        qZ = nz;
+        grid.queryAABB(qX - qPad, qX + qPad, qZ - qPad, qZ + qPad);
+      }
+
+      // 3. Oriented Bounding Box (OBB) Colliders via O(1) spatial hash lookup
+      const outB = grid.outBoxes;
+      const outBLen = grid.outBoxesLength;
+      for (let i = 0; i < outBLen; i++) {
+        const box = this.colliders[outB[i]];
         const baseY = box.baseY ?? 0;
         if (entityY > baseY + box.height || entityY + 1.65 <= baseY) continue;
         if (box.isStairStep && entityY + 0.48 >= baseY + box.height) continue;
@@ -3752,8 +3846,8 @@ export class RamayanaWorldEngine {
         }
 
         const rotY = box.rotY ?? 0;
-        const cosR = Math.cos(rotY);
-        const sinR = Math.sin(rotY);
+        const cosR = rotY === 0 ? 1 : Math.cos(rotY);
+        const sinR = rotY === 0 ? 0 : Math.sin(rotY);
         const dxW = nx - box.x;
         const dzW = nz - box.z;
 
@@ -3766,7 +3860,7 @@ export class RamayanaWorldEngine {
         const dlz = lz - cz;
         const dSq = dlx * dlx + dlz * dlz;
 
-        if (dSq < radius * radius) {
+        if (dSq < radiusSq) {
           let pushLx = 0;
           let pushLz = 0;
           if (dSq > 1e-8) {
@@ -3788,9 +3882,11 @@ export class RamayanaWorldEngine {
         }
       }
 
-      // 4. Cylindrical Rigid Colliders (Pillars, Bridge Piers, Trees, Torches, Volcano Cones, Black Mountains)
-      for (let i = 0; i < this.circleColliders.length; i++) {
-        const c = this.circleColliders[i];
+      // 4. Cylindrical Rigid Colliders via O(1) spatial hash lookup
+      const outC = grid.outCircles;
+      const outCLen = grid.outCirclesLength;
+      for (let i = 0; i < outCLen; i++) {
+        const c = this.circleColliders[outC[i]];
         const baseY = c.baseY ?? 0;
         if (entityY > baseY + c.height || entityY + 1.65 <= baseY) continue;
 
@@ -3811,7 +3907,9 @@ export class RamayanaWorldEngine {
       }
     }
 
-    return { x: nx, z: nz };
+    _staticRes.x = nx;
+    _staticRes.z = nz;
+    return _staticRes;
   }
 
   private moveSweptWithStaticCCD(
@@ -3852,7 +3950,9 @@ export class RamayanaWorldEngine {
         curY = surfY;
       }
     }
-    return { x: cx, z: cz };
+    _sweptRes.x = cx;
+    _sweptRes.z = cz;
+    return _sweptRes;
   }
 
   private resolveChariotStaticCCD(
@@ -3866,12 +3966,6 @@ export class RamayanaWorldEngine {
     // Infallible 4-sphere compound rigid CCD sweep spanning rear carriage deck, axle, yoke & lead horses
     const sinY = Math.sin(yaw);
     const cosY = Math.cos(yaw);
-    const hullOffsets = [
-      { zLocal: -1.15, r: 1.38 },
-      { zLocal: 0.1, r: 1.38 },
-      { zLocal: 1.4, r: 1.05 },
-      { zLocal: 2.5, r: 0.9 },
-    ];
 
     const dx = targetX - startX;
     const dz = targetZ - startZ;
@@ -3885,19 +3979,19 @@ export class RamayanaWorldEngine {
 
     for (let s = 1; s <= steps; s++) {
       const frac = s / steps;
-      let candX = startX + (targetX - startX) * frac;
-      let candZ = startZ + (targetZ - startZ) * frac;
+      let candX = startX + dx * frac;
+      let candZ = startZ + dz * frac;
 
       // Resolve all 4 compound rigid spheres at this substep
       for (let pass = 0; pass < 2; pass++) {
-        for (let k = 0; k < hullOffsets.length; k++) {
-          const ho = hullOffsets[k];
+        for (let k = 0; k < _chariotHullOffsets.length; k++) {
+          const ho = _chariotHullOffsets[k];
           const sx = candX + sinY * ho.zLocal;
           const sz = candZ + cosY * ho.zLocal;
           const res = this.resolveStaticColliders(sx, sz, ho.r, curY, false, true);
           const corrX = res.x - sx;
           const corrZ = res.z - sz;
-          if (Math.hypot(corrX, corrZ) > 0.005) {
+          if (corrX * corrX + corrZ * corrZ > 0.000025) {
             candX += corrX;
             candZ += corrZ;
           }
@@ -3915,21 +4009,31 @@ export class RamayanaWorldEngine {
       curY = nextY;
     }
 
-    if (Math.hypot(cx - targetX, cz - targetZ) > 0.14) {
+    const remX = cx - targetX;
+    const remZ = cz - targetZ;
+    if (remX * remX + remZ * remZ > 0.0196) {
       blocked = true;
     }
-    return { x: cx, z: cz, blocked };
+    _chariotCcdRes.x = cx;
+    _chariotCcdRes.z = cz;
+    _chariotCcdRes.blocked = blocked;
+    return _chariotCcdRes;
   }
 
-  private getChariotCompoundSpheres(ch: ChariotEntity): Array<{ x: number; z: number; r: number }> {
+  private fillChariotCompoundSpheres(
+    ch: ChariotEntity,
+    out: Array<{ x: number; z: number; r: number }>
+  ): void {
     const sinY = Math.sin(ch.yaw);
     const cosY = Math.cos(ch.yaw);
-    return [
-      { x: ch.x - sinY * 1.15, z: ch.z - cosY * 1.15, r: 1.38 },
-      { x: ch.x + sinY * 0.1, z: ch.z + cosY * 0.1, r: 1.38 },
-      { x: ch.x + sinY * 1.4, z: ch.z + cosY * 1.4, r: 1.05 },
-      { x: ch.x + sinY * 2.5, z: ch.z + cosY * 2.5, r: 0.9 },
-    ];
+    out[0].x = ch.x - sinY * 1.15;
+    out[0].z = ch.z - cosY * 1.15;
+    out[1].x = ch.x + sinY * 0.1;
+    out[1].z = ch.z + cosY * 0.1;
+    out[2].x = ch.x + sinY * 1.4;
+    out[2].z = ch.z + cosY * 1.4;
+    out[3].x = ch.x + sinY * 2.5;
+    out[3].z = ch.z + cosY * 2.5;
   }
 
   private separateCirclePair(
@@ -3946,20 +4050,20 @@ export class RamayanaWorldEngine {
     const minD = ar + br;
     const dSq = dx * dx + dz * dz;
     if (dSq >= minD * minD) {
-      return { ax, az, bx, bz, collided: false };
+      _sepRes.collided = false;
+      return _sepRes;
     }
     const d = Math.sqrt(dSq);
     const nx = d > 1e-5 ? dx / d : 1;
     const nz = d > 1e-5 ? dz / d : 0;
     const overlap = minD - d;
     const weightB = 1 - weightA;
-    return {
-      ax: ax - nx * overlap * weightA,
-      az: az - nz * overlap * weightA,
-      bx: bx + nx * overlap * weightB,
-      bz: bz + nz * overlap * weightB,
-      collided: true,
-    };
+    _sepRes.ax = ax - nx * overlap * weightA;
+    _sepRes.az = az - nz * overlap * weightA;
+    _sepRes.bx = bx + nx * overlap * weightB;
+    _sepRes.bz = bz + nz * overlap * weightB;
+    _sepRes.collided = true;
+    return _sepRes;
   }
 
   private resolveDynamicPairwiseCollisions(): void {
@@ -3972,10 +4076,12 @@ export class RamayanaWorldEngine {
         for (let j = i + 1; j < this.chariots.length; j++) {
           const ci = this.chariots[i];
           const cj = this.chariots[j];
-          const spheresI = this.getChariotCompoundSpheres(ci);
-          const spheresJ = this.getChariotCompoundSpheres(cj);
-          for (const si of spheresI) {
-            for (const sj of spheresJ) {
+          this.fillChariotCompoundSpheres(ci, _chariotSpheresA);
+          this.fillChariotCompoundSpheres(cj, _chariotSpheresB);
+          for (let aIdx = 0; aIdx < 4; aIdx++) {
+            const si = _chariotSpheresA[aIdx];
+            for (let bIdx = 0; bIdx < 4; bIdx++) {
+              const sj = _chariotSpheresB[bIdx];
               const wI =
                 this.mountedChariotIndex === i
                   ? 0.78
@@ -4001,8 +4107,9 @@ export class RamayanaWorldEngine {
         for (let i = 0; i < this.chariots.length; i++) {
           const ch = this.chariots[i];
           if (Math.abs(this.playerY - ch.y) > 3.6) continue;
-          const spheres = this.getChariotCompoundSpheres(ch);
-          for (const s of spheres) {
+          this.fillChariotCompoundSpheres(ch, _chariotSpheresA);
+          for (let sIdx = 0; sIdx < 4; sIdx++) {
+            const s = _chariotSpheresA[sIdx];
             const sep = this.separateCirclePair(
               this.playerX,
               this.playerZ,
@@ -4080,7 +4187,9 @@ export class RamayanaWorldEngine {
         const ri = ai.kind === 'ELEPHANT' ? 1.55 : 0.95;
         for (let cIdx = 0; cIdx < this.chariots.length; cIdx++) {
           const ch = this.chariots[cIdx];
-          for (const s of this.getChariotCompoundSpheres(ch)) {
+          this.fillChariotCompoundSpheres(ch, _chariotSpheresA);
+          for (let sIdx = 0; sIdx < 4; sIdx++) {
+            const s = _chariotSpheresA[sIdx];
             const sep = this.separateCirclePair(ai.x, ai.z, ri, s.x, s.z, s.r, 0.85);
             if (sep.collided) {
               ai.x = sep.ax;
@@ -4111,7 +4220,9 @@ export class RamayanaWorldEngine {
         for (let cIdx = 0; cIdx < this.chariots.length; cIdx++) {
           const ch = this.chariots[cIdx];
           if (Math.abs(ei.y - ch.y) > 3.5) continue;
-          for (const s of this.getChariotCompoundSpheres(ch)) {
+          this.fillChariotCompoundSpheres(ch, _chariotSpheresA);
+          for (let sIdx = 0; sIdx < 4; sIdx++) {
+            const s = _chariotSpheresA[sIdx];
             const sep = this.separateCirclePair(ei.x, ei.z, ri, s.x, s.z, s.r, 1.0);
             if (sep.collided) {
               ei.x = sep.ax;
@@ -4151,7 +4262,9 @@ export class RamayanaWorldEngine {
         if (ci.seated) continue;
         for (let cIdx = 0; cIdx < this.chariots.length; cIdx++) {
           const ch = this.chariots[cIdx];
-          for (const s of this.getChariotCompoundSpheres(ch)) {
+          this.fillChariotCompoundSpheres(ch, _chariotSpheresA);
+          for (let sIdx = 0; sIdx < 4; sIdx++) {
+            const s = _chariotSpheresA[sIdx];
             const sep = this.separateCirclePair(
               ci.x,
               ci.z,
@@ -4240,7 +4353,8 @@ export class RamayanaWorldEngine {
       this.syncChariotTerrainSupport(ch, 0.016);
     }
 
-    for (const e of this.enemies) {
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
       if (!e.alive) continue;
       const er = e.isCommander ? 0.92 : 0.68;
       const res = this.resolveStaticColliders(e.x, e.z, er, e.y, true, false, false);
@@ -4249,7 +4363,8 @@ export class RamayanaWorldEngine {
       e.y = groundHeightAt(e.x, e.z);
     }
 
-    for (const c of this.citizens) {
+    for (let i = 0; i < this.citizens.length; i++) {
+      const c = this.citizens[i];
       if (c.seated) continue;
       const res = this.resolveStaticColliders(
         c.x,
@@ -4296,8 +4411,8 @@ export class RamayanaWorldEngine {
     box: BoxCollider
   ): number | null {
     const rotY = box.rotY ?? 0;
-    const cosR = Math.cos(rotY);
-    const sinR = Math.sin(rotY);
+    const cosR = rotY === 0 ? 1 : Math.cos(rotY);
+    const sinR = rotY === 0 ? 0 : Math.sin(rotY);
 
     const adx = ax - box.x;
     const adz = az - box.z;
@@ -4313,30 +4428,63 @@ export class RamayanaWorldEngine {
     const minY = baseY;
     const maxY = baseY + box.height;
 
-    const dCoords = [blx - alx, by - ay, blz - alz];
-    const oCoords = [alx, ay, alz];
-    const minB = [-box.halfW, minY, -box.halfD];
-    const maxB = [box.halfW, maxY, box.halfD];
-
     let tMin = 0;
     let tMax = 1;
-    for (let k = 0; k < 3; k++) {
-      if (Math.abs(dCoords[k]) < 1e-6) {
-        if (oCoords[k] < minB[k] || oCoords[k] > maxB[k]) return null;
-      } else {
-        const inv = 1 / dCoords[k];
-        let t1 = (minB[k] - oCoords[k]) * inv;
-        let t2 = (maxB[k] - oCoords[k]) * inv;
-        if (t1 > t2) {
-          const tmp = t1;
-          t1 = t2;
-          t2 = tmp;
-        }
-        tMin = Math.max(tMin, t1);
-        tMax = Math.min(tMax, t2);
-        if (tMin > tMax) return null;
+
+    // X slab
+    const dx = blx - alx;
+    if (Math.abs(dx) < 1e-6) {
+      if (alx < -box.halfW || alx > box.halfW) return null;
+    } else {
+      const inv = 1 / dx;
+      let t1 = (-box.halfW - alx) * inv;
+      let t2 = (box.halfW - alx) * inv;
+      if (t1 > t2) {
+        const tmp = t1;
+        t1 = t2;
+        t2 = tmp;
       }
+      if (t1 > tMin) tMin = t1;
+      if (t2 < tMax) tMax = t2;
+      if (tMin > tMax) return null;
     }
+
+    // Y slab
+    const dy = by - ay;
+    if (Math.abs(dy) < 1e-6) {
+      if (ay < minY || ay > maxY) return null;
+    } else {
+      const inv = 1 / dy;
+      let t1 = (minY - ay) * inv;
+      let t2 = (maxY - ay) * inv;
+      if (t1 > t2) {
+        const tmp = t1;
+        t1 = t2;
+        t2 = tmp;
+      }
+      if (t1 > tMin) tMin = t1;
+      if (t2 < tMax) tMax = t2;
+      if (tMin > tMax) return null;
+    }
+
+    // Z slab
+    const dz = blz - alz;
+    if (Math.abs(dz) < 1e-6) {
+      if (alz < -box.halfD || alz > box.halfD) return null;
+    } else {
+      const inv = 1 / dz;
+      let t1 = (-box.halfD - alz) * inv;
+      let t2 = (box.halfD - alz) * inv;
+      if (t1 > t2) {
+        const tmp = t1;
+        t1 = t2;
+        t2 = tmp;
+      }
+      if (t1 > tMin) tMin = t1;
+      if (t2 < tMax) tMax = t2;
+      if (tMin > tMax) return null;
+    }
+
     return tMin >= 0 && tMin <= 1 ? tMin : null;
   }
 
@@ -4377,16 +4525,21 @@ export class RamayanaWorldEngine {
     index: number;
     label: string;
   } | null {
-    let best: { kind: 'RATHA' | 'HORSE' | 'ELEPHANT'; index: number; label: string } | null = null;
-    let bestDist = Infinity;
+    let found = false;
+    let bestDistSq = Infinity;
 
     for (let i = 0; i < this.chariots.length; i++) {
       const c = this.chariots[i];
       if (Math.abs(c.y - this.playerY) > 3.5) continue;
-      const d = Math.hypot(c.x - this.playerX, c.z - this.playerZ);
-      if (d < 4.8 && d < bestDist) {
-        bestDist = d;
-        best = { kind: 'RATHA', index: i, label: 'Royal Ratha' };
+      const dx = c.x - this.playerX;
+      const dz = c.z - this.playerZ;
+      const dSq = dx * dx + dz * dz;
+      if (dSq < 4.8 * 4.8 && dSq < bestDistSq) {
+        bestDistSq = dSq;
+        found = true;
+        _nearestMountOut.kind = 'RATHA';
+        _nearestMountOut.index = i;
+        _nearestMountOut.label = 'Royal Ratha';
       }
     }
 
@@ -4394,13 +4547,18 @@ export class RamayanaWorldEngine {
       const a = this.animals[i];
       if (Math.abs(a.y - this.playerY) > 3.5) continue;
       const reach = a.kind === 'ELEPHANT' ? 4.6 : 4.0;
-      const d = Math.hypot(a.x - this.playerX, a.z - this.playerZ);
-      if (d < reach && d < bestDist) {
-        bestDist = d;
-        best = { kind: a.kind, index: i, label: a.label };
+      const dx = a.x - this.playerX;
+      const dz = a.z - this.playerZ;
+      const dSq = dx * dx + dz * dz;
+      if (dSq < reach * reach && dSq < bestDistSq) {
+        bestDistSq = dSq;
+        found = true;
+        _nearestMountOut.kind = a.kind;
+        _nearestMountOut.index = i;
+        _nearestMountOut.label = a.label;
       }
     }
-    return best;
+    return found ? _nearestMountOut : null;
   }
 
   private getThroneSeatAnchor(): { x: number; y: number; z: number } {
@@ -4570,12 +4728,15 @@ export class RamayanaWorldEngine {
     );
 
     // Dynamic warm bounce/lamp illumination responding to nearest Deepastambha flame
-    let nearestLampDist = 999;
+    let nearestLampDistSq = 999 * 999;
     for (let i = 0; i < this.lampCoords.length; i++) {
       const [lx, lz] = this.lampCoords[i];
-      const d = Math.hypot(lx - this.playerX, lz - this.playerZ);
-      if (d < nearestLampDist) nearestLampDist = d;
+      const dx = lx - this.playerX;
+      const dz = lz - this.playerZ;
+      const dSq = dx * dx + dz * dz;
+      if (dSq < nearestLampDistSq) nearestLampDistSq = dSq;
     }
+    const nearestLampDist = Math.sqrt(nearestLampDistSq);
     const lampProximity = Math.max(0, 1 - nearestLampDist / 16);
     this.heroFillLight.position.set(
       this.playerX + Math.sin(viewYaw + 0.6) * 2.2,
@@ -4722,8 +4883,13 @@ export class RamayanaWorldEngine {
     }
 
     // Clear chariots & animals first, then apply to active mount & Lord Ram
-    this.chariots.forEach((c) => applyObj(c.rig.root, c.rig.contactShadow, false));
-    this.animals.forEach((a) => applyObj(a.horseRig ? a.horseRig.group : a.elephantRig!.group, undefined, false));
+    for (let i = 0; i < this.chariots.length; i++) {
+      applyObj(this.chariots[i].rig.root, this.chariots[i].rig.contactShadow, false);
+    }
+    for (let i = 0; i < this.animals.length; i++) {
+      const a = this.animals[i];
+      applyObj(a.horseRig ? a.horseRig.group : a.elephantRig!.group, undefined, false);
+    }
     if (enabled && this.mountedChariotIndex !== null) {
       const ch = this.chariots[this.mountedChariotIndex];
       applyObj(ch.rig.root, ch.rig.contactShadow, true);
@@ -5026,37 +5192,20 @@ export class RamayanaWorldEngine {
       // For each leg phase p in [0, 2*PI):
       //   p in [0, PI):   STANCE -> planted sole tracks z = halfStep * (1 - 2*u), y = 0 (strict -v match!)
       //   p in [PI, 2PI): SWING  -> lifted foot arcs  z = -halfStep * cos(PI*u), y = liftH * sin(PI*u)^0.85
-      const TWO_PI = Math.PI * 2;
       const halfStepBase = sprint ? 0.58 : isRakshasa ? 0.44 : 0.44;
       const halfStep = halfStepBase * THREE.MathUtils.clamp(moveIntensity, 0.15, 1.0);
       const liftH = (sprint ? 0.28 : 0.19) * THREE.MathUtils.clamp(moveIntensity, 0.2, 1.0);
 
-      const evalFootTarget = (legPhase: number) => {
-        const p = ((legPhase % TWO_PI) + TWO_PI) % TWO_PI;
-        if (p < Math.PI) {
-          const u = p / Math.PI;
-          const z = halfStep * (1 - 2 * u);
-          const ankleRoll = THREE.MathUtils.lerp(-0.08, 0.14, u);
-          return { z, yLift: 0, isStance: true, ankleRoll };
-        } else {
-          const u = (p - Math.PI) / Math.PI;
-          const z = -halfStep * Math.cos(Math.PI * u);
-          const yLift = liftH * Math.pow(Math.sin(Math.PI * u), 0.85);
-          const ankleRoll = Math.sin(u * Math.PI) * 0.24 - 0.1;
-          return { z, yLift, isStance: false, ankleRoll };
-        }
-      };
-
-      const footL = evalFootTarget(phase);
-      const footR = evalFootTarget(phase + Math.PI);
+      evalFootTargetInto(phase, halfStep, liftH, _footL);
+      evalFootTargetInto(phase + Math.PI, halfStep, liftH, _footR);
 
       // Compute minimum vertical hip height so stance leg(s) reach yLift == 0 without hyperextension
       const maxChord = fullReach * 0.988 - crouchDrop * 0.65;
-      const reqL = footL.isStance
-        ? Math.sqrt(Math.max(0.16, maxChord * maxChord - footL.z * footL.z))
+      const reqL = _footL.isStance
+        ? Math.sqrt(Math.max(0.16, maxChord * maxChord - _footL.z * _footL.z))
         : maxChord;
-      const reqR = footR.isStance
-        ? Math.sqrt(Math.max(0.16, maxChord * maxChord - footR.z * footR.z))
+      const reqR = _footR.isStance
+        ? Math.sqrt(Math.max(0.16, maxChord * maxChord - _footR.z * _footR.z))
         : maxChord;
       const effReach = Math.min(reqL, reqR);
       const pelvisDrop = fullReach - effReach;
@@ -5064,8 +5213,8 @@ export class RamayanaWorldEngine {
       tHipY = baseHipY - pelvisDrop - impactDip;
 
       const hipClearance = Math.max(0.28, tHipY - soleOffset);
-      solveTwoBoneLegIK(footL.z, footL.yLift - hipClearance, thighL, shinL, _ikScratchL);
-      solveTwoBoneLegIK(footR.z, footR.yLift - hipClearance, thighL, shinL, _ikScratchR);
+      solveTwoBoneLegIK(_footL.z, _footL.yLift - hipClearance, thighL, shinL, _ikScratchL);
+      solveTwoBoneLegIK(_footR.z, _footR.yLift - hipClearance, thighL, shinL, _ikScratchR);
 
       tLeftHip = _ikScratchL.hipPitch;
       tLeftKnee = _ikScratchL.kneeFlex;
@@ -5073,12 +5222,12 @@ export class RamayanaWorldEngine {
       tRightKnee = _ikScratchR.kneeFlex;
 
       // Exact stance sole ground-locking + natural swing toe-off/heel-strike articulation
-      tLeftAnkle = footL.isStance
-        ? THREE.MathUtils.clamp(-(tLeftHip + tLeftKnee) + footL.ankleRoll * 0.12, -0.58, 0.44)
-        : THREE.MathUtils.clamp(-(tLeftHip + tLeftKnee) + footL.ankleRoll, -0.58, 0.44);
-      tRightAnkle = footR.isStance
-        ? THREE.MathUtils.clamp(-(tRightHip + tRightKnee) + footR.ankleRoll * 0.12, -0.58, 0.44)
-        : THREE.MathUtils.clamp(-(tRightHip + tRightKnee) + footR.ankleRoll, -0.58, 0.44);
+      tLeftAnkle = _footL.isStance
+        ? THREE.MathUtils.clamp(-(tLeftHip + tLeftKnee) + _footL.ankleRoll * 0.12, -0.58, 0.44)
+        : THREE.MathUtils.clamp(-(tLeftHip + tLeftKnee) + _footL.ankleRoll, -0.58, 0.44);
+      tRightAnkle = _footR.isStance
+        ? THREE.MathUtils.clamp(-(tRightHip + tRightKnee) + _footR.ankleRoll * 0.12, -0.58, 0.44)
+        : THREE.MathUtils.clamp(-(tRightHip + tRightKnee) + _footR.ankleRoll, -0.58, 0.44);
 
       const armAmp = (sprint ? 0.66 : 0.44) * moveIntensity;
       const rightShoulder = Math.sin(phase) * armAmp;
@@ -5172,6 +5321,7 @@ export class RamayanaWorldEngine {
   }
 
   private stepSimulation(dt: number, elapsed: number): void {
+    this.simFrameCounter++;
     // 0. Animate authentic torch flame tongues
     if (this.torchFlamesOuter && this.torchFlamesCore && this.torchFlameAnchors.length > 0) {
       for (let i = 0; i < this.torchFlameAnchors.length; i++) {
@@ -5281,10 +5431,15 @@ export class RamayanaWorldEngine {
       }
     }
 
-    // Keep all idle & parked chariot horses alive with idle breathing, ear flicks & tail swishes
+    // Keep all idle & parked chariot horses alive with distance-LOD idle breathing, ear flicks & tail swishes
+    const pxIdle = this.playerX;
+    const pzIdle = this.playerZ;
     for (let i = 0; i < this.chariots.length; i++) {
       if (i === this.mountedChariotIndex) continue;
       const ch = this.chariots[i];
+      const dSq = (ch.x - pxIdle) * (ch.x - pxIdle) + (ch.z - pzIdle) * (ch.z - pzIdle);
+      if (dSq > 8100) continue;
+      if (dSq > 2500 && ((i + this.simFrameCounter) & 3) !== 0) continue;
       for (let sIdx = 0; sIdx < ch.rig.steeds.length; sIdx++) {
         this.animateRoyalHorseRig(
           ch.rig.steeds[sIdx],
@@ -5332,13 +5487,26 @@ export class RamayanaWorldEngine {
         this.setStealthMode(wasStealth);
         this.cameraManualHold = 0;
         this.camChariotLockTimer = 0;
-        const dismountCandidates = [
-          [ch.x + Math.cos(ch.yaw) * 2.85, ch.z - Math.sin(ch.yaw) * 2.85],
-          [ch.x - Math.cos(ch.yaw) * 2.85, ch.z + Math.sin(ch.yaw) * 2.85],
-          [ch.x - Math.sin(ch.yaw) * 2.95, ch.z - Math.cos(ch.yaw) * 2.95],
-        ];
-        const chosen = dismountCandidates.find(([dx, dz]) => !isInRiverWater(dx, dz)) ?? dismountCandidates[0];
-        const safePos = this.resolveStaticColliders(chosen[0], chosen[1], 0.58, ch.y);
+        const sinChY = Math.sin(ch.yaw);
+        const cosChY = Math.cos(ch.yaw);
+        let chosenX = ch.x + cosChY * 2.85;
+        let chosenZ = ch.z - sinChY * 2.85;
+        if (isInRiverWater(chosenX, chosenZ)) {
+          const altX = ch.x - cosChY * 2.85;
+          const altZ = ch.z + sinChY * 2.85;
+          if (!isInRiverWater(altX, altZ)) {
+            chosenX = altX;
+            chosenZ = altZ;
+          } else {
+            const backX = ch.x - sinChY * 2.95;
+            const backZ = ch.z - cosChY * 2.95;
+            if (!isInRiverWater(backX, backZ)) {
+              chosenX = backX;
+              chosenZ = backZ;
+            }
+          }
+        }
+        const safePos = this.resolveStaticColliders(chosenX, chosenZ, 0.58, ch.y);
         this.playerX = safePos.x;
         this.playerZ = safePos.z;
         this.playerY = this.surfaceHeightAt(this.playerX, this.playerZ, ch.y);
@@ -5964,7 +6132,8 @@ export class RamayanaWorldEngine {
       const segDz = bz - az;
       const segLenSq = segDx * segDx + segDy * segDy + segDz * segDz;
 
-      for (const e of this.enemies) {
+      for (let eIdx = 0; eIdx < this.enemies.length; eIdx++) {
+        const e = this.enemies[eIdx];
         if (!e.alive) continue;
         const scale = e.isCommander ? 1.38 : 1.06;
         const capR = 0.68 * scale;
@@ -5984,8 +6153,9 @@ export class RamayanaWorldEngine {
         const px = ax + segDx * t;
         const py = ay + segDy * t;
         const pz = az + segDz * t;
-        const dXZ = Math.hypot(px - e.x, pz - e.z);
-        if (dXZ <= capR && py >= minY - 0.25 && py <= maxY + 0.25) {
+        const dEx = px - e.x;
+        const dEz = pz - e.z;
+        if (dEx * dEx + dEz * dEz <= capR * capR && py >= minY - 0.25 && py <= maxY + 0.25) {
           if (t < bestT) {
             bestT = t;
             hitEnemy = e;
@@ -5994,8 +6164,17 @@ export class RamayanaWorldEngine {
         }
       }
 
-      // B. Continuous Ray-Segment vs Static OBBs (Temples, Pavilions, Bridge Rails)
-      for (let c = 0; c < this.colliders.length; c++) {
+      // B & C. Continuous Ray-Segment vs Spatial-Hashed Static OBBs & Cylinders
+      const grid = this.colliderGrid;
+      grid.queryAABB(
+        Math.min(ax, bx) - 0.1,
+        Math.max(ax, bx) + 0.1,
+        Math.min(az, bz) - 0.1,
+        Math.max(az, bz) + 0.1
+      );
+      const outB = grid.outBoxes;
+      const outBLen = grid.outBoxesLength;
+      for (let c = 0; c < outBLen; c++) {
         const tHit = this.raySegmentIntersectsOBB(
           ax,
           ay,
@@ -6003,7 +6182,7 @@ export class RamayanaWorldEngine {
           bx,
           by,
           bz,
-          this.colliders[c]
+          this.colliders[outB[c]]
         );
         if (tHit !== null && tHit < bestT) {
           bestT = tHit;
@@ -6012,10 +6191,11 @@ export class RamayanaWorldEngine {
         }
       }
 
-      // C. Continuous Ray-Segment vs Cylinders (Pillars, Trees, Lamps, Rocks)
       if (segLenSq > 1e-7) {
-        for (let c = 0; c < this.circleColliders.length; c++) {
-          const cc = this.circleColliders[c];
+        const outC = grid.outCircles;
+        const outCLen = grid.outCirclesLength;
+        for (let c = 0; c < outCLen; c++) {
+          const cc = this.circleColliders[outC[c]];
           const baseY = cc.baseY ?? 0;
           const tHit = this.raySegmentIntersectsCylinder(
             ax,
@@ -6067,8 +6247,12 @@ export class RamayanaWorldEngine {
         if (hitEnemy) {
           if (p.isChakra) {
             this.spawnBlast(hitX, hitY, hitZ, 0xff5a12);
-            for (const other of this.enemies) {
-              if (other.alive && Math.hypot(other.x - hitX, other.z - hitZ) < 10.0) {
+            for (let eIdx = 0; eIdx < this.enemies.length; eIdx++) {
+              const other = this.enemies[eIdx];
+              if (!other.alive) continue;
+              const odx = other.x - hitX;
+              const odz = other.z - hitZ;
+              if (odx * odx + odz * odz < 100.0) {
                 this.damageEnemy(other, Math.round(95 * dmgMult));
               }
             }
@@ -6080,8 +6264,12 @@ export class RamayanaWorldEngine {
         } else if (hitEnvironment) {
           if (p.isChakra) {
             this.spawnBlast(hitX, hitY, hitZ, 0xff5a12);
-            for (const other of this.enemies) {
-              if (other.alive && Math.hypot(other.x - hitX, other.z - hitZ) < 10.0) {
+            for (let eIdx = 0; eIdx < this.enemies.length; eIdx++) {
+              const other = this.enemies[eIdx];
+              if (!other.alive) continue;
+              const odx = other.x - hitX;
+              const odz = other.z - hitZ;
+              if (odx * odx + odz * odz < 100.0) {
                 this.damageEnemy(other, Math.round(85 * dmgMult));
               }
             }
@@ -6109,8 +6297,12 @@ export class RamayanaWorldEngine {
       if (p.life <= 0) {
         if (p.isChakra) {
           this.spawnBlast(p.x, Math.max(p.y, groundHeightAt(p.x, p.z) + 0.5), p.z, 0xff5a12);
-          for (const other of this.enemies) {
-            if (other.alive && Math.hypot(other.x - p.x, other.z - p.z) < 10.0) {
+          for (let eIdx = 0; eIdx < this.enemies.length; eIdx++) {
+            const other = this.enemies[eIdx];
+            if (!other.alive) continue;
+            const odx = other.x - p.x;
+            const odz = other.z - p.z;
+            if (odx * odx + odz * odz < 100.0) {
               this.damageEnemy(other, p.stealthAmbush ? 160 : 85);
             }
           }
@@ -6162,14 +6354,7 @@ export class RamayanaWorldEngine {
         240
       );
       if (!isInRiverWater(rx, rz)) {
-        const variants: DemonVariant[] = [
-          'BOAR_DEMON',
-          'RABBIT_DEMON',
-          'BRUTE_HUMAN',
-          'SORCERER_HUMAN',
-          'SHADOW_GHOST',
-        ];
-        const v = variants[Math.floor(Math.random() * variants.length)];
+        const v = DEMON_VARIANTS[Math.floor(Math.random() * DEMON_VARIANTS.length)];
         this.spawnEnemy(rx, rz, this.wantedLevel >= 4 && Math.random() < 0.22, null, v);
       }
     }
@@ -6467,8 +6652,8 @@ export class RamayanaWorldEngine {
             // Fire 3-orb green curse fan OR place Curse Sigil trap beneath player
             if (Math.random() < 0.55) {
               const baseAng = Math.atan2(dx, dz);
-              [-0.24, 0, 0.24].forEach((offsetAng) => {
-                const a = baseAng + offsetAng;
+              for (let oi = 0; oi < _curseOffsets.length; oi++) {
+                const a = baseAng + _curseOffsets[oi];
                 this.spawnEnemyProjectile(
                   e.x,
                   e.y + 1.45,
@@ -6480,7 +6665,7 @@ export class RamayanaWorldEngine {
                   8,
                   0
                 );
-              });
+              }
             } else {
               this.spawnGroundHazard('CURSE_SIGIL', this.playerX, this.playerZ, 3.2, 13, 1.25);
             }
@@ -6546,7 +6731,10 @@ export class RamayanaWorldEngine {
     }
 
     let allCouncilSeated = true;
-    for (const c of this.citizens) {
+    const citPx = this.playerX;
+    const citPz = this.playerZ;
+    for (let ci = 0; ci < this.citizens.length; ci++) {
+      const c = this.citizens[ci];
       if (this.ascensionActive && c.courtSeat) {
         if (c.seated) {
           // Hold clean seated posture right atop the assigned Sabha cushion (top = sabhaBaseY + 0.95m)
@@ -6622,19 +6810,25 @@ export class RamayanaWorldEngine {
         const curSurfY = this.surfaceHeightAt(c.x, c.z, c.y);
         const stepNx = c.x + dirX * speed * dt;
         const stepNz = c.z + dirZ * speed * dt;
-        let res = this.moveSweptWithStaticCCD(c.x, c.z, stepNx, stepNz, 0.46, curSurfY, false, false);
-        if (Math.hypot(res.x - c.x, res.z - c.z) < speed * dt * 0.2) {
-          // Tangential obstacle slide along perpendicular axis while strictly honoring static colliders
+        const resMain = this.moveSweptWithStaticCCD(c.x, c.z, stepNx, stepNz, 0.46, curSurfY, false, false);
+        let chosenX = resMain.x;
+        let chosenZ = resMain.z;
+        const mDx = chosenX - c.x;
+        const mDz = chosenZ - c.z;
+        if (mDx * mDx + mDz * mDz < (speed * dt * 0.2) * (speed * dt * 0.2)) {
+          // Tangential obstacle slide along perpendicular axis (copy slideA before slideB overwrites _sweptRes)
           const slideA = this.moveSweptWithStaticCCD(
             c.x,
             c.z,
-            c.x + -dirZ * speed * dt,
+            c.x - dirZ * speed * dt,
             c.z + dirX * speed * dt,
             0.46,
             curSurfY,
             false,
             false
           );
+          const sax = slideA.x;
+          const saz = slideA.z;
           const slideB = this.moveSweptWithStaticCCD(
             c.x,
             c.z,
@@ -6645,13 +6839,21 @@ export class RamayanaWorldEngine {
             false,
             false
           );
-          const distA = Math.hypot(tgtX - slideA.x, tgtZ - slideA.z);
-          const distB = Math.hypot(tgtX - slideB.x, tgtZ - slideB.z);
-          res = distA <= distB ? slideA : slideB;
+          const sbx = slideB.x;
+          const sbz = slideB.z;
+          const distASq = (tgtX - sax) * (tgtX - sax) + (tgtZ - saz) * (tgtZ - saz);
+          const distBSq = (tgtX - sbx) * (tgtX - sbx) + (tgtZ - sbz) * (tgtZ - sbz);
+          if (distASq <= distBSq) {
+            chosenX = sax;
+            chosenZ = saz;
+          } else {
+            chosenX = sbx;
+            chosenZ = sbz;
+          }
         }
-        const movedDist = Math.hypot(res.x - c.x, res.z - c.z);
-        c.x = res.x;
-        c.z = res.z;
+        const movedDist = Math.hypot(chosenX - c.x, chosenZ - c.z);
+        c.x = chosenX;
+        c.z = chosenZ;
         c.y = this.surfaceHeightAt(c.x, c.z, c.y);
         c.walkPhase += (movedDist / 2.2) * Math.PI * 2;
         this.applyArticulatedLocomotion(
@@ -6667,7 +6869,12 @@ export class RamayanaWorldEngine {
           dt
         );
       } else {
-        // Strict Baked Navigation Mesh Patrol + Voluntary Water Entry for Swimmer Devotees
+        // Strict Baked Navigation Mesh Patrol + Distance-LOD Kinematics + Voluntary Water Entry
+        const citDistSq = (c.x - citPx) * (c.x - citPx) + (c.z - citPz) * (c.z - citPz);
+        if (citDistSq > 11025) {
+          // Far beyond crisp shadow/fog draw band (>105m): skip offscreen citizen ticks
+          continue;
+        }
         c.patrolTimer -= dt;
         if (!c.navQueue || c.navQueue.length === 0 || c.patrolTimer <= 0) {
           const wantWater = c.canSwim && !c.isSwimming && Math.random() < 0.72;
@@ -6684,9 +6891,13 @@ export class RamayanaWorldEngine {
         }
 
         const wp = c.navQueue[0];
-        if (wp && Math.hypot(wp.x - c.x, wp.z - c.z) < 0.85) {
-          c.navQueue.shift();
-          c.patrolTimer = Math.min(c.patrolTimer, 0.2);
+        if (wp) {
+          const wpdx = wp.x - c.x;
+          const wpdz = wp.z - c.z;
+          if (wpdx * wpdx + wpdz * wpdz < 0.7225) {
+            c.navQueue.shift();
+            c.patrolTimer = Math.min(c.patrolTimer, 0.2);
+          }
         }
 
         const tgtX = c.navQueue[0]?.x ?? c.homeX;
@@ -6728,29 +6939,34 @@ export class RamayanaWorldEngine {
 
         const cGroundY = this.surfaceHeightAt(c.x, c.z, c.y);
         const cWaterSurf = c.canSwim ? waterSurfaceAt(c.x, c.z) : null;
+        const updateRigKinematics = citDistSq <= 3025 || ((ci + this.simFrameCounter) & 3) === 0;
         if (cWaterSurf !== null && cWaterSurf - cGroundY > 0.95) {
           c.isSwimming = true;
           const swimTargetY = cWaterSurf - 1.15 + Math.sin(elapsed * 2.2 + c.walkPhase) * 0.04;
           c.y = THREE.MathUtils.damp(c.y, Math.max(cGroundY + 0.1, swimTargetY), 6.0, dt);
           c.walkPhase += Math.max(dt * 3.0, (movedDist / 1.8) * Math.PI * 2);
-          this.applySwimmingPose(c.rig, c.walkPhase, 0.85, elapsed);
+          if (updateRigKinematics) {
+            this.applySwimmingPose(c.rig, c.walkPhase, 0.85, elapsed);
+          }
         } else {
           c.isSwimming = false;
           c.rig.torso.rotation.x = 0;
           c.y = cGroundY;
           c.walkPhase += (movedDist / 1.68) * Math.PI * 2;
-          this.applyArticulatedLocomotion(
-            c.rig,
-            c.walkPhase,
-            THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 2.2, 0, 1),
-            false,
-            true,
-            false,
-            false,
-            0.875,
-            elapsed,
-            dt
-          );
+          if (updateRigKinematics) {
+            this.applyArticulatedLocomotion(
+              c.rig,
+              c.walkPhase,
+              THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 2.2, 0, 1),
+              false,
+              true,
+              false,
+              false,
+              0.875,
+              elapsed,
+              dt
+            );
+          }
         }
       }
     }
@@ -7133,6 +7349,9 @@ export class RamayanaWorldEngine {
   }
 
   private stepVolcanicAtmosphere(dt: number): void {
+    if (this.mode === 'PLAYING' && this.playerX < DEMON_ZONE_MIN_X - 750) {
+      return;
+    }
     if (this.volcanicBombMesh && this.volcanoCraters.length > 0) {
       for (let i = 0; i < this.volcanicBombs.length; i++) {
         const b = this.volcanicBombs[i];
@@ -7182,6 +7401,10 @@ export class RamayanaWorldEngine {
   }
 
   private stepAquaticEcosystem(dt: number, elapsed: number): void {
+    // Skip updates when far inside Demon Badlands well beyond horizon fog of Sarayu River (x=128) & Stepwell (x=-128)
+    if (this.playerX > 850) {
+      return;
+    }
     // 1. 5 Dynamically Emerging Giant Turtles swimming down & surfacing
     for (let i = 0; i < this.riverTurtles.length; i++) {
       const t = this.riverTurtles[i];
@@ -7319,51 +7542,74 @@ export class RamayanaWorldEngine {
     if (this.lampBulbMat) {
       this.lampBulbMat.emissiveIntensity = THREE.MathUtils.lerp(0.35, 3.2, nightGlow);
     }
-    if (nightGlow <= 0.01 || this.torchFlameAnchors.length === 0) {
-      for (let i = 0; i < this.nightLampLights.length; i++) {
+    const maxLamps = this.nightLampLights.length;
+    if (nightGlow <= 0.01 || this.torchFlameAnchors.length === 0 || maxLamps === 0) {
+      for (let i = 0; i < maxLamps; i++) {
         this.nightLampLights[i].intensity = 0;
       }
       this.torchShadowLight.intensity = 0;
+      this.torchShadowLight.castShadow = false;
       return;
     }
 
-    this.activeLampPoolIndices.length = 0;
+    let bestCount = 0;
     const fx = this.playerX;
     const fz = this.playerZ;
+    const maxRangeSq = 92 * 92;
+
     for (let i = 0; i < this.torchFlameAnchors.length; i++) {
       const a = this.torchFlameAnchors[i];
       const dx = a.x - fx;
       const dz = a.z - fz;
       const distSq = dx * dx + dz * dz;
-      if (distSq < 92 * 92) {
-        this.activeLampPoolIndices.push({ idx: i, distSq });
+      if (distSq >= maxRangeSq) continue;
+
+      if (bestCount < maxLamps) {
+        let pos = bestCount;
+        while (pos > 0 && _topLampDistSq[pos - 1] > distSq) {
+          _topLampDistSq[pos] = _topLampDistSq[pos - 1];
+          _topLampIndices[pos] = _topLampIndices[pos - 1];
+          pos--;
+        }
+        _topLampDistSq[pos] = distSq;
+        _topLampIndices[pos] = i;
+        bestCount++;
+      } else if (distSq < _topLampDistSq[maxLamps - 1]) {
+        let pos = maxLamps - 1;
+        while (pos > 0 && _topLampDistSq[pos - 1] > distSq) {
+          _topLampDistSq[pos] = _topLampDistSq[pos - 1];
+          _topLampIndices[pos] = _topLampIndices[pos - 1];
+          pos--;
+        }
+        _topLampDistSq[pos] = distSq;
+        _topLampIndices[pos] = i;
       }
     }
-    this.activeLampPoolIndices.sort((a, b) => a.distSq - b.distSq);
 
-    for (let i = 0; i < this.nightLampLights.length; i++) {
+    for (let i = 0; i < maxLamps; i++) {
       const light = this.nightLampLights[i];
-      const pick = this.activeLampPoolIndices[i];
-      if (!pick) {
+      if (i >= bestCount) {
         light.intensity = 0;
         continue;
       }
-      const anchor = this.torchFlameAnchors[pick.idx];
+      const anchor = this.torchFlameAnchors[_topLampIndices[i]];
       const flicker =
         1.0 +
         Math.sin(elapsed * 9.5 + anchor.phase) * 0.1 +
         Math.cos(elapsed * 15.2 + anchor.phase * 1.4) * 0.06;
-      const distFade = 1.0 - THREE.MathUtils.smoothstep(Math.sqrt(pick.distSq), 46, 88);
+      const distFade = 1.0 - THREE.MathUtils.smoothstep(Math.sqrt(_topLampDistSq[i]), 46, 88);
       light.position.set(anchor.x, anchor.y + 0.35, anchor.z);
       light.intensity = 11.5 * nightGlow * flicker * distFade;
       if (i === 0) {
         this.torchShadowLight.position.set(anchor.x, anchor.y + 0.45, anchor.z);
         this.torchShadowLight.target.position.set(anchor.x, anchor.y - 4.0, anchor.z + 0.25);
         this.torchShadowLight.intensity = 16.0 * nightGlow * flicker * distFade;
+        this.torchShadowLight.castShadow = !this.isSoftwareGl;
       }
     }
-    if (!this.activeLampPoolIndices[0]) {
+    if (bestCount === 0) {
       this.torchShadowLight.intensity = 0;
+      this.torchShadowLight.castShadow = false;
     }
   }
 
@@ -7516,20 +7762,21 @@ export class RamayanaWorldEngine {
     sh.zero();
     _tmpSkySample.copy(_tmpSkyZ).multiplyScalar(THREE.MathUtils.lerp(0.55, 0.16, this.nightFactor));
     _tmpHorizonSample.copy(_tmpSkyH).multiplyScalar(THREE.MathUtils.lerp(0.45, 0.12, this.nightFactor));
-    sh.fromArray([
+    sh.coefficients[0].set(
       _tmpHorizonSample.r + _tmpBounce.r * 0.4,
       _tmpHorizonSample.g + _tmpBounce.g * 0.4,
-      _tmpHorizonSample.b + _tmpBounce.b * 0.4,
-      0, 0, 0,
+      _tmpHorizonSample.b + _tmpBounce.b * 0.4
+    );
+    sh.coefficients[2].set(
       _tmpSkySample.r - _tmpBounce.r * 0.65,
       _tmpSkySample.g - _tmpBounce.g * 0.65,
-      _tmpSkySample.b - _tmpBounce.b * 0.65,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,
+      _tmpSkySample.b - _tmpBounce.b * 0.65
+    );
+    sh.coefficients[6].set(
       (_tmpSkySample.r + _tmpBounce.r) * 0.25,
       (_tmpSkySample.g + _tmpBounce.g) * 0.25,
-      (_tmpSkySample.b + _tmpBounce.b) * 0.25,
-      0, 0, 0, 0, 0, 0,
-    ]);
+      (_tmpSkySample.b + _tmpBounce.b) * 0.25
+    );
     this.giLightProbe.intensity = THREE.MathUtils.lerp(0.72, 0.24, this.nightFactor);
 
     this.hemiLight.color
@@ -7587,10 +7834,12 @@ export class RamayanaWorldEngine {
       : 'NONE';
 
     const blips: RadarBlip[] = [];
-    this.chariots.forEach((c) => {
+    for (let i = 0; i < this.chariots.length; i++) {
+      const c = this.chariots[i];
       blips.push({ id: c.id, kind: 'RATHA', x: c.x, z: c.z });
-    });
-    this.enemies.forEach((e) => {
+    }
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
       if (e.alive) {
         blips.push({
           id: e.id,
@@ -7599,7 +7848,7 @@ export class RamayanaWorldEngine {
           z: e.z,
         });
       }
-    });
+    }
     if (activeMission) {
       blips.push({
         id: activeMission.id,
@@ -7784,7 +8033,9 @@ export class RamayanaWorldEngine {
     if (this.disposed) return;
     const width = this.container.clientWidth || window.innerWidth;
     const height = this.container.clientHeight || window.innerHeight;
-    const nativePixelRatio = this.isSoftwareGl ? 1 : Math.max(1, window.devicePixelRatio || 1);
+    const nativePixelRatio = this.isSoftwareGl
+      ? 1
+      : Math.min(2, Math.max(1, window.devicePixelRatio || 1));
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setPixelRatio(nativePixelRatio);

@@ -59,6 +59,19 @@ function configureColorTexture(
   return tex;
 }
 
+const _u32Test = new Uint32Array([0x04030201]);
+const IS_LITTLE_ENDIAN = new Uint8Array(_u32Test.buffer)[0] === 0x01;
+
+function packRGBA(r: number, g: number, b: number, a: number): number {
+  return IS_LITTLE_ENDIAN
+    ? ((a << 24) | (b << 16) | (g << 8) | r) >>> 0
+    : ((r << 24) | (g << 16) | (b << 8) | a) >>> 0;
+}
+
+function clampByte(v: number): number {
+  return v <= 0 ? 0 : v >= 255 ? 255 : v | 0;
+}
+
 function buildNormalMapFromHeight(
   heightData: Float32Array,
   size: number,
@@ -72,41 +85,44 @@ function buildNormalMapFromHeight(
   canvas.height = size;
   const ctx = canvas.getContext('2d')!;
   const img = ctx.createImageData(size, size);
-  const d = img.data;
-
-  const sample = (x: number, y: number) => {
-    const wx = ((x % size) + size) % size;
-    const wy = ((y % size) + size) % size;
-    return heightData[wy * size + wx];
-  };
+  const d32 = new Uint32Array(img.data.buffer);
+  const mask = size - 1;
+  const isPow2 = (size & mask) === 0;
 
   for (let y = 0; y < size; y++) {
+    const yPrev = (isPow2 ? (y - 1) & mask : (y - 1 + size) % size) * size;
+    const yCurr = y * size;
+    const yNext = (isPow2 ? (y + 1) & mask : (y + 1) % size) * size;
+
     for (let x = 0; x < size; x++) {
-      const tl = sample(x - 1, y - 1);
-      const t = sample(x, y - 1);
-      const tr = sample(x + 1, y - 1);
-      const l = sample(x - 1, y);
-      const r = sample(x + 1, y);
-      const bl = sample(x - 1, y + 1);
-      const b = sample(x, y + 1);
-      const br = sample(x + 1, y + 1);
+      const xPrev = isPow2 ? (x - 1) & mask : (x - 1 + size) % size;
+      const xNext = isPow2 ? (x + 1) & mask : (x + 1) % size;
+
+      const tl = heightData[yPrev + xPrev];
+      const t = heightData[yPrev + x];
+      const tr = heightData[yPrev + xNext];
+      const l = heightData[yCurr + xPrev];
+      const r = heightData[yCurr + xNext];
+      const bl = heightData[yNext + xPrev];
+      const b = heightData[yNext + x];
+      const br = heightData[yNext + xNext];
 
       const dx = tr + 2 * r + br - (tl + 2 * l + bl);
       const dy = bl + 2 * b + br - (tl + 2 * t + tr);
 
-      let nx = -dx * strength;
-      let ny = -dy * strength;
-      let nz = 1.0;
-      const invLen = 1 / Math.hypot(nx, ny, nz);
-      nx *= invLen;
-      ny *= invLen;
-      nz *= invLen;
+      const nx = -dx * strength;
+      const ny = -dy * strength;
+      const invLen = 1 / Math.sqrt(nx * nx + ny * ny + 1.0);
 
-      const idx = (y * size + x) * 4;
-      d[idx] = Math.round((nx * 0.5 + 0.5) * 255);
-      d[idx + 1] = Math.round((ny * 0.5 + 0.5) * 255);
-      d[idx + 2] = Math.round((nz * 0.5 + 0.5) * 255);
-      d[idx + 3] = 255;
+      const rb = ((nx * invLen * 0.5 + 0.5) * 255 + 0.5) | 0;
+      const gb = ((ny * invLen * 0.5 + 0.5) * 255 + 0.5) | 0;
+      const bb = ((invLen * 0.5 + 0.5) * 255 + 0.5) | 0;
+      d32[yCurr + x] = packRGBA(
+        rb <= 0 ? 0 : rb >= 255 ? 255 : rb,
+        gb <= 0 ? 0 : gb >= 255 ? 255 : gb,
+        bb <= 0 ? 0 : bb >= 255 ? 255 : bb,
+        255
+      );
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -139,17 +155,16 @@ function buildRoughnessMapFromHeight(
   canvas.height = size;
   const ctx = canvas.getContext('2d')!;
   const img = ctx.createImageData(size, size);
-  const d = img.data;
+  const d32 = new Uint32Array(img.data.buffer);
   const span = maxRough - minRough;
-  for (let i = 0; i < size * size; i++) {
-    const h = Math.max(0, Math.min(1, heightData[i]));
+  const total = size * size;
+  for (let i = 0; i < total; i++) {
+    let h = heightData[i];
+    if (h < 0) h = 0;
+    else if (h > 1) h = 1;
     const rVal = minRough + (invert ? 1 - h : h) * span;
-    const byte = Math.max(0, Math.min(255, Math.round(rVal * 255)));
-    const idx = i * 4;
-    d[idx] = byte;
-    d[idx + 1] = byte;
-    d[idx + 2] = byte;
-    d[idx + 3] = 255;
+    const b = clampByte((rVal * 255 + 0.5) | 0);
+    d32[i] = packRGBA(b, b, b, 255);
   }
   ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(canvas);
@@ -166,8 +181,9 @@ function buildRoughnessMapFromHeight(
 }
 
 function hash2d(x: number, y: number): number {
-  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
-  return n - Math.floor(n);
+  let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) | 0;
+  return ((h ^ (h >>> 16)) >>> 0) * 2.3283064365386963e-10;
 }
 
 function smoothNoise(x: number, y: number): number {
@@ -200,11 +216,15 @@ export function createProceduralTextures(
   renderer: THREE.WebGLRenderer,
   isSoftwareGl = false
 ): ProceduralTextures {
-  // Enforce full hardware-supported anisotropic filtering + 1024px high-definition texel density on GPU
+  // Enforce full hardware-supported anisotropic filtering + 1024px crisp texel density on desktop GPU (512px on constrained mobile/software)
   const maxAniso = Math.max(1, renderer.capabilities.getMaxAnisotropy());
   const maxTexSize = renderer.capabilities.maxTextureSize || 2048;
-  const S = !isSoftwareGl && maxTexSize >= 2048 ? 1024 : 512;
+  const isConstrainedMobile =
+    typeof navigator !== 'undefined' &&
+    (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) || maxTexSize < 4096);
+  const S = !isSoftwareGl && maxTexSize >= 2048 && !isConstrainedMobile ? 1024 : 512;
   const K = S / 256;
+  const invK = 1 / K;
 
   // 1. Carved Sandstone + Normal
   const sandCanvas = document.createElement('canvas');
@@ -212,30 +232,34 @@ export function createProceduralTextures(
   sandCanvas.height = S;
   const sctx = sandCanvas.getContext('2d')!;
   const sandImg = sctx.createImageData(S, S);
+  const sandD32 = new Uint32Array(sandImg.data.buffer);
   const sandHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
-    const row = Math.floor(sy / 32);
-    const localY = sy % 32;
-    const xOffset = (row % 2) * 32;
+    const sy = y * invK;
+    const row = (sy * 0.03125) | 0;
+    const localY = sy - row * 32;
+    const xOffset = (row & 1) * 32;
+    const rowOff = y * S;
+    const mortarY = localY < 2.2;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
+      const sx = x * invK;
       const shiftedX = (sx + xOffset) % 256;
-      const col = Math.floor(shiftedX / 64);
-      const localX = shiftedX % 64;
-      const mortar = localY < 2.2 || localX < 2.2;
+      const col = (shiftedX * 0.015625) | 0;
+      const localX = shiftedX - col * 64;
+      const mortar = mortarY || localX < 2.2;
       const grain = fbm(sx * 0.08, sy * 0.08, 4);
       const blockVar = hash2d(row, col) * 0.16 - 0.08;
       const h = mortar ? 0.12 : 0.65 + grain * 0.35 + blockVar;
-      sandHeight[y * S + x] = h;
+      sandHeight[rowOff + x] = h;
 
       const base = mortar ? 105 : 196 + blockVar * 120 + (grain - 0.5) * 40;
-      const idx = (y * S + x) * 4;
-      sandImg.data[idx] = Math.min(255, Math.max(0, Math.round(base * 1.06)));
-      sandImg.data[idx + 1] = Math.min(255, Math.max(0, Math.round(base * 0.82)));
-      sandImg.data[idx + 2] = Math.min(255, Math.max(0, Math.round(base * 0.54)));
-      sandImg.data[idx + 3] = 255;
+      sandD32[rowOff + x] = packRGBA(
+        clampByte((base * 1.06 + 0.5) | 0),
+        clampByte((base * 0.82 + 0.5) | 0),
+        clampByte((base * 0.54 + 0.5) | 0),
+        255
+      );
     }
   }
   sctx.putImageData(sandImg, 0, 0);
@@ -249,30 +273,36 @@ export function createProceduralTextures(
   aveCanvas.height = S;
   const actx = aveCanvas.getContext('2d')!;
   const aveImg = actx.createImageData(S, S);
+  const aveD32 = new Uint32Array(aveImg.data.buffer);
   const aveHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
+    const sy = y * invK;
     const borderBand = sy < 10 || sy > 246;
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
+      const sx = x * invK;
       const grain = fbm(sx * 0.06, sy * 0.06, 4);
       const fine = fbm(sx * 0.22 + 7, sy * 0.22 + 3, 2);
-      aveHeight[y * S + x] = 0.55 + grain * 0.3 + fine * 0.12;
+      aveHeight[rowOff + x] = 0.55 + grain * 0.3 + fine * 0.12;
 
-      const idx = (y * S + x) * 4;
       if (borderBand) {
         const bv = 168 + grain * 26;
-        aveImg.data[idx] = Math.round(bv * 1.08);
-        aveImg.data[idx + 1] = Math.round(bv * 0.86);
-        aveImg.data[idx + 2] = Math.round(bv * 0.52);
+        aveD32[rowOff + x] = packRGBA(
+          clampByte((bv * 1.08 + 0.5) | 0),
+          clampByte((bv * 0.86 + 0.5) | 0),
+          clampByte((bv * 0.52 + 0.5) | 0),
+          255
+        );
       } else {
         const v = 128 + (grain - 0.5) * 32 + (fine - 0.5) * 14;
-        aveImg.data[idx] = Math.round(v * 1.12);
-        aveImg.data[idx + 1] = Math.round(v * 0.96);
-        aveImg.data[idx + 2] = Math.round(v * 0.74);
+        aveD32[rowOff + x] = packRGBA(
+          clampByte((v * 1.12 + 0.5) | 0),
+          clampByte((v * 0.96 + 0.5) | 0),
+          clampByte((v * 0.74 + 0.5) | 0),
+          255
+        );
       }
-      aveImg.data[idx + 3] = 255;
     }
   }
   actx.putImageData(aveImg, 0, 0);
@@ -286,21 +316,23 @@ export function createProceduralTextures(
   grassCanvas.height = S;
   const gctx = grassCanvas.getContext('2d')!;
   const grassImg = gctx.createImageData(S, S);
+  const grassD32 = new Uint32Array(grassImg.data.buffer);
   const grassHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
+    const sy = y * invK;
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
+      const sx = x * invK;
       const n1 = fbm(sx * 0.06, sy * 0.06, 4);
       const blades = hash2d(x, y) * 0.22;
-      const h = n1 * 0.75 + blades;
-      grassHeight[y * S + x] = h;
-      const idx = (y * S + x) * 4;
-      grassImg.data[idx] = Math.round(62 + n1 * 48 + blades * 35);
-      grassImg.data[idx + 1] = Math.round(88 + n1 * 62 + blades * 40);
-      grassImg.data[idx + 2] = Math.round(42 + n1 * 28);
-      grassImg.data[idx + 3] = 255;
+      grassHeight[rowOff + x] = n1 * 0.75 + blades;
+      grassD32[rowOff + x] = packRGBA(
+        clampByte((62 + n1 * 48 + blades * 35 + 0.5) | 0),
+        clampByte((88 + n1 * 62 + blades * 40 + 0.5) | 0),
+        clampByte((42 + n1 * 28 + 0.5) | 0),
+        255
+      );
     }
   }
   gctx.putImageData(grassImg, 0, 0);
@@ -314,21 +346,24 @@ export function createProceduralTextures(
   waterCanvas.height = S;
   const wctx = waterCanvas.getContext('2d')!;
   const waterImg = wctx.createImageData(S, S);
+  const waterD32 = new Uint32Array(waterImg.data.buffer);
   const waterHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
+    const sy = y * invK;
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
+      const sx = x * invK;
       const w1 = Math.sin(sx * 0.14 + sy * 0.08) * 0.5 + 0.5;
       const w2 = fbm(sx * 0.09, sy * 0.15, 3);
       const h = w1 * 0.45 + w2 * 0.55;
-      waterHeight[y * S + x] = h;
-      const idx = (y * S + x) * 4;
-      waterImg.data[idx] = Math.round(28 + h * 36);
-      waterImg.data[idx + 1] = Math.round(98 + h * 58);
-      waterImg.data[idx + 2] = Math.round(122 + h * 64);
-      waterImg.data[idx + 3] = 255;
+      waterHeight[rowOff + x] = h;
+      waterD32[rowOff + x] = packRGBA(
+        (28 + h * 36 + 0.5) | 0,
+        (98 + h * 58 + 0.5) | 0,
+        (122 + h * 64 + 0.5) | 0,
+        255
+      );
     }
   }
   wctx.putImageData(waterImg, 0, 0);
@@ -341,22 +376,25 @@ export function createProceduralTextures(
   barkCanvas.height = S;
   const bctx = barkCanvas.getContext('2d')!;
   const barkImg = bctx.createImageData(S, S);
+  const barkD32 = new Uint32Array(barkImg.data.buffer);
   const barkHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
+    const sy = y * invK;
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
+      const sx = x * invK;
       const ridge = Math.sin(sx * 0.25 + fbm(sx * 0.06, sy * 0.03, 3) * 4.5) * 0.5 + 0.5;
       const fine = fbm(sx * 0.18, sy * 0.07, 4);
       const h = ridge * 0.68 + fine * 0.32;
-      barkHeight[y * S + x] = h;
+      barkHeight[rowOff + x] = h;
       const moss = smoothNoise(sx * 0.05 + 10, sy * 0.05) > 0.72 ? 1 : 0;
-      const idx = (y * S + x) * 4;
-      barkImg.data[idx] = Math.round(52 + h * 68 - moss * 14);
-      barkImg.data[idx + 1] = Math.round(38 + h * 50 + moss * 22);
-      barkImg.data[idx + 2] = Math.round(25 + h * 30 - moss * 8);
-      barkImg.data[idx + 3] = 255;
+      barkD32[rowOff + x] = packRGBA(
+        clampByte((52 + h * 68 - moss * 14 + 0.5) | 0),
+        clampByte((38 + h * 50 + moss * 22 + 0.5) | 0),
+        clampByte((25 + h * 30 - moss * 8 + 0.5) | 0),
+        255
+      );
     }
   }
   bctx.putImageData(barkImg, 0, 0);
@@ -434,30 +472,32 @@ export function createProceduralTextures(
   silkCanvas.height = S;
   const slCtx = silkCanvas.getContext('2d')!;
   const silkImg = slCtx.createImageData(S, S);
+  const silkD32 = new Uint32Array(silkImg.data.buffer);
   const silkHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
+    const sy = y * invK;
     const border = sy > 256 - 28 || sy < 14;
+    const cosSy = Math.cos(sy * 1.1);
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
-      const weave = (Math.sin(sx * 1.1) * Math.cos(sy * 1.1)) * 0.5 + 0.5;
+      const sx = x * invK;
+      const weave = (Math.sin(sx * 1.1) * cosSy) * 0.5 + 0.5;
       const fold = Math.sin(sx * 0.12) * 0.5 + 0.5;
-      const motif = border && (Math.floor(sx + sy) % 16 < 6 || Math.floor(sx - sy + 256) % 16 < 6);
-      silkHeight[y * S + x] = weave * 0.3 + fold * 0.5 + (motif ? 0.25 : 0);
+      const motif = border && (((sx + sy) | 0) % 16 < 6 || (((sx - sy + 256) | 0) % 16 < 6));
+      silkHeight[rowOff + x] = weave * 0.3 + fold * 0.5 + (motif ? 0.25 : 0);
 
-      const idx = (y * S + x) * 4;
       if (border) {
-        silkImg.data[idx] = motif ? 248 : 196;
-        silkImg.data[idx + 1] = motif ? 210 : 142;
-        silkImg.data[idx + 2] = motif ? 92 : 44;
+        silkD32[rowOff + x] = packRGBA(motif ? 248 : 196, motif ? 210 : 142, motif ? 92 : 44, 255);
       } else {
         const lum = 0.85 + fold * 0.22 + weave * 0.08;
-        silkImg.data[idx] = Math.min(255, Math.round(226 * lum));
-        silkImg.data[idx + 1] = Math.min(255, Math.round(148 * lum));
-        silkImg.data[idx + 2] = Math.min(255, Math.round(32 * lum));
+        silkD32[rowOff + x] = packRGBA(
+          clampByte((226 * lum + 0.5) | 0),
+          clampByte((148 * lum + 0.5) | 0),
+          clampByte((32 * lum + 0.5) | 0),
+          255
+        );
       }
-      silkImg.data[idx + 3] = 255;
     }
   }
   slCtx.putImageData(silkImg, 0, 0);
@@ -471,22 +511,26 @@ export function createProceduralTextures(
   armCanvas.height = S;
   const arCtx = armCanvas.getContext('2d')!;
   const armImg = arCtx.createImageData(S, S);
+  const armD32 = new Uint32Array(armImg.data.buffer);
   const armHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
+    const sy = y * invK;
+    const sinSy = Math.sin(sy * 0.35);
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
+      const sx = x * invK;
       const hammer = fbm(sx * 0.16, sy * 0.16, 3);
-      const scalePattern = Math.sin(sx * 0.35) * Math.sin(sy * 0.35) * 0.35 + 0.5;
+      const scalePattern = Math.sin(sx * 0.35) * sinSy * 0.35 + 0.5;
       const h = hammer * 0.6 + scalePattern * 0.4;
-      armHeight[y * S + x] = h;
-      const idx = (y * S + x) * 4;
+      armHeight[rowOff + x] = h;
       const v = 138 + h * 72;
-      armImg.data[idx] = Math.min(255, Math.round(v * 1.12));
-      armImg.data[idx + 1] = Math.min(255, Math.round(v * 0.96));
-      armImg.data[idx + 2] = Math.min(255, Math.round(v * 0.68));
-      armImg.data[idx + 3] = 255;
+      armD32[rowOff + x] = packRGBA(
+        clampByte((v * 1.12 + 0.5) | 0),
+        clampByte((v * 0.96 + 0.5) | 0),
+        clampByte((v * 0.68 + 0.5) | 0),
+        255
+      );
     }
   }
   arCtx.putImageData(armImg, 0, 0);
@@ -500,22 +544,24 @@ export function createProceduralTextures(
   skinCanvas.height = S;
   const skCtx = skinCanvas.getContext('2d')!;
   const skinImg = skCtx.createImageData(S, S);
+  const skinD32 = new Uint32Array(skinImg.data.buffer);
   const skinHeight = new Float32Array(S * S);
+  const twoPiOverS = (Math.PI * 2) / S;
 
   for (let y = 0; y < S; y++) {
-    const vNorm = y / S;
-    const ny = Math.sin(vNorm * Math.PI * 2);
+    const ny = Math.sin(y * twoPiOverS);
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const uNorm = x / S;
-      const nx = Math.sin(uNorm * Math.PI * 2);
+      const nx = Math.sin(x * twoPiOverS);
       const micro = 0.5 + 0.25 * Math.sin(nx * 4.0 + ny * 3.0) + 0.15 * Math.cos(nx * 7.0 - ny * 5.0);
       const tone = 0.96 + micro * 0.04;
-      skinHeight[y * S + x] = 0.5 + micro * 0.04;
-      const idx = (y * S + x) * 4;
-      skinImg.data[idx] = Math.min(255, Math.round(42 * tone));
-      skinImg.data[idx + 1] = Math.min(255, Math.round(78 * tone));
-      skinImg.data[idx + 2] = Math.min(255, Math.round(142 * tone));
-      skinImg.data[idx + 3] = 255;
+      skinHeight[rowOff + x] = 0.5 + micro * 0.04;
+      skinD32[rowOff + x] = packRGBA(
+        clampByte((42 * tone + 0.5) | 0),
+        clampByte((78 * tone + 0.5) | 0),
+        clampByte((142 * tone + 0.5) | 0),
+        255
+      );
     }
   }
   skCtx.putImageData(skinImg, 0, 0);
@@ -528,22 +574,25 @@ export function createProceduralTextures(
   basCanvas.height = S;
   const baCtx = basCanvas.getContext('2d')!;
   const basImg = baCtx.createImageData(S, S);
+  const basD32 = new Uint32Array(basImg.data.buffer);
   const basHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
+    const sy = y * invK;
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
+      const sx = x * invK;
       const vein = Math.sin(sx * 0.05 + fbm(sx * 0.04, sy * 0.04, 3) * 5.2) * 0.5 + 0.5;
       const grain = fbm(sx * 0.14, sy * 0.14, 3);
       const h = vein * 0.45 + grain * 0.55;
-      basHeight[y * S + x] = h;
-      const idx = (y * S + x) * 4;
+      basHeight[rowOff + x] = h;
       const v = 26 + h * 34;
-      basImg.data[idx] = Math.round(v * 0.96);
-      basImg.data[idx + 1] = Math.round(v * 1.0);
-      basImg.data[idx + 2] = Math.round(v * 1.12);
-      basImg.data[idx + 3] = 255;
+      basD32[rowOff + x] = packRGBA(
+        (v * 0.96 + 0.5) | 0,
+        (v + 0.5) | 0,
+        (v * 1.12 + 0.5) | 0,
+        255
+      );
     }
   }
   baCtx.putImageData(basImg, 0, 0);
@@ -613,9 +662,10 @@ export function createProceduralTextures(
   ectx.restore();
   const epiData = ectx.getImageData(0, 0, S, S).data;
   const epiHeight = new Float32Array(S * S);
+  const inv765 = 1 / 765;
   for (let i = 0; i < S * S; i++) {
-    const lum = (epiData[i * 4] + epiData[i * 4 + 1] + epiData[i * 4 + 2]) / (255 * 3);
-    epiHeight[i] = lum;
+    const o = i << 2;
+    epiHeight[i] = (epiData[o] + epiData[o + 1] + epiData[o + 2]) * inv765;
   }
   const royalEpigraph = configureColorTexture(epiCanvas, 1, 1, maxAniso, true);
   const royalEpigraphNormal = buildNormalMapFromHeight(epiHeight, S, 3.6, 1, 1, maxAniso);
@@ -680,7 +730,8 @@ export function createProceduralTextures(
   const mythData = mctx.getImageData(0, 0, S, S).data;
   const mythHeight = new Float32Array(S * S);
   for (let i = 0; i < S * S; i++) {
-    mythHeight[i] = (mythData[i * 4] + mythData[i * 4 + 1] + mythData[i * 4 + 2]) / (255 * 3);
+    const o = i << 2;
+    mythHeight[i] = (mythData[o] + mythData[o + 1] + mythData[o + 2]) * inv765;
   }
   const mythologyArt = configureColorTexture(mythCanvas, 2, 2, maxAniso);
   const mythologyArtNormal = buildNormalMapFromHeight(mythHeight, S, 3.4, 2, 2, maxAniso);
@@ -691,29 +742,37 @@ export function createProceduralTextures(
   curtCanvas.height = S;
   const cctx = curtCanvas.getContext('2d')!;
   const curtImg = cctx.createImageData(S, S);
+  const curtD32 = new Uint32Array(curtImg.data.buffer);
   const curtHeight = new Float32Array(S * S);
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
+    const sy = y * invK;
     const goldHem = sy > 256 - 34 || sy < 20;
+    const cosSy = Math.cos(sy * 0.22);
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
+      const sx = x * invK;
       const pleat = Math.sin((x / S) * Math.PI * 12) * 0.5 + 0.5;
-      const weave = ((Math.floor(sx + sy) % 8 < 3 ? 0.08 : 0) + (goldHem ? 0.22 : 0));
-      curtHeight[y * S + x] = pleat * 0.72 + weave;
-      const idx = (y * S + x) * 4;
+      const weave = (((sx + sy) | 0) % 8 < 3 ? 0.08 : 0) + (goldHem ? 0.22 : 0);
+      curtHeight[rowOff + x] = pleat * 0.72 + weave;
       const shade = 0.68 + pleat * 0.36;
       if (goldHem) {
-        const zari = Math.floor(sx) % 16 < 7 ? 1.05 : 0.72;
-        curtImg.data[idx] = Math.min(255, Math.round(240 * shade * zari));
-        curtImg.data[idx + 1] = Math.min(255, Math.round(188 * shade * zari));
-        curtImg.data[idx + 2] = Math.min(255, Math.round(62 * shade * zari));
+        const zari = (sx | 0) % 16 < 7 ? 1.05 : 0.72;
+        const f = shade * zari;
+        curtD32[rowOff + x] = packRGBA(
+          clampByte((240 * f + 0.5) | 0),
+          clampByte((188 * f + 0.5) | 0),
+          clampByte((62 * f + 0.5) | 0),
+          255
+        );
       } else {
-        const motif = Math.sin(sx * 0.22) * Math.cos(sy * 0.22) > 0.72;
-        curtImg.data[idx] = Math.min(255, Math.round((motif ? 215 : 158) * shade));
-        curtImg.data[idx + 1] = Math.min(255, Math.round((motif ? 156 : 24) * shade));
-        curtImg.data[idx + 2] = Math.min(255, Math.round((motif ? 42 : 34) * shade));
+        const motif = Math.sin(sx * 0.22) * cosSy > 0.72;
+        curtD32[rowOff + x] = packRGBA(
+          clampByte(((motif ? 215 : 158) * shade + 0.5) | 0),
+          clampByte(((motif ? 156 : 24) * shade + 0.5) | 0),
+          clampByte(((motif ? 42 : 34) * shade + 0.5) | 0),
+          255
+        );
       }
-      curtImg.data[idx + 3] = 255;
     }
   }
   cctx.putImageData(curtImg, 0, 0);
@@ -726,24 +785,32 @@ export function createProceduralTextures(
   carpCanvas.height = S;
   const rpCtx = carpCanvas.getContext('2d')!;
   const carpImg = rpCtx.createImageData(S, S);
+  const carpD32 = new Uint32Array(carpImg.data.buffer);
   const carpHeight = new Float32Array(S * S);
 
   const halfS = S * 0.5;
+  const invHalfS = 1 / halfS;
   for (let y = 0; y < S; y++) {
-    const sy = y / K;
-    const dy = (y - halfS) / halfS;
+    const sy = y * invK;
+    const dy = (y - halfS) * invHalfS;
+    const dySq = dy * dy;
+    const cosSy = Math.cos(sy * 1.15);
+    const edgeY = sy < 14 || sy > 256 - 15;
+    const beadYBand = Math.abs(sy - 20) < 2 || Math.abs(sy - (256 - 21)) < 2;
+    const deepY = sy < 5 || sy > 256 - 6;
+    const rowOff = y * S;
     for (let x = 0; x < S; x++) {
-      const sx = x / K;
-      const dx = (x - halfS) / halfS;
-      const dist = Math.hypot(dx, dy);
+      const sx = x * invK;
+      const dx = (x - halfS) * invHalfS;
+      const dist = Math.sqrt(dx * dx + dySq);
       const ang = Math.atan2(dy, dx);
       const pile = fbm(sx * 0.22, sy * 0.22, 3);
-      const warpWeft = (Math.sin(sx * 1.15) * Math.cos(sy * 1.15)) * 0.5 + 0.5;
+      const warpWeft = (Math.sin(sx * 1.15) * cosSy) * 0.5 + 0.5;
 
-      const edgeBand = sx < 14 || sx > 256 - 15 || sy < 14 || sy > 256 - 15;
+      const edgeBand = edgeY || sx < 14 || sx > 256 - 15;
       const innerBead =
-        (Math.abs(sx - 20) < 2 || Math.abs(sx - (256 - 21)) < 2 || Math.abs(sy - 20) < 2 || Math.abs(sy - (256 - 21)) < 2) &&
-        (Math.floor(sx + sy) % 8 < 4);
+        (beadYBand || Math.abs(sx - 20) < 2 || Math.abs(sx - (256 - 21)) < 2) &&
+        (((sx + sy) | 0) % 8 < 4);
       const lotusPetal =
         dist > 0.16 &&
         dist < 0.44 &&
@@ -753,24 +820,27 @@ export function createProceduralTextures(
       const outerRing = Math.abs(dist - 0.56) < 0.025 || (Math.abs(dist - 0.66) < 0.03 && Math.sin(ang * 16) > 0.35);
       const isGoldMotif = edgeBand || innerBead || lotusPetal || centerBoss || outerRing;
 
-      const motifH = isGoldMotif ? 0.24 : 0;
-      carpHeight[y * S + x] = 0.48 + pile * 0.26 + warpWeft * 0.14 + motifH;
+      carpHeight[rowOff + x] = 0.48 + pile * 0.26 + warpWeft * 0.14 + (isGoldMotif ? 0.24 : 0);
 
-      const idx = (y * S + x) * 4;
       const fiberLum = 0.84 + pile * 0.22 + warpWeft * 0.09;
       if (isGoldMotif) {
-        const deepRim = dist < 0.05 || (edgeBand && (sx < 5 || sx > 256 - 6 || sy < 5 || sy > 256 - 6));
-        const gScale = deepRim ? 0.78 : 1.02;
-        carpImg.data[idx] = Math.min(255, Math.round(234 * fiberLum * gScale));
-        carpImg.data[idx + 1] = Math.min(255, Math.round(176 * fiberLum * gScale));
-        carpImg.data[idx + 2] = Math.min(255, Math.round(58 * fiberLum * gScale));
+        const deepRim = dist < 0.05 || (edgeBand && (deepY || sx < 5 || sx > 256 - 6));
+        const gf = fiberLum * (deepRim ? 0.78 : 1.02);
+        carpD32[rowOff + x] = packRGBA(
+          clampByte((234 * gf + 0.5) | 0),
+          clampByte((176 * gf + 0.5) | 0),
+          clampByte((58 * gf + 0.5) | 0),
+          255
+        );
       } else {
         const diamond = Math.sin((sx + sy) * 0.19) * Math.cos((sx - sy) * 0.19) > 0.72 ? 1.12 : 1.0;
-        carpImg.data[idx] = Math.min(255, Math.round(158 * fiberLum * diamond));
-        carpImg.data[idx + 1] = Math.min(255, Math.round(18 * fiberLum));
-        carpImg.data[idx + 2] = Math.min(255, Math.round(26 * fiberLum));
+        carpD32[rowOff + x] = packRGBA(
+          clampByte((158 * fiberLum * diamond + 0.5) | 0),
+          clampByte((18 * fiberLum + 0.5) | 0),
+          clampByte((26 * fiberLum + 0.5) | 0),
+          255
+        );
       }
-      carpImg.data[idx + 3] = 255;
     }
   }
   rpCtx.putImageData(carpImg, 0, 0);

@@ -24,7 +24,9 @@ interface GameHUDProps {
   onToggleAutoDrive: () => void;
 }
 
-export const GameHUD: React.FC<GameHUDProps> = ({
+const STAR_LEVELS = [1, 2, 3, 4, 5] as const;
+
+export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   hud,
   muted,
   sprintActive,
@@ -138,7 +140,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               className="flex items-center gap-0.5"
               aria-label={`Alert level ${hud.wantedLevel} of 5`}
             >
-              {[1, 2, 3, 4, 5].map((star) => (
+              {STAR_LEVELS.map((star) => (
                 <Star
                   key={star}
                   className={`h-2.5 w-2.5 ${
@@ -327,4 +329,4 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       <TouchJoystick onChange={onJoystickMove} />
     </>
   );
-};
+});

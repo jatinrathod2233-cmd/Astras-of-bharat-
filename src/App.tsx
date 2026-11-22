@@ -218,9 +218,9 @@ export default function App() {
     };
   }, [syncCombinedMovement, touchSprint]);
 
-  // Camera drag orbit & two-finger pinch zoom on the 3D canvas
-  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (mode !== 'PLAYING') return;
+  // Camera drag orbit & two-finger pinch zoom on the 3D canvas (zero-allocation pointer handling)
+  const handleCanvasPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (modeRef.current !== 'PLAYING') return;
     activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     e.currentTarget.setPointerCapture(e.pointerId);
 
@@ -232,19 +232,25 @@ export default function App() {
       };
       pinchDistRef.current = null;
     } else if (activePointersRef.current.size === 2) {
-      const pts = Array.from(activePointersRef.current.values());
-      pinchDistRef.current = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      const it = activePointersRef.current.values();
+      const p0 = it.next().value!;
+      const p1 = it.next().value!;
+      pinchDistRef.current = Math.hypot(p1.x - p0.x, p1.y - p0.y);
       lookPointerRef.current.id = null;
     }
-  };
+  }, []);
 
-  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!activePointersRef.current.has(e.pointerId)) return;
-    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const handleCanvasPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const ptr = activePointersRef.current.get(e.pointerId);
+    if (!ptr) return;
+    ptr.x = e.clientX;
+    ptr.y = e.clientY;
 
     if (activePointersRef.current.size === 2 && engineRef.current) {
-      const pts = Array.from(activePointersRef.current.values());
-      const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      const it = activePointersRef.current.values();
+      const p0 = it.next().value!;
+      const p1 = it.next().value!;
+      const dist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
       if (pinchDistRef.current !== null) {
         const dPinch = dist - pinchDistRef.current;
         engineRef.current.input.zoomDelta -= dPinch * 0.035;
@@ -262,9 +268,9 @@ export default function App() {
       engineRef.current.input.cameraDeltaX += dx;
       engineRef.current.input.cameraDeltaY += dy;
     }
-  };
+  }, []);
 
-  const handleCanvasPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+  const handleCanvasPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     activePointersRef.current.delete(e.pointerId);
     if (lookPointerRef.current.id === e.pointerId) {
       lookPointerRef.current.id = null;
@@ -273,22 +279,28 @@ export default function App() {
       pinchDistRef.current = null;
     }
     if (activePointersRef.current.size === 1) {
-      const [remainId, pt] = Array.from(activePointersRef.current.entries())[0];
-      lookPointerRef.current = { id: remainId, lastX: pt.x, lastY: pt.y };
+      const first = activePointersRef.current.entries().next().value;
+      if (first) {
+        lookPointerRef.current = { id: first[0], lastX: first[1].x, lastY: first[1].y };
+      }
     }
-  };
+  }, []);
 
-  const handleCanvasWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    if (mode !== 'PLAYING' || !engineRef.current) return;
+  const handleCanvasWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (modeRef.current !== 'PLAYING' || !engineRef.current) return;
     engineRef.current.input.zoomDelta += e.deltaY * 0.01;
-  };
+  }, []);
 
-  const handleJoystickMove = (x: number, y: number) => {
-    joyMoveRef.current = { x, y };
-    syncCombinedMovement();
-  };
+  const handleJoystickMove = useCallback(
+    (x: number, y: number) => {
+      joyMoveRef.current.x = x;
+      joyMoveRef.current.y = y;
+      syncCombinedMovement();
+    },
+    [syncCombinedMovement]
+  );
 
-  const handleToggleSprint = () => {
+  const handleToggleSprint = useCallback(() => {
     setTouchSprint((prev) => {
       const next = !prev;
       if (engineRef.current) {
@@ -296,17 +308,46 @@ export default function App() {
       }
       return next;
     });
-  };
+  }, []);
 
-  const handleToggleMute = () => {
+  const handleToggleMute = useCallback(() => {
     setMuted(soundEngine.toggleMute());
-  };
+  }, []);
 
-  const handleZoomStep = (delta: number) => {
-    if (mode === 'PLAYING' && engineRef.current) {
-      engineRef.current.input.zoomDelta += delta;
+  const handleZoomIn = useCallback(() => {
+    if (modeRef.current === 'PLAYING' && engineRef.current) {
+      engineRef.current.input.zoomDelta -= 1.4;
     }
-  };
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    if (modeRef.current === 'PLAYING' && engineRef.current) {
+      engineRef.current.input.zoomDelta += 1.4;
+    }
+  }, []);
+
+  const handlePause = useCallback(() => engineRef.current?.setMode('PAUSED'), []);
+  const handleFireStart = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.fireHeld = true;
+  }, []);
+  const handleFireEnd = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.fireHeld = false;
+  }, []);
+  const handleAstra = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.astraPressed = true;
+  }, []);
+  const handleJump = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.jumpPressed = true;
+  }, []);
+  const handleInteract = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.interactPressed = true;
+  }, []);
+  const handleToggleStealth = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.stealthTogglePressed = true;
+  }, []);
+  const handleToggleAutoDrive = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.autoDriveTogglePressed = true;
+  }, []);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#0D1016] select-none">
@@ -329,36 +370,18 @@ export default function App() {
           muted={muted}
           sprintActive={touchSprint}
           onToggleMute={handleToggleMute}
-          onZoomIn={() => handleZoomStep(-1.4)}
-          onZoomOut={() => handleZoomStep(1.4)}
-          onPause={() => engineRef.current?.setMode('PAUSED')}
+          onZoomIn={handleZoomIn}
+          onZoomOut={handleZoomOut}
+          onPause={handlePause}
           onJoystickMove={handleJoystickMove}
-          onFireStart={() => {
-            if (engineRef.current) engineRef.current.input.fireHeld = true;
-          }}
-          onFireEnd={() => {
-            if (engineRef.current) engineRef.current.input.fireHeld = false;
-          }}
-          onAstra={() => {
-            if (engineRef.current) engineRef.current.input.astraPressed = true;
-          }}
-          onJump={() => {
-            if (engineRef.current) engineRef.current.input.jumpPressed = true;
-          }}
+          onFireStart={handleFireStart}
+          onFireEnd={handleFireEnd}
+          onAstra={handleAstra}
+          onJump={handleJump}
           onToggleSprint={handleToggleSprint}
-          onInteract={() => {
-            if (engineRef.current) engineRef.current.input.interactPressed = true;
-          }}
-          onToggleStealth={() => {
-            if (engineRef.current) {
-              engineRef.current.input.stealthTogglePressed = true;
-            }
-          }}
-          onToggleAutoDrive={() => {
-            if (engineRef.current) {
-              engineRef.current.input.autoDriveTogglePressed = true;
-            }
-          }}
+          onInteract={handleInteract}
+          onToggleStealth={handleToggleStealth}
+          onToggleAutoDrive={handleToggleAutoDrive}
         />
       )}
 
