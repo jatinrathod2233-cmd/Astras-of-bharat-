@@ -556,6 +556,26 @@ export const ROAD_GRAPH_NODES: RoadGraphNode[] = [
 const _ROAD_NODE_MAP = new Map<string, RoadGraphNode>(
   ROAD_GRAPH_NODES.map((n) => [n.id, n])
 );
+const _ROAD_COUNT = ROAD_GRAPH_NODES.length;
+const _ROAD_INDEX_MAP = new Map<string, number>(
+  ROAD_GRAPH_NODES.map((n, idx) => [n.id, idx])
+);
+const _ROAD_NEIGHBOR_IDX: number[][] = ROAD_GRAPH_NODES.map((n) =>
+  n.neighbors
+    .map((id) => _ROAD_INDEX_MAP.get(id) ?? -1)
+    .filter((idx) => idx >= 0)
+);
+const _roadDist = new Float64Array(_ROAD_COUNT);
+const _roadPrev = new Int32Array(_ROAD_COUNT);
+const _roadVisited = new Uint8Array(_ROAD_COUNT);
+const _roadTrace = new Int32Array(_ROAD_COUNT);
+
+const _snapOut = {
+  seg: PAVED_ROADS[0],
+  snappedX: 0,
+  snappedZ: 0,
+  dist: 0,
+};
 
 export function snapPointToNearestPavedRoad(
   x: number,
@@ -597,125 +617,135 @@ export function snapPointToNearestPavedRoad(
     }
   }
 
-  return { seg: best, snappedX: bestX, snappedZ: bestZ, dist: bestDist };
+  _snapOut.seg = best;
+  _snapOut.snappedX = bestX;
+  _snapOut.snappedZ = bestZ;
+  _snapOut.dist = bestDist;
+  return _snapOut;
 }
 
-function nearestRoadNodeAvoidingPlaza(x: number, z: number): RoadGraphNode {
-  let bestNode = ROAD_GRAPH_NODES[0];
+function nearestRoadNodeIdxAvoidingPlaza(x: number, z: number): number {
+  let bestIdx = 0;
   let bestDist = Infinity;
-  for (let i = 0; i < ROAD_GRAPH_NODES.length; i++) {
+  for (let i = 0; i < _ROAD_COUNT; i++) {
     const n = ROAD_GRAPH_NODES[i];
     const d = Math.hypot(n.x - x, n.z - z);
     if (d < bestDist) {
       bestDist = d;
-      bestNode = n;
+      bestIdx = i;
     }
   }
-  return bestNode;
+  return bestIdx;
 }
 
 /**
  * Builds a deterministic, strictly contiguous sequence of paved-road waypoints from (x,z) toward (goalX,goalZ)
- * so auto-drive follows paved centerlines smoothly without ever flipping back or spinning erratically.
+ * using zero-allocation typed-array Dijkstra scratch buffers so auto-drive transitions smoothly without frame spikes.
  */
 export function buildAutoDriveRoute(
   x: number,
   z: number,
   headingYaw: number,
   goalX: number,
-  goalZ: number
+  goalZ: number,
+  outRoute?: Array<{ x: number; z: number }>
 ): Array<{ x: number; z: number }> {
   const snap = snapPointToNearestPavedRoad(x, z);
-  const startNode = nearestRoadNodeAvoidingPlaza(snap.snappedX, snap.snappedZ);
-  const goalNode = nearestRoadNodeAvoidingPlaza(goalX, goalZ);
+  const startIdx = nearestRoadNodeIdxAvoidingPlaza(snap.snappedX, snap.snappedZ);
+  const goalIdx = nearestRoadNodeIdxAvoidingPlaza(goalX, goalZ);
 
-  const distMap = new Map<string, number>();
-  const prevMap = new Map<string, string | null>();
-  const unvisited = new Set<string>();
-  for (const n of ROAD_GRAPH_NODES) {
-    distMap.set(n.id, n.id === startNode.id ? 0 : Infinity);
-    prevMap.set(n.id, null);
-    unvisited.add(n.id);
+  for (let i = 0; i < _ROAD_COUNT; i++) {
+    _roadDist[i] = i === startIdx ? 0 : Infinity;
+    _roadPrev[i] = -1;
+    _roadVisited[i] = 0;
   }
 
-  while (unvisited.size > 0) {
-    let currId: string | null = null;
+  for (let step = 0; step < _ROAD_COUNT; step++) {
+    let currIdx = -1;
     let bestD = Infinity;
-    for (const id of unvisited) {
-      const d = distMap.get(id) ?? Infinity;
-      if (d < bestD) {
-        bestD = d;
-        currId = id;
+    for (let i = 0; i < _ROAD_COUNT; i++) {
+      if (_roadVisited[i] === 0 && _roadDist[i] < bestD) {
+        bestD = _roadDist[i];
+        currIdx = i;
       }
     }
-    if (!currId || currId === goalNode.id || bestD === Infinity) break;
-    unvisited.delete(currId);
-    const curr = _ROAD_NODE_MAP.get(currId)!;
-    for (const nid of curr.neighbors) {
-      if (!unvisited.has(nid)) continue;
-      const nb = _ROAD_NODE_MAP.get(nid)!;
+    if (currIdx === -1 || currIdx === goalIdx || bestD === Infinity) break;
+    _roadVisited[currIdx] = 1;
+    const curr = ROAD_GRAPH_NODES[currIdx];
+    const neighbors = _ROAD_NEIGHBOR_IDX[currIdx];
+    for (let k = 0; k < neighbors.length; k++) {
+      const nid = neighbors[k];
+      if (_roadVisited[nid] !== 0) continue;
+      const nb = ROAD_GRAPH_NODES[nid];
       const alt = bestD + Math.hypot(nb.x - curr.x, nb.z - curr.z);
-      if (alt < (distMap.get(nid) ?? Infinity)) {
-        distMap.set(nid, alt);
-        prevMap.set(nid, currId);
+      if (alt < _roadDist[nid]) {
+        _roadDist[nid] = alt;
+        _roadPrev[nid] = currIdx;
       }
     }
   }
 
-  const chain: Array<{ x: number; z: number }> = [];
-  let trace: string | null = goalNode.id;
-  while (trace) {
-    const node = _ROAD_NODE_MAP.get(trace);
-    if (node) chain.unshift({ x: node.x, z: node.z });
-    trace = prevMap.get(trace) ?? null;
+  let traceCount = 0;
+  let trace = goalIdx;
+  while (trace !== -1 && traceCount < _ROAD_COUNT) {
+    _roadTrace[traceCount++] = trace;
+    trace = _roadPrev[trace];
   }
 
-  // If already positioned between chain[0] and chain[1], skip chain[0] so the chariot never turns 180 deg backward!
-  if (chain.length >= 2) {
-    const segX = chain[1].x - chain[0].x;
-    const segZ = chain[1].z - chain[0].z;
+  const route = outRoute ?? [];
+  route.length = 0;
+
+  let startTraceCursor = traceCount - 1;
+  // If already positioned between chain[0] and chain[1], skip chain[0] so the chariot never turns 180 deg backward
+  if (traceCount >= 2) {
+    const first = ROAD_GRAPH_NODES[_roadTrace[traceCount - 1]];
+    const second = ROAD_GRAPH_NODES[_roadTrace[traceCount - 2]];
+    const segX = second.x - first.x;
+    const segZ = second.z - first.z;
     const segLenSq = segX * segX + segZ * segZ;
     if (segLenSq > 1) {
-      const tProj = ((x - chain[0].x) * segX + (z - chain[0].z) * segZ) / segLenSq;
+      const tProj = ((x - first.x) * segX + (z - first.z) * segZ) / segLenSq;
       if (tProj > 0.02 && snap.dist <= snap.seg.halfWidth * 1.15) {
-        chain.shift();
+        startTraceCursor--;
       }
     }
   }
 
   // When off-road, prepend a smooth forward-biased merge onto the nearest paved road segment
-  if (snap.dist > snap.seg.halfWidth * 0.65 && chain.length > 0) {
+  if (snap.dist > snap.seg.halfWidth * 0.65 && startTraceCursor >= 0) {
+    const nextNode = ROAD_GRAPH_NODES[_roadTrace[startTraceCursor]];
     const fwdX = Math.sin(headingYaw);
     const fwdZ = Math.cos(headingYaw);
-    const toSnapX = snap.snappedX - x;
-    const toSnapZ = snap.snappedZ - z;
-    const toNextX = chain[0].x - x;
-    const toNextZ = chain[0].z - z;
-    const snapDot = toSnapX * fwdX + toSnapZ * fwdZ;
-    const nextDot = toNextX * fwdX + toNextZ * fwdZ;
-    // Only prepend snap if it isn't strictly behind while next waypoint is ahead on same road
+    const snapDot = (snap.snappedX - x) * fwdX + (snap.snappedZ - z) * fwdZ;
+    const nextDot = (nextNode.x - x) * fwdX + (nextNode.z - z) * fwdZ;
     if (snapDot >= -1.0 || nextDot < 0) {
-      chain.unshift({ x: snap.snappedX, z: snap.snappedZ });
+      route.push({ x: snap.snappedX, z: snap.snappedZ });
     }
   }
 
-  // Deduplicate tight/coincident points and ensure final goal approach is clean
-  const route: Array<{ x: number; z: number }> = [];
-  for (const pt of chain) {
-    const last = route[route.length - 1];
+  for (let i = startTraceCursor; i >= 0; i--) {
+    const pt = ROAD_GRAPH_NODES[_roadTrace[i]];
+    const last = route.length > 0 ? route[route.length - 1] : null;
     if (!last || Math.hypot(pt.x - last.x, pt.z - last.z) > 1.8) {
-      route.push(pt);
+      route.push({ x: pt.x, z: pt.z });
     }
   }
-  const tail = route[route.length - 1];
+  const tail = route.length > 0 ? route[route.length - 1] : null;
   if (!tail || Math.hypot(goalX - tail.x, goalZ - tail.z) > 2.5) {
     route.push({ x: goalX, z: goalZ });
   }
   return route;
 }
 
+const _autoDriveStepOut = {
+  wpIdx: 0,
+  targetX: 0,
+  targetZ: 0,
+  distToGoal: 0,
+};
+
 /**
- * Pure-pursuit paved-road follower with strictly monotonic waypoint index advancement and zero backward flipping.
+ * Zero-allocation pure-pursuit paved-road follower with strictly monotonic waypoint index advancement.
  */
 export function stepAutoDriveRoute(
   x: number,
@@ -729,7 +759,11 @@ export function stepAutoDriveRoute(
   const distToGoal = Math.hypot(goalX - x, goalZ - z);
   const snap = snapPointToNearestPavedRoad(x, z);
   if (route.length === 0) {
-    return { wpIdx: 0, targetX: goalX, targetZ: goalZ, distToGoal };
+    _autoDriveStepOut.wpIdx = 0;
+    _autoDriveStepOut.targetX = goalX;
+    _autoDriveStepOut.targetZ = goalZ;
+    _autoDriveStepOut.distToGoal = distToGoal;
+    return _autoDriveStepOut;
   }
 
   let idx = Math.max(0, Math.min(wpIdx, route.length - 1));
@@ -752,9 +786,10 @@ export function stepAutoDriveRoute(
   }
 
   const target = route[idx];
-  const prev = idx > 0 ? route[idx - 1] : { x, z };
-  const segDx = target.x - prev.x;
-  const segDz = target.z - prev.z;
+  const prevX = idx > 0 ? route[idx - 1].x : x;
+  const prevZ = idx > 0 ? route[idx - 1].z : z;
+  const segDx = target.x - prevX;
+  const segDz = target.z - prevZ;
   const segLen = Math.hypot(segDx, segDz);
 
   let pursueX = target.x;
@@ -762,12 +797,11 @@ export function stepAutoDriveRoute(
   if (segLen > 1.0) {
     const ux = segDx / segLen;
     const uz = segDz / segLen;
-    const proj = Math.max(0, Math.min(segLen, (x - prev.x) * ux + (z - prev.z) * uz));
+    const proj = Math.max(0, Math.min(segLen, (x - prevX) * ux + (z - prevZ) * uz));
     const ahead = Math.min(segLen, proj + lookaheadDist);
-    pursueX = prev.x + ux * ahead;
-    pursueZ = prev.z + uz * ahead;
+    pursueX = prevX + ux * ahead;
+    pursueZ = prevZ + uz * ahead;
 
-    // Smoothly blend into next corner tangent when within lookahead of junction
     if (ahead >= segLen - 0.5 && idx + 1 < route.length) {
       const next = route[idx + 1];
       const nDx = next.x - target.x;
@@ -781,13 +815,16 @@ export function stepAutoDriveRoute(
     }
   }
 
-  // Gentle lateral centering onto paved road surface when near road corridor
   if (snap.dist < snap.seg.halfWidth * 1.4) {
     pursueX = pursueX * 0.82 + snap.snappedX * 0.18;
     pursueZ = pursueZ * 0.82 + snap.snappedZ * 0.18;
   }
 
-  return { wpIdx: idx, targetX: pursueX, targetZ: pursueZ, distToGoal };
+  _autoDriveStepOut.wpIdx = idx;
+  _autoDriveStepOut.targetX = pursueX;
+  _autoDriveStepOut.targetZ = pursueZ;
+  _autoDriveStepOut.distToGoal = distToGoal;
+  return _autoDriveStepOut;
 }
 
 export function computeAutoDriveRoadTarget(
@@ -1097,7 +1134,44 @@ export const PALACE_NAV_NODES: PalaceNavNode[] = (() => {
 const _PALACE_NAV_MAP = new Map<string, PalaceNavNode>(
   PALACE_NAV_NODES.map((n) => [n.id, n])
 );
+const _NAV_COUNT = PALACE_NAV_NODES.length;
+const _PALACE_NAV_INDEX_MAP = new Map<string, number>(
+  PALACE_NAV_NODES.map((n, idx) => [n.id, idx])
+);
+const _PALACE_NEIGHBOR_IDX: number[][] = PALACE_NAV_NODES.map((n) =>
+  n.neighbors
+    .map((id) => _PALACE_NAV_INDEX_MAP.get(id) ?? -1)
+    .filter((idx) => idx >= 0)
+);
+const _navDist = new Float64Array(_NAV_COUNT);
+const _navPrev = new Int32Array(_NAV_COUNT);
+const _navVisited = new Uint8Array(_NAV_COUNT);
+const _navTrace = new Int32Array(_NAV_COUNT);
+const _patrolCandIdx = new Int32Array(16);
+const _patrolCandScore = new Float64Array(16);
 
+function pushReusableNavWaypoint(
+  target: Array<{ x: number; y: number; z: number }>,
+  cursor: number,
+  x: number,
+  y: number,
+  z: number
+): number {
+  const slot = target[cursor];
+  if (slot) {
+    slot.x = x;
+    slot.y = y;
+    slot.z = z;
+  } else {
+    target.push({ x, y, z });
+  }
+  return cursor + 1;
+}
+
+/**
+ * Zero-allocation multi-level Dijkstra pathfinder across Ayodhya Plaza, Courtyards, Sabha & 7-Story Palace.
+ * Pass `outPath` (optional) to reuse waypoint objects cleanly across NPC updates with zero GC churn.
+ */
 export function findPalaceNavPath(
   sx: number,
   sy: number,
@@ -1105,74 +1179,84 @@ export function findPalaceNavPath(
   gx: number,
   gy: number,
   gz: number,
-  allowWater = false
+  allowWater = false,
+  outPath?: Array<{ x: number; y: number; z: number }>
 ): Array<{ x: number; y: number; z: number }> {
-  let startNode = PALACE_NAV_NODES[0];
+  let startIdx = 0;
   let bestSD = Infinity;
-  let goalNode = PALACE_NAV_NODES[0];
+  let goalIdx = 0;
   let bestGD = Infinity;
 
-  for (let i = 0; i < PALACE_NAV_NODES.length; i++) {
+  for (let i = 0; i < _NAV_COUNT; i++) {
     const n = PALACE_NAV_NODES[i];
     if (n.waterOnly && !allowWater) continue;
     const ds = Math.hypot(n.x - sx, n.z - sz) + Math.abs(n.y - sy) * 3.5;
     if (ds < bestSD) {
       bestSD = ds;
-      startNode = n;
+      startIdx = i;
     }
     const dg = Math.hypot(n.x - gx, n.z - gz) + Math.abs(n.y - gy) * 3.5;
     if (dg < bestGD) {
       bestGD = dg;
-      goalNode = n;
+      goalIdx = i;
     }
   }
 
-  const distMap = new Map<string, number>();
-  const prevMap = new Map<string, string | null>();
-  const unvisited = new Set<string>();
-  for (const n of PALACE_NAV_NODES) {
-    if (n.waterOnly && !allowWater && n.id !== startNode.id && n.id !== goalNode.id) continue;
-    distMap.set(n.id, n.id === startNode.id ? 0 : Infinity);
-    prevMap.set(n.id, null);
-    unvisited.add(n.id);
+  for (let i = 0; i < _NAV_COUNT; i++) {
+    const n = PALACE_NAV_NODES[i];
+    const blocked = Boolean(n.waterOnly && !allowWater && i !== startIdx && i !== goalIdx);
+    _navDist[i] = i === startIdx ? 0 : Infinity;
+    _navPrev[i] = -1;
+    _navVisited[i] = blocked ? 1 : 0;
   }
 
-  while (unvisited.size > 0) {
-    let currId: string | null = null;
+  for (let step = 0; step < _NAV_COUNT; step++) {
+    let currIdx = -1;
     let bestD = Infinity;
-    for (const id of unvisited) {
-      const d = distMap.get(id) ?? Infinity;
-      if (d < bestD) {
-        bestD = d;
-        currId = id;
+    for (let i = 0; i < _NAV_COUNT; i++) {
+      if (_navVisited[i] === 0 && _navDist[i] < bestD) {
+        bestD = _navDist[i];
+        currIdx = i;
       }
     }
-    if (!currId || currId === goalNode.id || bestD === Infinity) break;
-    unvisited.delete(currId);
-    const curr = _PALACE_NAV_MAP.get(currId)!;
-    for (const nid of curr.neighbors) {
-      if (!unvisited.has(nid)) continue;
-      const nb = _PALACE_NAV_MAP.get(nid)!;
+    if (currIdx === -1 || currIdx === goalIdx || bestD === Infinity) break;
+    _navVisited[currIdx] = 1;
+    const curr = PALACE_NAV_NODES[currIdx];
+    const neighbors = _PALACE_NEIGHBOR_IDX[currIdx];
+    for (let k = 0; k < neighbors.length; k++) {
+      const nid = neighbors[k];
+      if (_navVisited[nid] !== 0) continue;
+      const nb = PALACE_NAV_NODES[nid];
       const stepCost = Math.hypot(nb.x - curr.x, nb.z - curr.z) + Math.abs(nb.y - curr.y) * 1.4;
       const alt = bestD + stepCost;
-      if (alt < (distMap.get(nid) ?? Infinity)) {
-        distMap.set(nid, alt);
-        prevMap.set(nid, currId);
+      if (alt < _navDist[nid]) {
+        _navDist[nid] = alt;
+        _navPrev[nid] = currIdx;
       }
     }
   }
 
-  const path: Array<{ x: number; y: number; z: number }> = [];
-  let trace: string | null = goalNode.id;
-  while (trace) {
-    const node = _PALACE_NAV_MAP.get(trace);
-    if (node) path.unshift({ x: node.x, y: node.y, z: node.z });
-    trace = prevMap.get(trace) ?? null;
+  let traceCount = 0;
+  let trace = goalIdx;
+  while (trace !== -1 && traceCount < _NAV_COUNT) {
+    _navTrace[traceCount++] = trace;
+    trace = _navPrev[trace];
   }
-  path.push({ x: gx, y: gy, z: gz });
+
+  const path = outPath ?? [];
+  let writeIdx = 0;
+  for (let i = traceCount - 1; i >= 0; i--) {
+    const node = PALACE_NAV_NODES[_navTrace[i]];
+    writeIdx = pushReusableNavWaypoint(path, writeIdx, node.x, node.y, node.z);
+  }
+  writeIdx = pushReusableNavWaypoint(path, writeIdx, gx, gy, gz);
+  path.length = writeIdx;
   return path;
 }
 
+/**
+ * Zero-allocation patrol target selector for Ayodhya NPCs & swimmers.
+ */
 export function pickNavMeshPatrolTarget(
   x: number,
   y: number,
@@ -1180,43 +1264,51 @@ export function pickNavMeshPatrolTarget(
   homeX: number,
   homeZ: number,
   allowWater: boolean,
-  wantWater: boolean
+  wantWater: boolean,
+  outPath?: Array<{ x: number; y: number; z: number }>
 ): Array<{ x: number; y: number; z: number }> {
-  let nearest = PALACE_NAV_NODES[0];
+  let nearestIdx = 0;
   let bestD = Infinity;
-  for (let i = 0; i < PALACE_NAV_NODES.length; i++) {
+  for (let i = 0; i < _NAV_COUNT; i++) {
     const n = PALACE_NAV_NODES[i];
     if (n.waterOnly && !allowWater) continue;
     const d = Math.hypot(n.x - x, n.z - z) + Math.abs(n.y - y) * 3.0;
     if (d < bestD) {
       bestD = d;
-      nearest = n;
+      nearestIdx = i;
     }
   }
 
-  const candidates = nearest.neighbors
-    .map((id) => _PALACE_NAV_MAP.get(id))
-    .filter((n): n is PalaceNavNode => Boolean(n && (!n.waterOnly || allowWater)));
+  const neighborIds = _PALACE_NEIGHBOR_IDX[nearestIdx];
+  let candCount = 0;
+  for (let i = 0; i < neighborIds.length && candCount < 16; i++) {
+    const nid = neighborIds[i];
+    const nb = PALACE_NAV_NODES[nid];
+    if (nb.waterOnly && !allowWater) continue;
+    const waterPenalty = wantWater && !nb.waterOnly ? 10000 : 0;
+    const score = waterPenalty + Math.hypot(nb.x - homeX, nb.z - homeZ);
 
-  if (candidates.length === 0) {
-    return [{ x: homeX, y: 0, z: homeZ }];
+    let pos = candCount;
+    while (pos > 0 && _patrolCandScore[pos - 1] > score) {
+      _patrolCandScore[pos] = _patrolCandScore[pos - 1];
+      _patrolCandIdx[pos] = _patrolCandIdx[pos - 1];
+      pos--;
+    }
+    _patrolCandScore[pos] = score;
+    _patrolCandIdx[pos] = nid;
+    candCount++;
   }
 
-  // Prefer returning toward home district if wandered far, or entering water for swimmer devotees
-  candidates.sort((a, b) => {
-    if (wantWater) {
-      const aw = a.waterOnly ? 0 : 1;
-      const bw = b.waterOnly ? 0 : 1;
-      if (aw !== bw) return aw - bw;
-    }
-    const da = Math.hypot(a.x - homeX, a.z - homeZ);
-    const db = Math.hypot(b.x - homeX, b.z - homeZ);
-    return da - db;
-  });
+  const path = outPath ?? [];
+  if (candCount === 0) {
+    path.length = pushReusableNavWaypoint(path, 0, homeX, 0, homeZ);
+    return path;
+  }
 
-  const poolCount = wantWater ? 1 : Math.min(candidates.length, 3);
-  const chosen = candidates[Math.floor(Math.random() * poolCount)];
-  return [{ x: chosen.x, y: chosen.y, z: chosen.z }];
+  const poolCount = wantWater ? 1 : Math.min(candCount, 3);
+  const chosen = PALACE_NAV_NODES[_patrolCandIdx[Math.floor(Math.random() * poolCount)]];
+  path.length = pushReusableNavWaypoint(path, 0, chosen.x, chosen.y, chosen.z);
+  return path;
 }
 
 export function getDistrictName(x: number, z: number): {

@@ -19,12 +19,16 @@ import { soundEngine } from '../utils/audio';
 import { ObjectPoolManager, swapRemoveAt } from './ObjectPoolManager';
 import { OcclusionCullingManager } from './OcclusionCullingManager';
 import {
+  applyRigLodDetailTier,
   computeEntityLodTier,
   MobileLodAssetCache,
   wrapBlackMountainWithLod,
+  wrapBridgeWithLod,
   wrapDemonStructureWithLod,
+  wrapMahadevWithLod,
   wrapPavilionWithLod,
   wrapTempleWithLod,
+  wrapToranaWithLod,
   wrapVolcanoWithLod,
 } from './MobileLodManager';
 import { StaticColliderSpatialGrid } from './StaticColliderSpatialGrid';
@@ -311,6 +315,116 @@ export function solveTwoBoneLegIK(
   out.kneeFlex = THREE.MathUtils.clamp(Math.PI - beta, 0.04, 1.65);
 }
 
+function shortestAngleDiff(cur: number, tgt: number): number {
+  let diff = tgt - cur;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return diff;
+}
+
+function dampAngle(cur: number, tgt: number, lambda: number, dt: number): number {
+  const diff = shortestAngleDiff(cur, tgt);
+  return cur + diff * (1 - Math.exp(-lambda * dt));
+}
+
+export interface CharacterPoseState {
+  leftHip: number;
+  rightHip: number;
+  leftKnee: number;
+  rightKnee: number;
+  leftAnkle: number;
+  rightAnkle: number;
+  leftLegZ: number;
+  rightLegZ: number;
+  leftArm: number;
+  rightArm: number;
+  leftArmZ: number;
+  rightArmZ: number;
+  leftElbow: number;
+  rightElbow: number;
+  hipY: number;
+  torsoRotX: number;
+  torsoRotY: number;
+  torsoRotZ: number;
+  pleatRotX: number;
+  headRotX: number;
+  headRotY: number;
+}
+
+export function createDefaultPoseState(hipY = 0.93): CharacterPoseState {
+  return {
+    leftHip: 0,
+    rightHip: 0,
+    leftKnee: 0.06,
+    rightKnee: 0.06,
+    leftAnkle: -0.04,
+    rightAnkle: -0.04,
+    leftLegZ: 0,
+    rightLegZ: 0,
+    leftArm: -0.1,
+    rightArm: 0.03,
+    leftArmZ: 0,
+    rightArmZ: 0,
+    leftElbow: -0.44,
+    rightElbow: -0.22,
+    hipY,
+    torsoRotX: 0,
+    torsoRotY: 0,
+    torsoRotZ: 0,
+    pleatRotX: -0.05,
+    headRotX: 0,
+    headRotY: 0,
+  };
+}
+
+function resetPoseState(p: CharacterPoseState, hipY = 0.93): void {
+  p.leftHip = 0;
+  p.rightHip = 0;
+  p.leftKnee = 0.06;
+  p.rightKnee = 0.06;
+  p.leftAnkle = -0.04;
+  p.rightAnkle = -0.04;
+  p.leftLegZ = 0;
+  p.rightLegZ = 0;
+  p.leftArm = -0.1;
+  p.rightArm = 0.03;
+  p.leftArmZ = 0;
+  p.rightArmZ = 0;
+  p.leftElbow = -0.44;
+  p.rightElbow = -0.22;
+  p.hipY = hipY;
+  p.torsoRotX = 0;
+  p.torsoRotY = 0;
+  p.torsoRotZ = 0;
+  p.pleatRotX = -0.05;
+  p.headRotX = 0;
+  p.headRotY = 0;
+}
+
+export interface QuadrupedAnimState {
+  speedBlend: number;
+  legX: [number, number, number, number];
+  kneeX: [number, number, number, number];
+  headX: number;
+  headY: number;
+  tailX: number;
+  tailZ: number;
+  kinematicAccumDt: number;
+}
+
+function createDefaultQuadrupedState(): QuadrupedAnimState {
+  return {
+    speedBlend: 0,
+    legX: [0, 0, 0, 0],
+    kneeX: [0.04, 0.04, 0.04, 0.04],
+    headX: 0.56,
+    headY: 0,
+    tailX: -0.04,
+    tailZ: 0,
+    kinematicAccumDt: 0,
+  };
+}
+
 interface ChariotEntity {
   id: string;
   rig: ChariotRig;
@@ -321,6 +435,7 @@ interface ChariotEntity {
   pitch: number;
   speed: number;
   gaitPhase: number;
+  steedStates: QuadrupedAnimState[];
 }
 
 interface EnemyEntity {
@@ -345,6 +460,13 @@ interface EnemyEntity {
   walkPhase: number;
   alive: boolean;
   missionTag: string | null;
+  pose: CharacterPoseState;
+  speedBlend: number;
+  hitReactTimer: number;
+  hitReactPitch: number;
+  hitReactYaw: number;
+  ghostOpacity: number;
+  kinematicAccumDt: number;
 }
 
 interface AnimalMountEntity {
@@ -363,6 +485,7 @@ interface AnimalMountEntity {
   yaw: number;
   speed: number;
   gaitPhase: number;
+  animState: QuadrupedAnimState;
 }
 
 interface CitizenEntity {
@@ -382,6 +505,10 @@ interface CitizenEntity {
   canSwim: boolean;
   isSwimming: boolean;
   navQueue: Array<{ x: number; y: number; z: number }>;
+  navCursor: number;
+  pose: CharacterPoseState;
+  speedBlend: number;
+  kinematicAccumDt: number;
 }
 
 interface ProjectileEntity {
@@ -452,6 +579,7 @@ export class RamayanaWorldEngine {
   private assetProgress = 0;
   private assetStage = 'Initializing realm...';
   private blipPool: RadarBlip[] = [];
+  private activeBlips: RadarBlip[] = [];
   private hemiLight: THREE.HemisphereLight;
   private giLightProbe: THREE.LightProbe;
   private bounceLight: THREE.DirectionalLight;
@@ -670,22 +798,7 @@ export class RamayanaWorldEngine {
   // Damped Ram pose state & motion-matching continuity channels (zero snapping)
   private ramWasGrounded = true;
   private ramLandingImpact = 0;
-  private ramPose = {
-    leftHip: 0,
-    rightHip: 0,
-    leftKnee: 0.06,
-    rightKnee: 0.06,
-    leftAnkle: -0.04,
-    rightAnkle: -0.04,
-    leftArm: -0.1,
-    rightArm: 0.03,
-    leftElbow: -0.44,
-    rightElbow: -0.22,
-    hipY: 0.93,
-    torsoRotX: 0,
-    torsoRotY: 0,
-    torsoRotZ: 0,
-  };
+  private ramPose: CharacterPoseState = createDefaultPoseState(0.93);
 
   // Camera state (Free 360 horizontal + unrestricted vertical orbit + zoom distance)
   private camYaw = 0;
@@ -1446,6 +1559,46 @@ export class RamayanaWorldEngine {
       }
     }
 
+    // Pre-register ALL Ayodhya Citizen Role/Color Variants upfront (Zero lazy pool creation or runtime shader hitches)
+    const citizenPoolConfigs: Array<{ role: NpcRole; colorHex: number; prewarmCount: number; maxSize: number }> = [
+      { role: 'MINISTER', colorHex: 0xb52b27, prewarmCount: 6, maxSize: 8 },
+      { role: 'COMMANDER', colorHex: 0xd98a1e, prewarmCount: 6, maxSize: 8 },
+      { role: 'SPY', colorHex: 0x2f3b52, prewarmCount: 4, maxSize: 6 },
+      { role: 'SERVANT', colorHex: 0xa35a2a, prewarmCount: 5, maxSize: 8 },
+      { role: 'GROOM', colorHex: 0x4f6840, prewarmCount: 4, maxSize: 6 },
+      { role: 'SOLDIER', colorHex: 0xc44324, prewarmCount: 4, maxSize: 8 },
+      { role: 'CITIZEN', colorHex: 0xe0aa46, prewarmCount: 5, maxSize: 8 },
+      { role: 'CITIZEN', colorHex: 0xd8c39e, prewarmCount: 5, maxSize: 8 },
+      { role: 'CITIZEN', colorHex: 0xc76b44, prewarmCount: 2, maxSize: 6 },
+      { role: 'CITIZEN', colorHex: 0x5c8a72, prewarmCount: 2, maxSize: 6 },
+    ];
+    for (let i = 0; i < citizenPoolConfigs.length; i++) {
+      const cfg = citizenPoolConfigs[i];
+      const poolKey = `citizen_${cfg.role}_${cfg.colorHex}`;
+      pm.registerPool<CharacterRig>({
+        key: poolKey,
+        prewarmCount: cfg.prewarmCount,
+        maxSize: cfg.maxSize,
+        factory: () => {
+          const cRig = createCitizenModel(this.textures!, cfg.colorHex, cfg.role);
+          cRig.root.userData._defaultTorsoY = cRig.torso.position.y;
+          this.enforcePbrAndAnisotropy(cRig.root);
+          cRig.root.visible = false;
+          pm.poolRoot.add(cRig.root);
+          return cRig;
+        },
+        onAcquire: (cRig) => {
+          cRig.root.visible = true;
+        },
+        onRelease: (cRig) => {
+          this.resetPooledCharacterRig(cRig);
+        },
+        onDispose: (cRig) => {
+          pm.disposeObject3DResources(cRig.root);
+        },
+      });
+    }
+
     // Pre-warm compact projectile/VFX pools & final commander shaders synchronously
     // BEFORE renderer.compile so combat triggers zero runtime shader stalls.
     // Remaining extra standby Demon rigs warm non-blockingly via stepPrewarm() in the loop.
@@ -1943,6 +2096,24 @@ export class RamayanaWorldEngine {
 
     const addRoad = (w: number, d: number, x: number, z: number) => {
       if (w <= 0.5 || d <= 0.5) return;
+      if (w > 220 || d > 220) {
+        if (w >= d) {
+          const chunks = Math.ceil(w / 200);
+          const cw = w / chunks;
+          const startX = x - w * 0.5;
+          for (let ci = 0; ci < chunks; ci++) {
+            addRoad(cw + 0.04, d, startX + (ci + 0.5) * cw, z);
+          }
+        } else {
+          const chunks = Math.ceil(d / 200);
+          const cd = d / chunks;
+          const startZ = z - d * 0.5;
+          for (let ci = 0; ci < chunks; ci++) {
+            addRoad(w, cd + 0.04, x, startZ + (ci + 0.5) * cd);
+          }
+        }
+        return;
+      }
       const segW = Math.min(280, Math.max(4, Math.ceil(w / 8)));
       const segD = Math.max(4, Math.ceil(d / 4));
       const geo = new THREE.PlaneGeometry(w, d, segW, segD);
@@ -2039,15 +2210,29 @@ export class RamayanaWorldEngine {
 
     // Colossal Central Monumental Statue of Lord Mahadev with Black Shivling Base at (0, 0)
     const mahadev = createMahadevStatueModel(textures, 0, 0);
-    this.scene.add(mahadev.group);
-    this.lockStaticHierarchy(mahadev.group);
-    this.occlusionManager.registerFromObject(mahadev.group, { alwaysKeepWithinDist: 75 });
+    const mahadevBaseY = groundHeightAt(0, 0);
+    const mahadevLod = wrapMahadevWithLod(mahadev.group, 0, 0, this.lodCache!);
+    mahadevLod.autoUpdate = false;
+    this.scene.add(mahadevLod);
+    this.lockStaticHierarchy(mahadevLod);
+    this.occlusionManager.registerFromObject(mahadevLod, {
+      alwaysKeepWithinDist: 75,
+      onVisible: () => mahadevLod.update(this.camera),
+    });
+    this.occlusionManager.registerSolidOccluder({
+      minX: -2.6,
+      minY: mahadevBaseY,
+      minZ: -2.6,
+      maxX: 2.6,
+      maxY: mahadevBaseY + 2.6,
+      maxZ: 2.6,
+    });
     this.circleColliders.push({
       x: 0,
       z: 0,
       radius: mahadev.radius,
       height: mahadev.height,
-      baseY: groundHeightAt(0, 0),
+      baseY: mahadevBaseY,
     });
 
     // Grand Royal Torana Archways framing the central plaza & 2.5 km Frontier Gate
@@ -2055,18 +2240,7 @@ export class RamayanaWorldEngine {
     this.addToranaArch(21, 0, Math.PI / 2);
     this.addToranaArch(2080, 0, Math.PI / 2);
 
-    // 3. Sculpted 20-Foot Deep Meandering Sarayu River Water Ribbon (clear translucent aqua revealing full depth & aquatic life)
-    const waterGeo = new THREE.PlaneGeometry(1, 840, 14, 220);
-    waterGeo.rotateX(-Math.PI / 2);
-    const wPos = waterGeo.attributes.position;
-    for (let i = 0; i < wPos.count; i++) {
-      const u = wPos.getX(i);
-      const wz = wPos.getZ(i);
-      const rc = riverCenterX(wz);
-      const rw = riverHalfWidth(wz);
-      wPos.setX(i, rc + u * (rw * 2 + 5.2));
-    }
-    waterGeo.computeVertexNormals();
+    // 3. Sculpted 20-Foot Deep Meandering Sarayu River Water Ribbon (chunked into 7 seamless frustum-culled ribbons)
     const waterMat = new THREE.MeshPhysicalMaterial({
       map: textures.water,
       normalMap: textures.waterNormal,
@@ -2098,12 +2272,49 @@ export class RamayanaWorldEngine {
         `
       );
     };
-    const waterMesh = new THREE.Mesh(waterGeo, waterMat);
-    waterMesh.position.set(0, RIVER_SURFACE_Y, 0);
-    waterMesh.renderOrder = 2;
-    this.scene.add(waterMesh);
-    this.lockStaticHierarchy(waterMesh);
-    this.occlusionManager.registerFromObject(waterMesh, { alwaysKeepWithinDist: 160, skipOccluderCull: true });
+    const riverChunkCount = 7;
+    const riverTotalLen = 840;
+    const riverChunkSpan = riverTotalLen / riverChunkCount;
+    let firstWaterMesh: THREE.Mesh | null = null;
+    for (let rcIdx = 0; rcIdx < riverChunkCount; rcIdx++) {
+      const cz = -riverTotalLen * 0.5 + (rcIdx + 0.5) * riverChunkSpan;
+      const chunkLen = riverChunkSpan + 0.4;
+      const chunkGeo = new THREE.PlaneGeometry(1, chunkLen, 14, 32);
+      chunkGeo.rotateX(-Math.PI / 2);
+      const cPos = chunkGeo.attributes.position;
+      let minX = Infinity;
+      let maxX = -Infinity;
+      for (let i = 0; i < cPos.count; i++) {
+        const u = cPos.getX(i);
+        const wz = cz + cPos.getZ(i);
+        const rc = riverCenterX(wz);
+        const rw = riverHalfWidth(wz);
+        const wx = rc + u * (rw * 2 + 5.2);
+        cPos.setX(i, wx);
+        if (wx < minX) minX = wx;
+        if (wx > maxX) maxX = wx;
+      }
+      chunkGeo.computeVertexNormals();
+      const chunkMesh = new THREE.Mesh(chunkGeo, waterMat);
+      chunkMesh.position.set(0, RIVER_SURFACE_Y, cz);
+      chunkMesh.renderOrder = 2;
+      this.scene.add(chunkMesh);
+      this.lockStaticHierarchy(chunkMesh);
+      this.occlusionManager.registerBounds(
+        chunkMesh,
+        {
+          minX: minX - 1,
+          minY: RIVER_SURFACE_Y - 1,
+          minZ: cz - chunkLen * 0.5,
+          maxX: maxX + 1,
+          maxY: RIVER_SURFACE_Y + 1,
+          maxZ: cz + chunkLen * 0.5,
+        },
+        { alwaysKeepWithinDist: 160, skipOccluderCull: true }
+      );
+      if (!firstWaterMesh) firstWaterMesh = chunkMesh;
+    }
+    const waterMesh = firstWaterMesh!;
 
     // 4. Arched Carved Sandstone Bridges Matching groundHeightAt(x, z) Strictly
     const bridgeMat = new THREE.MeshStandardMaterial({
@@ -2191,9 +2402,20 @@ export class RamayanaWorldEngine {
           });
         });
       });
-      this.scene.add(bridgeGroup);
-      this.lockStaticHierarchy(bridgeGroup);
-      this.occlusionManager.registerFromObject(bridgeGroup, { alwaysKeepWithinDist: 75 });
+      const bridgeLod = wrapBridgeWithLod(
+        bridgeGroup,
+        RIVER_CENTER_X,
+        bz,
+        BRIDGE_HALF_SPAN,
+        this.lodCache!
+      );
+      bridgeLod.autoUpdate = false;
+      this.scene.add(bridgeLod);
+      this.lockStaticHierarchy(bridgeLod);
+      this.occlusionManager.registerFromObject(bridgeLod, {
+        alwaysKeepWithinDist: 75,
+        onVisible: () => bridgeLod.update(this.camera),
+      });
     });
 
     await checkStage(0.38, 'Constructing 7-story Suryavanshi Palace & Sabha Hall');
@@ -2225,7 +2447,7 @@ export class RamayanaWorldEngine {
 
     await checkStage(0.50, 'Building royal stables, training grounds & Surya-Kund stepwell');
 
-    // 5b. Functional Servant Quarters Wing
+    // 5b. Functional Servant Quarters Wing + Conservative Solid Rear Masonry Occluders
     const servantsBuilt = createServantQuartersModel(
       textures,
       SERVANT_QUARTERS_POS.x,
@@ -2234,6 +2456,20 @@ export class RamayanaWorldEngine {
     this.scene.add(servantsBuilt.group);
     this.lockStaticHierarchy(servantsBuilt.group);
     this.occlusionManager.registerFromObject(servantsBuilt.group, { alwaysKeepWithinDist: 80 });
+    const sqBaseY = Math.max(
+      RIVER_SURFACE_Y + 0.35,
+      groundHeightAt(SERVANT_QUARTERS_POS.x, SERVANT_QUARTERS_POS.z)
+    );
+    [-7.2, 7.2].forEach((qz) => {
+      this.occlusionManager.registerSolidOccluder({
+        minX: SERVANT_QUARTERS_POS.x + 5.8,
+        minY: sqBaseY + 0.35,
+        minZ: SERVANT_QUARTERS_POS.z + qz - 2.95,
+        maxX: SERVANT_QUARTERS_POS.x + 6.2,
+        maxY: sqBaseY + 3.9,
+        maxZ: SERVANT_QUARTERS_POS.z + qz + 2.95,
+      });
+    });
     this.colliders.push(...servantsBuilt.colliders);
     this.roofOccluders.push(...servantsBuilt.roofOccluders);
 
@@ -2247,6 +2483,18 @@ export class RamayanaWorldEngine {
     this.scene.add(hathiBuilt.group);
     this.lockStaticHierarchy(hathiBuilt.group);
     this.occlusionManager.registerFromObject(hathiBuilt.group, { alwaysKeepWithinDist: 80 });
+    const hathiBaseY = Math.max(
+      RIVER_SURFACE_Y + 0.35,
+      groundHeightAt(HATHI_STABLE_POS.x, HATHI_STABLE_POS.z)
+    );
+    this.occlusionManager.registerSolidOccluder({
+      minX: HATHI_STABLE_POS.x - 10.6,
+      minY: hathiBaseY + 0.3,
+      minZ: HATHI_STABLE_POS.z - 6.8,
+      maxX: HATHI_STABLE_POS.x + 10.6,
+      maxY: hathiBaseY + 5.1,
+      maxZ: HATHI_STABLE_POS.z - 6.2,
+    });
     this.colliders.push(...hathiBuilt.colliders);
     this.roofOccluders.push(...hathiBuilt.roofOccluders);
     hathiBuilt.elephantEntities.forEach((ent, idx) => {
@@ -2271,6 +2519,18 @@ export class RamayanaWorldEngine {
     this.scene.add(ashvaBuilt.group);
     this.lockStaticHierarchy(ashvaBuilt.group);
     this.occlusionManager.registerFromObject(ashvaBuilt.group, { alwaysKeepWithinDist: 80 });
+    const ashvaBaseY = Math.max(
+      RIVER_SURFACE_Y + 0.35,
+      groundHeightAt(ASHVA_STABLE_POS.x, ASHVA_STABLE_POS.z)
+    );
+    this.occlusionManager.registerSolidOccluder({
+      minX: ASHVA_STABLE_POS.x - 11.4,
+      minY: ashvaBaseY + 0.3,
+      minZ: ASHVA_STABLE_POS.z - 5.85,
+      maxX: ASHVA_STABLE_POS.x + 11.4,
+      maxY: ashvaBaseY + 4.1,
+      maxZ: ASHVA_STABLE_POS.z - 5.35,
+    });
     this.colliders.push(...ashvaBuilt.colliders);
     this.roofOccluders.push(...ashvaBuilt.roofOccluders);
     ashvaBuilt.horseEntities.forEach((ent, idx) => {
@@ -2875,9 +3135,14 @@ export class RamayanaWorldEngine {
     beam2.position.y = 8.45;
     group.add(beam2);
 
-    this.scene.add(group);
-    this.lockStaticHierarchy(group);
-    this.occlusionManager.registerFromObject(group, { alwaysKeepWithinDist: 75 });
+    const toranaLod = wrapToranaWithLod(group, x, z, rotY, this.lodCache!);
+    toranaLod.autoUpdate = false;
+    this.scene.add(toranaLod);
+    this.lockStaticHierarchy(toranaLod);
+    this.occlusionManager.registerFromObject(toranaLod, {
+      alwaysKeepWithinDist: 75,
+      onVisible: () => toranaLod.update(this.camera),
+    });
   }
 
   private populateInstancedNature(): void {
@@ -3444,9 +3709,11 @@ export class RamayanaWorldEngine {
     });
 
     const totalFlames = positions.length + this.palaceTorchAnchors.length;
-    const plinths = new THREE.InstancedMesh(stonePlinthGeo, stoneMat, positions.length);
-    const posts = new THREE.InstancedMesh(mergedTorchIronGeo, ironMat, positions.length);
     const embers = new THREE.InstancedMesh(emberGeo, emberMat, totalFlames);
+
+    // Simplified LOD1 6-sided lamp post proxy for distant spatial sectors (>= 115m)
+    const litePostGeo = new THREE.CylinderGeometry(0.11, 0.24, 3.85, 6);
+    litePostGeo.translate(0, 1.925, 0);
 
     // Designated Ayodhya Street Lamp Amber Crystal Lantern Globes mounted on outer avenue & courtyard lamp posts
     const lanternGeo = new THREE.SphereGeometry(0.24, 10, 8);
@@ -3458,7 +3725,6 @@ export class RamayanaWorldEngine {
       transparent: true,
       opacity: 0.88,
     });
-    const streetLampGlobes = new THREE.InstancedMesh(lanternGeo, this.lampBulbMat, positions.length);
 
     this.torchFlamesOuter = new THREE.InstancedMesh(outerFlameGeo, outerFlameMat, totalFlames);
     this.torchFlamesCore = new THREE.InstancedMesh(coreFlameGeo, coreFlameMat, totalFlames);
@@ -3466,18 +3732,27 @@ export class RamayanaWorldEngine {
     this.torchFlamesCore.frustumCulled = false;
     this.torchFlameAnchors = [];
 
+    const LAMP_SECTOR_W = 160;
+    const lampSectors = new Map<
+      number,
+      Array<{ x: number; y: number; z: number; ry: number }>
+    >();
+
     positions.forEach(([x, z], idx) => {
       const y = groundHeightAt(x, z);
+      const ry = idx * 0.5;
       _dummy.position.set(x, y, z);
-      _dummy.rotation.set(0, idx * 0.5, 0);
+      _dummy.rotation.set(0, ry, 0);
       _dummy.scale.setScalar(1);
       _dummy.updateMatrix();
-      plinths.setMatrixAt(idx, _dummy.matrix);
-      posts.setMatrixAt(idx, _dummy.matrix);
 
-      _dummy.position.set(x, y + 3.74, z);
-      _dummy.updateMatrix();
-      streetLampGlobes.setMatrixAt(idx, _dummy.matrix);
+      const secIdx = Math.floor(x / LAMP_SECTOR_W);
+      let secList = lampSectors.get(secIdx);
+      if (!secList) {
+        secList = [];
+        lampSectors.set(secIdx, secList);
+      }
+      secList.push({ x, y, z, ry });
 
       _dummy.position.set(x, y + 3.66, z);
       _dummy.updateMatrix();
@@ -3496,6 +3771,89 @@ export class RamayanaWorldEngine {
       });
     });
 
+    // Partition avenue lamp plinths, forged iron posts, and lantern globes into 160m X-axis THREE.LOD sectors
+    lampSectors.forEach((items) => {
+      const count = items.length;
+      const plinths = new THREE.InstancedMesh(stonePlinthGeo, stoneMat, count);
+      const posts0 = new THREE.InstancedMesh(mergedTorchIronGeo, ironMat, count);
+      const globes = new THREE.InstancedMesh(lanternGeo, this.lampBulbMat!, count);
+      const posts1 = new THREE.InstancedMesh(litePostGeo, ironMat, count);
+      plinths.frustumCulled = false;
+      posts0.frustumCulled = false;
+      globes.frustumCulled = false;
+      posts1.frustumCulled = false;
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let minZ = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      let maxZ = -Infinity;
+      let sumX = 0;
+      let sumY = 0;
+      let sumZ = 0;
+
+      for (let li = 0; li < count; li++) {
+        const it = items[li];
+        _dummy.position.set(it.x, it.y, it.z);
+        _dummy.rotation.set(0, it.ry, 0);
+        _dummy.scale.setScalar(1);
+        _dummy.updateMatrix();
+        plinths.setMatrixAt(li, _dummy.matrix);
+        posts0.setMatrixAt(li, _dummy.matrix);
+        posts1.setMatrixAt(li, _dummy.matrix);
+
+        _dummy.position.set(it.x, it.y + 3.74, it.z);
+        _dummy.updateMatrix();
+        globes.setMatrixAt(li, _dummy.matrix);
+
+        if (it.x - 1.5 < minX) minX = it.x - 1.5;
+        if (it.y - 0.5 < minY) minY = it.y - 0.5;
+        if (it.z - 1.5 < minZ) minZ = it.z - 1.5;
+        if (it.x + 1.5 > maxX) maxX = it.x + 1.5;
+        if (it.y + 4.8 > maxY) maxY = it.y + 4.8;
+        if (it.z + 1.5 > maxZ) maxZ = it.z + 1.5;
+        sumX += it.x;
+        sumY += it.y + 2.0;
+        sumZ += it.z;
+      }
+
+      plinths.instanceMatrix.needsUpdate = true;
+      posts0.instanceMatrix.needsUpdate = true;
+      globes.instanceMatrix.needsUpdate = true;
+      posts1.instanceMatrix.needsUpdate = true;
+      plinths.computeBoundingSphere();
+      posts0.computeBoundingSphere();
+      globes.computeBoundingSphere();
+      posts1.computeBoundingSphere();
+
+      const cx = sumX / count;
+      const cy = sumY / count;
+      const cz = sumZ / count;
+      const lod0 = new THREE.Group();
+      lod0.add(plinths, posts0, globes);
+      lod0.position.set(-cx, -cy, -cz);
+      const lod1 = new THREE.Group();
+      lod1.add(posts1);
+      lod1.position.set(-cx, -cy, -cz);
+
+      const lod = new THREE.LOD();
+      lod.position.set(cx, cy, cz);
+      lod.addLevel(lod0, 0);
+      lod.addLevel(lod1, 115);
+      lod.autoUpdate = false;
+      this.scene.add(lod);
+      this.lockStaticHierarchy(lod);
+      this.occlusionManager.registerBounds(
+        lod,
+        { minX, minY, minZ, maxX, maxY, maxZ },
+        {
+          alwaysKeepWithinDist: 85,
+          onVisible: () => lod.update(this.camera),
+        }
+      );
+    });
+
     // Also attach animated flames to EVERY floor's standing torches in the 7-story palace
     this.palaceTorchAnchors.forEach((pa, pIdx) => {
       const fIdx = positions.length + pIdx;
@@ -3509,30 +3867,15 @@ export class RamayanaWorldEngine {
       this.torchFlameAnchors.push(pa);
     });
 
-    plinths.instanceMatrix.needsUpdate = true;
-    posts.instanceMatrix.needsUpdate = true;
     embers.instanceMatrix.needsUpdate = true;
-    streetLampGlobes.instanceMatrix.needsUpdate = true;
     this.torchFlamesOuter.instanceMatrix.needsUpdate = true;
     this.torchFlamesCore.instanceMatrix.needsUpdate = true;
-    plinths.computeBoundingSphere();
-    posts.computeBoundingSphere();
     embers.computeBoundingSphere();
-    streetLampGlobes.computeBoundingSphere();
     this.torchFlamesOuter.computeBoundingSphere();
     this.torchFlamesCore.computeBoundingSphere();
-    this.scene.add(
-      plinths,
-      posts,
-      embers,
-      streetLampGlobes,
-      this.torchFlamesOuter,
-      this.torchFlamesCore
-    );
-    this.lockStaticHierarchy(plinths);
-    this.lockStaticHierarchy(posts);
+    embers.frustumCulled = false;
+    this.scene.add(embers, this.torchFlamesOuter, this.torchFlamesCore);
     this.lockStaticHierarchy(embers);
-    this.lockStaticHierarchy(streetLampGlobes);
   }
 
   private createWaypointBeacon(): THREE.Group {
@@ -3631,7 +3974,7 @@ export class RamayanaWorldEngine {
 
     // Reset player state & restore standing cloth transforms
     this.autoDriveActive = false;
-    this.chariotAutoWaypoints = [];
+    this.chariotAutoWaypoints.length = 0;
     this.chariotAutoWpIdx = 0;
     this.chariotAutoGoalKey = '';
     this.chariotReverseIntent = false;
@@ -3644,6 +3987,7 @@ export class RamayanaWorldEngine {
     this.grounded = true;
     this.playerYaw = Math.PI;
     this.walkPhase = 0;
+    resetPoseState(this.ramPose, 0.93);
     this.ramRig.root.position.set(this.playerX, this.playerY, this.playerZ);
     this.ramRig.root.rotation.order = 'YXZ';
     this.ramRig.root.rotation.set(0, this.playerYaw, 0);
@@ -3689,6 +4033,7 @@ export class RamayanaWorldEngine {
         yaw: tpl.homeYaw,
         speed: 0,
         gaitPhase: 0,
+        animState: createDefaultQuadrupedState(),
       };
     });
 
@@ -3714,6 +4059,7 @@ export class RamayanaWorldEngine {
         pitch: 0,
         speed: 0,
         gaitPhase: 0,
+        steedStates: rig.steeds.map(() => createDefaultQuadrupedState()),
       });
     });
 
@@ -3728,30 +4074,6 @@ export class RamayanaWorldEngine {
       canSwim = false
     ) => {
       const poolKey = `citizen_${role}_${colorHex}`;
-      if (!this.poolManager.getPool<CharacterRig>(poolKey)) {
-        this.poolManager.registerPool<CharacterRig>({
-          key: poolKey,
-          prewarmCount: 0,
-          maxSize: 16,
-          factory: () => {
-            const cRig = createCitizenModel(this.textures!, colorHex, role);
-            cRig.root.userData._defaultTorsoY = cRig.torso.position.y;
-            this.enforcePbrAndAnisotropy(cRig.root);
-            cRig.root.visible = false;
-            this.poolManager.poolRoot.add(cRig.root);
-            return cRig;
-          },
-          onAcquire: (cRig) => {
-            cRig.root.visible = true;
-          },
-          onRelease: (cRig) => {
-            this.resetPooledCharacterRig(cRig);
-          },
-          onDispose: (cRig) => {
-            this.poolManager.disposeObject3DResources(cRig.root);
-          },
-        });
-      }
       const rig = this.poolManager.acquire<CharacterRig>(poolKey);
       const initY = this.surfaceHeightAt(x, z);
       const safe = this.resolveStaticColliders(x, z, 0.48, initY, false, false, canSwim);
@@ -3774,6 +4096,10 @@ export class RamayanaWorldEngine {
         canSwim,
         isSwimming: false,
         navQueue: [],
+        navCursor: 0,
+        pose: createDefaultPoseState(0.875),
+        speedBlend: 0,
+        kinematicAccumDt: 0,
       });
     };
 
@@ -3919,14 +4245,16 @@ export class RamayanaWorldEngine {
     for (let i = 0; i < this.citizens.length; i++) {
       const c = this.citizens[i];
       if (c.courtSeat && !c.seated) {
-        c.navQueue = findPalaceNavPath(
+        c.navCursor = 0;
+        findPalaceNavPath(
           c.x,
           c.y,
           c.z,
           c.courtSeat.x,
           c.courtSeat.y,
           c.courtSeat.z,
-          false
+          false,
+          c.navQueue
         );
       }
     }
@@ -3947,11 +4275,7 @@ export class RamayanaWorldEngine {
   }
 
   private restoreRamStandingClothes(): void {
-    this.ramRig.leftLeg.rotation.z = 0;
-    this.ramRig.rightLeg.rotation.z = 0;
-    this.ramRig.torso.rotation.set(0, 0, 0);
     if (this.ramRig.centerPleat) {
-      this.ramRig.centerPleat.rotation.x = -0.045;
       this.ramRig.centerPleat.scale.set(1.12, 1.0, 0.34);
     }
     if (this.ramRig.capePivot) {
@@ -4029,6 +4353,13 @@ export class RamayanaWorldEngine {
       walkPhase: Math.random() * 6,
       alive: true,
       missionTag,
+      pose: createDefaultPoseState(variant === 'RABBIT_DEMON' ? 0.88 : 0.96),
+      speedBlend: 0,
+      hitReactTimer: 0,
+      hitReactPitch: 0,
+      hitReactYaw: 0,
+      ghostOpacity: 0.72,
+      kinematicAccumDt: 0,
     });
   }
 
@@ -5206,6 +5537,12 @@ export class RamayanaWorldEngine {
     if (!enemy.alive) return;
     enemy.hp -= amount;
     soundEngine.playHit();
+    if (enemy.hp > 0) {
+      enemy.hitReactTimer = 0.28;
+      enemy.hitReactPitch = -0.34;
+      enemy.hitReactYaw = (Math.random() < 0.5 ? -1 : 1) * (0.28 + Math.random() * 0.2);
+      return;
+    }
     if (enemy.hp <= 0) {
       enemy.alive = false;
       this.poolManager.release(
@@ -5439,23 +5776,53 @@ export class RamayanaWorldEngine {
     rig: CharacterRig,
     steerRate: number,
     isAiming: boolean,
-    elapsed: number
+    elapsed: number,
+    dt = 0.016
   ): void {
-    // Seated posture on Ratha throne bench: pelvis flush on cushion, thighs horizontal inside front rail, shins straight onto deck
-    rig.torso.position.y = 0.94;
-    rig.leftLeg.position.y = 0.94;
-    rig.rightLeg.position.y = 0.94;
+    const breath = Math.sin(elapsed * 2.2) * 0.01;
+    const steerShift = THREE.MathUtils.clamp(steerRate * 0.16, -0.22, 0.22);
+    const tLeftArm = isAiming ? -1.16 : -0.76 - steerShift;
+    const tRightArm = isAiming ? -0.68 : -0.76 + steerShift;
+    const tLeftArmZ = isAiming ? 0 : 0.09;
+    const tRightArmZ = isAiming ? 0 : -0.09;
+    const tLeftElbow = isAiming ? -0.32 : -0.72;
+    const tRightElbow = isAiming ? -1.24 : -0.72;
+    const tTorsoY = THREE.MathUtils.clamp(-steerRate * 0.14, -0.18, 0.18);
 
-    rig.leftLeg.rotation.set(-1.46, 0, 0);
-    rig.rightLeg.rotation.set(-1.46, 0, 0);
-    rig.leftKnee.rotation.x = 1.38;
-    rig.rightKnee.rotation.x = 1.38;
-    rig.leftAnkle.rotation.x = 0.08;
-    rig.rightAnkle.rotation.x = 0.08;
+    const p = this.ramPose;
+    const lam = 16;
+    p.hipY = THREE.MathUtils.damp(p.hipY, 0.94, lam, dt);
+    p.leftHip = THREE.MathUtils.damp(p.leftHip, -1.46, lam, dt);
+    p.rightHip = THREE.MathUtils.damp(p.rightHip, -1.46, lam, dt);
+    p.leftLegZ = THREE.MathUtils.damp(p.leftLegZ, 0, lam, dt);
+    p.rightLegZ = THREE.MathUtils.damp(p.rightLegZ, 0, lam, dt);
+    p.leftKnee = THREE.MathUtils.damp(p.leftKnee, 1.38, lam, dt);
+    p.rightKnee = THREE.MathUtils.damp(p.rightKnee, 1.38, lam, dt);
+    p.leftAnkle = THREE.MathUtils.damp(p.leftAnkle, 0.08, lam, dt);
+    p.rightAnkle = THREE.MathUtils.damp(p.rightAnkle, 0.08, lam, dt);
+    p.pleatRotX = THREE.MathUtils.damp(p.pleatRotX, -1.35, lam, dt);
+    p.torsoRotX = THREE.MathUtils.damp(p.torsoRotX, -0.04 + breath, lam, dt);
+    p.torsoRotY = THREE.MathUtils.damp(p.torsoRotY, tTorsoY, lam, dt);
+    p.torsoRotZ = THREE.MathUtils.damp(p.torsoRotZ, 0, lam, dt);
+    p.leftArm = THREE.MathUtils.damp(p.leftArm, tLeftArm, lam, dt);
+    p.rightArm = THREE.MathUtils.damp(p.rightArm, tRightArm, lam, dt);
+    p.leftArmZ = THREE.MathUtils.damp(p.leftArmZ, tLeftArmZ, lam, dt);
+    p.rightArmZ = THREE.MathUtils.damp(p.rightArmZ, tRightArmZ, lam, dt);
+    p.leftElbow = THREE.MathUtils.damp(p.leftElbow, tLeftElbow, lam, dt);
+    p.rightElbow = THREE.MathUtils.damp(p.rightElbow, tRightElbow, lam, dt);
 
-    // Fold Pitambara front pleat neatly onto horizontal lap so cloth never clips underneath cushion/floor
+    rig.torso.position.y = p.hipY;
+    rig.leftLeg.position.y = p.hipY;
+    rig.rightLeg.position.y = p.hipY;
+    rig.leftLeg.rotation.set(p.leftHip, 0, p.leftLegZ);
+    rig.rightLeg.rotation.set(p.rightHip, 0, p.rightLegZ);
+    rig.leftKnee.rotation.x = p.leftKnee;
+    rig.rightKnee.rotation.x = p.rightKnee;
+    rig.leftAnkle.rotation.x = p.leftAnkle;
+    rig.rightAnkle.rotation.x = p.rightAnkle;
+
     if (rig.centerPleat) {
-      rig.centerPleat.rotation.x = -1.35;
+      rig.centerPleat.rotation.x = p.pleatRotX;
       rig.centerPleat.scale.set(1.06, 0.88, 0.34);
     }
     if (rig.capePivot) {
@@ -5464,42 +5831,53 @@ export class RamayanaWorldEngine {
       rig.capePivot.rotation.x = 0.02;
     }
 
-    const breath = Math.sin(elapsed * 2.2) * 0.01;
-    rig.torso.rotation.x = -0.04 + breath;
-    rig.torso.rotation.y = THREE.MathUtils.clamp(-steerRate * 0.14, -0.18, 0.18);
-
-    // Arms extend forward gripping dynamic chariot reins or draw the Sharnga bow cleanly
-    if (isAiming) {
-      rig.leftArm.rotation.set(-1.16, 0, 0);
-      rig.leftElbow.rotation.x = -0.32;
-      rig.rightArm.rotation.set(-0.68, 0, 0);
-      rig.rightElbow.rotation.x = -1.24;
-    } else {
-      const steerShift = THREE.MathUtils.clamp(steerRate * 0.16, -0.22, 0.22);
-      rig.leftArm.rotation.set(-0.76 - steerShift, 0, 0.09);
-      rig.leftElbow.rotation.x = -0.72;
-      rig.rightArm.rotation.set(-0.76 + steerShift, 0, -0.09);
-      rig.rightElbow.rotation.x = -0.72;
-    }
+    rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
+    rig.leftArm.rotation.set(p.leftArm, 0, p.leftArmZ);
+    rig.rightArm.rotation.set(p.rightArm, 0, p.rightArmZ);
+    rig.leftElbow.rotation.x = p.leftElbow;
+    rig.rightElbow.rotation.x = p.rightElbow;
   }
 
   private applyThroneSittingPose(
     rig: CharacterRig,
     isAiming: boolean,
-    elapsed: number
+    elapsed: number,
+    dt = 0.016
   ): void {
-    rig.torso.position.y = 0.88;
-    rig.leftLeg.position.y = 0.88;
-    rig.rightLeg.position.y = 0.88;
-    rig.leftLeg.rotation.set(-1.42, 0, 0.06);
-    rig.rightLeg.rotation.set(-1.42, 0, -0.06);
-    rig.leftKnee.rotation.x = 1.44;
-    rig.rightKnee.rotation.x = 1.44;
-    rig.leftAnkle.rotation.x = 0.04;
-    rig.rightAnkle.rotation.x = 0.04;
+    const p = this.ramPose;
+    const lam = 15;
+    p.hipY = THREE.MathUtils.damp(p.hipY, 0.88, lam, dt);
+    p.leftHip = THREE.MathUtils.damp(p.leftHip, -1.42, lam, dt);
+    p.rightHip = THREE.MathUtils.damp(p.rightHip, -1.42, lam, dt);
+    p.leftLegZ = THREE.MathUtils.damp(p.leftLegZ, 0.06, lam, dt);
+    p.rightLegZ = THREE.MathUtils.damp(p.rightLegZ, -0.06, lam, dt);
+    p.leftKnee = THREE.MathUtils.damp(p.leftKnee, 1.44, lam, dt);
+    p.rightKnee = THREE.MathUtils.damp(p.rightKnee, 1.44, lam, dt);
+    p.leftAnkle = THREE.MathUtils.damp(p.leftAnkle, 0.04, lam, dt);
+    p.rightAnkle = THREE.MathUtils.damp(p.rightAnkle, 0.04, lam, dt);
+    p.pleatRotX = THREE.MathUtils.damp(p.pleatRotX, -1.35, lam, dt);
+    p.torsoRotX = THREE.MathUtils.damp(p.torsoRotX, -0.02 + Math.sin(elapsed * 1.8) * 0.008, lam, dt);
+    p.torsoRotY = THREE.MathUtils.damp(p.torsoRotY, 0, lam, dt);
+    p.torsoRotZ = THREE.MathUtils.damp(p.torsoRotZ, 0, lam, dt);
+    p.leftArm = THREE.MathUtils.damp(p.leftArm, isAiming ? -1.16 : -0.58, lam, dt);
+    p.rightArm = THREE.MathUtils.damp(p.rightArm, isAiming ? -0.68 : -0.58, lam, dt);
+    p.leftArmZ = THREE.MathUtils.damp(p.leftArmZ, 0, lam, dt);
+    p.rightArmZ = THREE.MathUtils.damp(p.rightArmZ, 0, lam, dt);
+    p.leftElbow = THREE.MathUtils.damp(p.leftElbow, isAiming ? -0.32 : -0.82, lam, dt);
+    p.rightElbow = THREE.MathUtils.damp(p.rightElbow, isAiming ? -1.24 : -0.82, lam, dt);
+
+    rig.torso.position.y = p.hipY;
+    rig.leftLeg.position.y = p.hipY;
+    rig.rightLeg.position.y = p.hipY;
+    rig.leftLeg.rotation.set(p.leftHip, 0, p.leftLegZ);
+    rig.rightLeg.rotation.set(p.rightHip, 0, p.rightLegZ);
+    rig.leftKnee.rotation.x = p.leftKnee;
+    rig.rightKnee.rotation.x = p.rightKnee;
+    rig.leftAnkle.rotation.x = p.leftAnkle;
+    rig.rightAnkle.rotation.x = p.rightAnkle;
 
     if (rig.centerPleat) {
-      rig.centerPleat.rotation.x = -1.35;
+      rig.centerPleat.rotation.x = p.pleatRotX;
       rig.centerPleat.scale.set(1.06, 0.88, 0.34);
     }
     if (rig.capePivot) {
@@ -5508,20 +5886,11 @@ export class RamayanaWorldEngine {
       rig.capePivot.rotation.x = 0.02;
     }
 
-    rig.torso.rotation.x = -0.02 + Math.sin(elapsed * 1.8) * 0.008;
-    rig.torso.rotation.y = 0;
-
-    if (isAiming) {
-      rig.leftArm.rotation.set(-1.16, 0, 0);
-      rig.leftElbow.rotation.x = -0.32;
-      rig.rightArm.rotation.set(-0.68, 0, 0);
-      rig.rightElbow.rotation.x = -1.24;
-    } else {
-      rig.leftArm.rotation.set(-0.58, 0, 0);
-      rig.leftElbow.rotation.x = -0.82;
-      rig.rightArm.rotation.set(-0.58, 0, 0);
-      rig.rightElbow.rotation.x = -0.82;
-    }
+    rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
+    rig.leftArm.rotation.set(p.leftArm, 0, p.leftArmZ);
+    rig.rightArm.rotation.set(p.rightArm, 0, p.rightArmZ);
+    rig.leftElbow.rotation.x = p.leftElbow;
+    rig.rightElbow.rotation.x = p.rightElbow;
   }
 
   private applyAnimalRidingPose(
@@ -5530,33 +5899,59 @@ export class RamayanaWorldEngine {
     gaitCycle: number,
     speedNorm: number,
     isAiming: boolean,
-    elapsed: number
+    elapsed: number,
+    dt = 0.016
   ): void {
     const bounce = Math.abs(Math.sin(gaitCycle)) * 0.024 * speedNorm;
-    const hipY = 0.90 + bounce;
-    rig.torso.position.y = hipY;
-    rig.leftLeg.position.y = hipY;
-    rig.rightLeg.position.y = hipY;
-    if (kind === 'ELEPHANT') {
-      // Seated squarely atop the flat 3.59m velvet howdah cushion with shins draping over front cushion brow
-      rig.leftLeg.rotation.set(-1.38, 0, -0.18);
-      rig.rightLeg.rotation.set(-1.38, 0, 0.18);
-      rig.leftKnee.rotation.x = 1.38;
-      rig.rightKnee.rotation.x = 1.38;
-      rig.leftAnkle.rotation.x = 0.02;
-      rig.rightAnkle.rotation.x = 0.02;
-    } else {
-      // Embraced astride the Royal Horse saddle & caparison with knees clearing flanks cleanly
-      rig.leftLeg.rotation.set(-0.88, 0, -0.50);
-      rig.rightLeg.rotation.set(-0.88, 0, 0.50);
-      rig.leftKnee.rotation.x = 1.08;
-      rig.rightKnee.rotation.x = 1.08;
-      rig.leftAnkle.rotation.x = -0.14;
-      rig.rightAnkle.rotation.x = -0.14;
-    }
+    const tHipY = 0.9 + bounce;
+    const isEle = kind === 'ELEPHANT';
+    const tHipX = isEle ? -1.38 : -0.88;
+    const tLeftLegZ = isEle ? -0.18 : -0.5;
+    const tRightLegZ = isEle ? 0.18 : 0.5;
+    const tKnee = isEle ? 1.38 : 1.08;
+    const tAnkle = isEle ? 0.02 : -0.14;
+    const bob = !isEle ? Math.sin(gaitCycle) * 0.04 * speedNorm : 0;
+    const tLeftArm = isAiming ? -1.16 : isEle ? -0.68 : -0.64 + bob;
+    const tRightArm = isAiming ? -0.68 : isEle ? -0.68 : -0.64 + bob;
+    const tLeftArmZ = isAiming ? 0 : isEle ? 0.04 : 0.11;
+    const tRightArmZ = isAiming ? 0 : isEle ? -0.04 : -0.11;
+    const tLeftElbow = isAiming ? -0.32 : isEle ? -0.72 : -0.82;
+    const tRightElbow = isAiming ? -1.24 : isEle ? -0.72 : -0.82;
+
+    const p = this.ramPose;
+    const lam = 16;
+    p.hipY = THREE.MathUtils.damp(p.hipY, tHipY, lam, dt);
+    p.leftHip = THREE.MathUtils.damp(p.leftHip, tHipX, lam, dt);
+    p.rightHip = THREE.MathUtils.damp(p.rightHip, tHipX, lam, dt);
+    p.leftLegZ = THREE.MathUtils.damp(p.leftLegZ, tLeftLegZ, lam, dt);
+    p.rightLegZ = THREE.MathUtils.damp(p.rightLegZ, tRightLegZ, lam, dt);
+    p.leftKnee = THREE.MathUtils.damp(p.leftKnee, tKnee, lam, dt);
+    p.rightKnee = THREE.MathUtils.damp(p.rightKnee, tKnee, lam, dt);
+    p.leftAnkle = THREE.MathUtils.damp(p.leftAnkle, tAnkle, lam, dt);
+    p.rightAnkle = THREE.MathUtils.damp(p.rightAnkle, tAnkle, lam, dt);
+    p.pleatRotX = THREE.MathUtils.damp(p.pleatRotX, -1.25, lam, dt);
+    p.torsoRotX = THREE.MathUtils.damp(p.torsoRotX, 0.06 * speedNorm + Math.sin(elapsed * 2.4) * 0.01, lam, dt);
+    p.torsoRotY = THREE.MathUtils.damp(p.torsoRotY, 0, lam, dt);
+    p.torsoRotZ = THREE.MathUtils.damp(p.torsoRotZ, 0, lam, dt);
+    p.leftArm = THREE.MathUtils.damp(p.leftArm, tLeftArm, lam, dt);
+    p.rightArm = THREE.MathUtils.damp(p.rightArm, tRightArm, lam, dt);
+    p.leftArmZ = THREE.MathUtils.damp(p.leftArmZ, tLeftArmZ, lam, dt);
+    p.rightArmZ = THREE.MathUtils.damp(p.rightArmZ, tRightArmZ, lam, dt);
+    p.leftElbow = THREE.MathUtils.damp(p.leftElbow, tLeftElbow, lam, dt);
+    p.rightElbow = THREE.MathUtils.damp(p.rightElbow, tRightElbow, lam, dt);
+
+    rig.torso.position.y = p.hipY;
+    rig.leftLeg.position.y = p.hipY;
+    rig.rightLeg.position.y = p.hipY;
+    rig.leftLeg.rotation.set(p.leftHip, 0, p.leftLegZ);
+    rig.rightLeg.rotation.set(p.rightHip, 0, p.rightLegZ);
+    rig.leftKnee.rotation.x = p.leftKnee;
+    rig.rightKnee.rotation.x = p.rightKnee;
+    rig.leftAnkle.rotation.x = p.leftAnkle;
+    rig.rightAnkle.rotation.x = p.rightAnkle;
 
     if (rig.centerPleat) {
-      rig.centerPleat.rotation.x = -1.25;
+      rig.centerPleat.rotation.x = p.pleatRotX;
       rig.centerPleat.scale.set(1.06, 0.85, 0.34);
     }
     if (rig.capePivot) {
@@ -5565,27 +5960,11 @@ export class RamayanaWorldEngine {
       rig.capePivot.rotation.x = 0.08 + speedNorm * 0.28 + Math.sin(elapsed * 3.1) * 0.03;
     }
 
-    rig.torso.rotation.x = 0.06 * speedNorm + Math.sin(elapsed * 2.4) * 0.01;
-    rig.torso.rotation.y = 0;
-
-    if (isAiming) {
-      rig.leftArm.rotation.set(-1.16, 0, 0);
-      rig.leftElbow.rotation.x = -0.32;
-      rig.rightArm.rotation.set(-0.68, 0, 0);
-      rig.rightElbow.rotation.x = -1.24;
-    } else if (kind === 'HORSE') {
-      // Symmetrical forward rein-holding grip positioned directly above the horse's pommel/crest
-      const bob = Math.sin(gaitCycle) * 0.04 * speedNorm;
-      rig.leftArm.rotation.set(-0.64 + bob, 0, 0.11);
-      rig.leftElbow.rotation.x = -0.82;
-      rig.rightArm.rotation.set(-0.64 + bob, 0, -0.11);
-      rig.rightElbow.rotation.x = -0.82;
-    } else {
-      rig.leftArm.rotation.set(-0.68, 0, 0.04);
-      rig.leftElbow.rotation.x = -0.72;
-      rig.rightArm.rotation.set(-0.68, 0, -0.04);
-      rig.rightElbow.rotation.x = -0.72;
-    }
+    rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
+    rig.leftArm.rotation.set(p.leftArm, 0, p.leftArmZ);
+    rig.rightArm.rotation.set(p.rightArm, 0, p.rightArmZ);
+    rig.leftElbow.rotation.x = p.leftElbow;
+    rig.rightElbow.rotation.x = p.rightElbow;
   }
 
   private animateRoyalHorseRig(
@@ -5593,49 +5972,75 @@ export class RamayanaWorldEngine {
     gaitPhase: number,
     speedNorm: number,
     elapsed: number,
-    seed: number
+    seed: number,
+    state?: QuadrupedAnimState,
+    dt = 0.016
   ): void {
-    const moving = speedNorm > 0.025;
-    hr.headPivot.rotation.x =
+    const clampedTarget = THREE.MathUtils.clamp(speedNorm, 0, 1);
+    const amp = state
+      ? (state.speedBlend = THREE.MathUtils.damp(state.speedBlend, clampedTarget, 8.5, dt))
+      : clampedTarget;
+    const moving = amp > 0.015;
+
+    const tHeadX =
       0.56 +
       Math.sin(elapsed * 1.65 + seed) * 0.045 +
-      (moving ? Math.sin(gaitPhase) * 0.085 * speedNorm : 0);
-    hr.headPivot.rotation.y = moving ? Math.cos(gaitPhase * 0.5 + seed) * 0.04 * speedNorm : 0;
+      (moving ? Math.sin(gaitPhase) * 0.085 * amp : 0);
+    const tHeadY = moving ? Math.cos(gaitPhase * 0.5 + seed) * 0.04 * amp : 0;
+    const tTailX =
+      -0.04 - 0.16 * amp + (moving ? Math.cos(gaitPhase * 2.0) * 0.05 * amp : 0);
+    const tTailZ = Math.sin(elapsed * 2.8 + seed) * (0.11 + 0.08 * amp);
 
-    hr.tailGroup.rotation.x =
-      -0.04 - 0.16 * speedNorm + (moving ? Math.cos(gaitPhase * 2.0) * 0.05 * speedNorm : 0);
-    hr.tailGroup.rotation.z =
-      Math.sin(elapsed * 2.8 + seed) * (0.11 + 0.08 * speedNorm);
+    if (state) {
+      state.headX = THREE.MathUtils.damp(state.headX, tHeadX, 11, dt);
+      state.headY = THREE.MathUtils.damp(state.headY, tHeadY, 11, dt);
+      state.tailX = THREE.MathUtils.damp(state.tailX, tTailX, 11, dt);
+      state.tailZ = THREE.MathUtils.damp(state.tailZ, tTailZ, 11, dt);
+      hr.headPivot.rotation.x = state.headX;
+      hr.headPivot.rotation.y = state.headY;
+      hr.tailGroup.rotation.x = state.tailX;
+      hr.tailGroup.rotation.z = state.tailZ;
+    } else {
+      hr.headPivot.rotation.x = tHeadX;
+      hr.headPivot.rotation.y = tHeadY;
+      hr.tailGroup.rotation.x = tTailX;
+      hr.tailGroup.rotation.z = tTailZ;
+    }
+
     for (let p = 0; p < hr.tailPlumes.length; p++) {
       hr.tailPlumes[p].rotation.z =
         (p - 2) * 0.075 + Math.sin(elapsed * 3.2 + seed + p * 0.5) * 0.06;
     }
-
     for (let ei = 0; ei < hr.ears.length; ei++) {
       hr.ears[ei].rotation.x = 0.25 + Math.sin(elapsed * 3.4 + seed + ei) * 0.08;
     }
 
     // Stance-locked diagonal-paired horse gait [LF, RF, LH, RH]:
-    // Linear -v hoof sweep during grounded stance half-cycle + curved dorsal recovery during swing half-cycle
     const phaseOffsets = [0, Math.PI, Math.PI + 0.36, 0.36];
-    const amp = THREE.MathUtils.clamp(speedNorm, 0, 1);
-    const TWO_PI = Math.PI * 2;
     const sweepAmp = 0.52 * amp;
     for (let li = 0; li < hr.legs.length; li++) {
       const p = ((gaitPhase + phaseOffsets[li % 4]) % TWO_PI + TWO_PI) % TWO_PI;
-      if (!moving) {
-        hr.legs[li].rotation.x = 0;
-        if (hr.knees[li]) hr.knees[li].rotation.x = 0.04;
-      } else if (p < Math.PI) {
-        // Stance phase: hoof sweeps smoothly front-to-back matching ground speed
-        const u = p / Math.PI;
-        hr.legs[li].rotation.x = THREE.MathUtils.lerp(-sweepAmp, sweepAmp, u);
-        if (hr.knees[li]) hr.knees[li].rotation.x = 0.04 + Math.sin(u * Math.PI) * 0.06 * amp;
+      let tLegX = 0;
+      let tKneeX = 0.04;
+      if (moving) {
+        if (p < Math.PI) {
+          const u = p / Math.PI;
+          tLegX = THREE.MathUtils.lerp(-sweepAmp, sweepAmp, u);
+          tKneeX = 0.04 + Math.sin(u * Math.PI) * 0.06 * amp;
+        } else {
+          const u = (p - Math.PI) / Math.PI;
+          tLegX = Math.cos(u * Math.PI) * sweepAmp;
+          tKneeX = 0.06 + Math.pow(Math.sin(u * Math.PI), 0.78) * (0.76 * amp);
+        }
+      }
+      if (state) {
+        state.legX[li] = THREE.MathUtils.damp(state.legX[li], tLegX, 16, dt);
+        state.kneeX[li] = THREE.MathUtils.damp(state.kneeX[li], tKneeX, 16, dt);
+        hr.legs[li].rotation.x = state.legX[li];
+        if (hr.knees[li]) hr.knees[li].rotation.x = state.kneeX[li];
       } else {
-        // Swing recovery phase: fetlock & cannon tuck sharply backward as leg returns forward
-        const u = (p - Math.PI) / Math.PI;
-        hr.legs[li].rotation.x = Math.cos(u * Math.PI) * sweepAmp;
-        if (hr.knees[li]) hr.knees[li].rotation.x = 0.06 + Math.pow(Math.sin(u * Math.PI), 0.78) * (0.76 * amp);
+        hr.legs[li].rotation.x = tLegX;
+        if (hr.knees[li]) hr.knees[li].rotation.x = tKneeX;
       }
     }
   }
@@ -5645,29 +6050,79 @@ export class RamayanaWorldEngine {
     phase: number,
     moveIntensity: number,
     elapsed: number,
-    divePitch = 0
+    divePitch = 0,
+    poseState?: CharacterPoseState,
+    dt = 0.016
   ): void {
-    const hipY = 0.90;
-    rig.torso.position.y = hipY;
-    rig.leftLeg.position.y = hipY;
-    rig.rightLeg.position.y = hipY;
+    const tHipY = 0.9;
     const stroke = 0.25 + moveIntensity * 0.55 + divePitch;
-    rig.torso.rotation.x = stroke + Math.sin(elapsed * 2.4) * 0.04;
-    rig.torso.rotation.y = Math.sin(phase) * 0.14 * moveIntensity;
-
+    const tTorsoRotX = stroke + Math.sin(elapsed * 2.4) * 0.04;
+    const tTorsoRotY = Math.sin(phase) * 0.14 * moveIntensity;
     const armReach = moveIntensity > 0.1 ? 1.15 : 0.45;
-    rig.leftArm.rotation.set(-0.85 + Math.sin(phase) * armReach, 0, 0);
-    rig.rightArm.rotation.set(-0.85 + Math.sin(phase + Math.PI) * armReach, 0, 0);
-    rig.leftElbow.rotation.x = -0.45 - Math.max(0, Math.cos(phase)) * 0.45;
-    rig.rightElbow.rotation.x = -0.45 - Math.max(0, Math.cos(phase + Math.PI)) * 0.45;
-
+    const tLeftArm = -0.85 + Math.sin(phase) * armReach;
+    const tRightArm = -0.85 + Math.sin(phase + Math.PI) * armReach;
+    const tLeftElbow = -0.45 - Math.max(0, Math.cos(phase)) * 0.45;
+    const tRightElbow = -0.45 - Math.max(0, Math.cos(phase + Math.PI)) * 0.45;
     const kick = Math.sin(phase * 1.6 + elapsed * 3.0) * (0.28 + moveIntensity * 0.25);
-    rig.leftLeg.rotation.set(0.25 + kick, 0, -0.06);
-    rig.rightLeg.rotation.set(0.25 - kick, 0, 0.06);
-    rig.leftKnee.rotation.x = 0.22 + Math.max(0, -kick) * 0.4;
-    rig.rightKnee.rotation.x = 0.22 + Math.max(0, kick) * 0.4;
-    rig.leftAnkle.rotation.x = 0.35;
-    rig.rightAnkle.rotation.x = 0.35;
+    const tLeftLeg = 0.25 + kick;
+    const tRightLeg = 0.25 - kick;
+    const tLeftKnee = 0.22 + Math.max(0, -kick) * 0.4;
+    const tRightKnee = 0.22 + Math.max(0, kick) * 0.4;
+
+    const pose = rig === this.ramRig ? this.ramPose : poseState;
+    if (pose) {
+      const lam = 10;
+      pose.hipY = THREE.MathUtils.damp(pose.hipY, tHipY, lam, dt);
+      pose.torsoRotX = THREE.MathUtils.damp(pose.torsoRotX, tTorsoRotX, lam, dt);
+      pose.torsoRotY = THREE.MathUtils.damp(pose.torsoRotY, tTorsoRotY, lam, dt);
+      pose.torsoRotZ = THREE.MathUtils.damp(pose.torsoRotZ, 0, lam, dt);
+      pose.leftArm = THREE.MathUtils.damp(pose.leftArm, tLeftArm, lam, dt);
+      pose.rightArm = THREE.MathUtils.damp(pose.rightArm, tRightArm, lam, dt);
+      pose.leftArmZ = THREE.MathUtils.damp(pose.leftArmZ, 0, lam, dt);
+      pose.rightArmZ = THREE.MathUtils.damp(pose.rightArmZ, 0, lam, dt);
+      pose.leftElbow = THREE.MathUtils.damp(pose.leftElbow, tLeftElbow, lam, dt);
+      pose.rightElbow = THREE.MathUtils.damp(pose.rightElbow, tRightElbow, lam, dt);
+      pose.leftHip = THREE.MathUtils.damp(pose.leftHip, tLeftLeg, lam, dt);
+      pose.rightHip = THREE.MathUtils.damp(pose.rightHip, tRightLeg, lam, dt);
+      pose.leftLegZ = THREE.MathUtils.damp(pose.leftLegZ, -0.06, lam, dt);
+      pose.rightLegZ = THREE.MathUtils.damp(pose.rightLegZ, 0.06, lam, dt);
+      pose.leftKnee = THREE.MathUtils.damp(pose.leftKnee, tLeftKnee, lam, dt);
+      pose.rightKnee = THREE.MathUtils.damp(pose.rightKnee, tRightKnee, lam, dt);
+      pose.leftAnkle = THREE.MathUtils.damp(pose.leftAnkle, 0.35, lam, dt);
+      pose.rightAnkle = THREE.MathUtils.damp(pose.rightAnkle, 0.35, lam, dt);
+      pose.pleatRotX = THREE.MathUtils.damp(pose.pleatRotX, -0.25, lam, dt);
+
+      rig.torso.position.y = pose.hipY;
+      rig.leftLeg.position.y = pose.hipY;
+      rig.rightLeg.position.y = pose.hipY;
+      rig.torso.rotation.set(pose.torsoRotX, pose.torsoRotY, pose.torsoRotZ);
+      rig.leftArm.rotation.set(pose.leftArm, 0, pose.leftArmZ);
+      rig.rightArm.rotation.set(pose.rightArm, 0, pose.rightArmZ);
+      rig.leftElbow.rotation.x = pose.leftElbow;
+      rig.rightElbow.rotation.x = pose.rightElbow;
+      rig.leftLeg.rotation.set(pose.leftHip, 0, pose.leftLegZ);
+      rig.rightLeg.rotation.set(pose.rightHip, 0, pose.rightLegZ);
+      rig.leftKnee.rotation.x = pose.leftKnee;
+      rig.rightKnee.rotation.x = pose.rightKnee;
+      rig.leftAnkle.rotation.x = pose.leftAnkle;
+      rig.rightAnkle.rotation.x = pose.rightAnkle;
+      if (rig.centerPleat) rig.centerPleat.rotation.x = pose.pleatRotX;
+    } else {
+      rig.torso.position.y = tHipY;
+      rig.leftLeg.position.y = tHipY;
+      rig.rightLeg.position.y = tHipY;
+      rig.torso.rotation.set(tTorsoRotX, tTorsoRotY, 0);
+      rig.leftArm.rotation.set(tLeftArm, 0, 0);
+      rig.rightArm.rotation.set(tRightArm, 0, 0);
+      rig.leftElbow.rotation.x = tLeftElbow;
+      rig.rightElbow.rotation.x = tRightElbow;
+      rig.leftLeg.rotation.set(tLeftLeg, 0, -0.06);
+      rig.rightLeg.rotation.set(tRightLeg, 0, 0.06);
+      rig.leftKnee.rotation.x = tLeftKnee;
+      rig.rightKnee.rotation.x = tRightKnee;
+      rig.leftAnkle.rotation.x = 0.35;
+      rig.rightAnkle.rotation.x = 0.35;
+    }
   }
 
   private applyArticulatedLocomotion(
@@ -5680,10 +6135,15 @@ export class RamayanaWorldEngine {
     isRakshasa: boolean,
     baseHipY: number,
     elapsed: number,
-    dt = 0.016
+    dt = 0.016,
+    poseState?: CharacterPoseState,
+    torsoPitchAdd = 0,
+    torsoYawAdd = 0,
+    armRightPitchOverride: number | null = null,
+    armRightElbowOverride: number | null = null
   ): void {
     const thighL = isRakshasa ? 0.48 : rig === this.ramRig ? 0.445 : 0.43;
-    const shinL = isRakshasa ? 0.40 : rig === this.ramRig ? 0.405 : 0.37;
+    const shinL = isRakshasa ? 0.4 : rig === this.ramRig ? 0.405 : 0.37;
     const soleOffset = 0.08;
     const fullReach = thighL + shinL;
 
@@ -5702,11 +6162,9 @@ export class RamayanaWorldEngine {
     let tTorsoRotZ = 0;
     let tHipY = baseHipY;
 
-    // Velocity-based Motion-Matching stance height (handles stealth crouch cleanly via IK too)
     const crouchDrop = !isRakshasa && rig === this.ramRig ? Math.max(0, 0.93 - baseHipY) : 0;
 
     if (!isGrounded) {
-      // Natural airborne leap posture resolved via 2-bone IK
       solveTwoBoneLegIK(0.28, -(fullReach - 0.16), thighL, shinL, _ikScratchL);
       solveTwoBoneLegIK(-0.22, -(fullReach - 0.14), thighL, shinL, _ikScratchR);
       tLeftHip = _ikScratchL.hipPitch;
@@ -5722,10 +6180,6 @@ export class RamayanaWorldEngine {
       tRightElbow = isAiming ? -1.15 : -0.58;
       tTorsoRotX = 0.06;
     } else if (moveIntensity > 0.04) {
-      // Stance-Locked Gait Trajectory & Analytical Two-Bone Leg IK (Zero Foot Sliding):
-      // For each leg phase p in [0, 2*PI):
-      //   p in [0, PI):   STANCE -> planted sole tracks z = halfStep * (1 - 2*u), y = 0 (strict -v match!)
-      //   p in [PI, 2PI): SWING  -> lifted foot arcs  z = -halfStep * cos(PI*u), y = liftH * sin(PI*u)^0.85
       const halfStepBase = sprint ? 0.58 : isRakshasa ? 0.44 : 0.44;
       const halfStep = halfStepBase * THREE.MathUtils.clamp(moveIntensity, 0.15, 1.0);
       const liftH = (sprint ? 0.28 : 0.19) * THREE.MathUtils.clamp(moveIntensity, 0.2, 1.0);
@@ -5733,7 +6187,6 @@ export class RamayanaWorldEngine {
       evalFootTargetInto(phase, halfStep, liftH, _footL);
       evalFootTargetInto(phase + Math.PI, halfStep, liftH, _footR);
 
-      // Compute minimum vertical hip height so stance leg(s) reach yLift == 0 without hyperextension
       const maxChord = fullReach * 0.988 - crouchDrop * 0.65;
       const reqL = _footL.isStance
         ? Math.sqrt(Math.max(0.16, maxChord * maxChord - _footL.z * _footL.z))
@@ -5755,7 +6208,6 @@ export class RamayanaWorldEngine {
       tRightHip = _ikScratchR.hipPitch;
       tRightKnee = _ikScratchR.kneeFlex;
 
-      // Exact stance sole ground-locking + natural swing toe-off/heel-strike articulation
       tLeftAnkle = _footL.isStance
         ? THREE.MathUtils.clamp(-(tLeftHip + tLeftKnee) + _footL.ankleRoll * 0.12, -0.58, 0.44)
         : THREE.MathUtils.clamp(-(tLeftHip + tLeftKnee) + _footL.ankleRoll, -0.58, 0.44);
@@ -5781,12 +6233,10 @@ export class RamayanaWorldEngine {
         tLeftElbow = isAiming ? -0.32 : -0.48 - 0.22 * Math.max(0, -leftShoulder);
       }
 
-      // Motion-Matched Torso counter-twist & lateral weight transfer roll
       tTorsoRotY = Math.sin(phase) * (sprint ? 0.11 : 0.068) * moveIntensity;
       tTorsoRotX = (sprint ? 0.12 : 0.04) * moveIntensity + impactDip * 0.9;
       tTorsoRotZ = Math.cos(phase) * (sprint ? 0.032 : 0.018) * moveIntensity;
     } else {
-      // Idle / Stealth Static Stance resolved via IK (handles crouch without foot sink!)
       const idleReach = Math.max(0.28, baseHipY - soleOffset - (rig === this.ramRig ? this.ramLandingImpact * 0.14 : 0));
       solveTwoBoneLegIK(0.035, -idleReach, thighL, shinL, _ikScratchL);
       solveTwoBoneLegIK(-0.035, -idleReach, thighL, shinL, _ikScratchR);
@@ -5800,43 +6250,53 @@ export class RamayanaWorldEngine {
       tTorsoRotX = rig === this.ramRig ? this.ramLandingImpact * 0.16 : 0;
     }
 
-    if (!isRakshasa && rig === this.ramRig) {
-      const lam = isGrounded ? 20 : 12;
-      this.ramPose.leftHip = THREE.MathUtils.damp(this.ramPose.leftHip, tLeftHip, lam, dt);
-      this.ramPose.rightHip = THREE.MathUtils.damp(this.ramPose.rightHip, tRightHip, lam, dt);
-      this.ramPose.leftKnee = THREE.MathUtils.damp(this.ramPose.leftKnee, tLeftKnee, lam, dt);
-      this.ramPose.rightKnee = THREE.MathUtils.damp(this.ramPose.rightKnee, tRightKnee, lam, dt);
-      this.ramPose.leftAnkle = THREE.MathUtils.damp(this.ramPose.leftAnkle, tLeftAnkle, lam, dt);
-      this.ramPose.rightAnkle = THREE.MathUtils.damp(this.ramPose.rightAnkle, tRightAnkle, lam, dt);
-      this.ramPose.leftArm = THREE.MathUtils.damp(this.ramPose.leftArm, tLeftArm, lam, dt);
-      this.ramPose.rightArm = THREE.MathUtils.damp(this.ramPose.rightArm, tRightArm, lam, dt);
-      this.ramPose.leftElbow = THREE.MathUtils.damp(this.ramPose.leftElbow, tLeftElbow, lam, dt);
-      this.ramPose.rightElbow = THREE.MathUtils.damp(this.ramPose.rightElbow, tRightElbow, lam, dt);
-      this.ramPose.hipY = THREE.MathUtils.damp(this.ramPose.hipY, tHipY, lam, dt);
-      this.ramPose.torsoRotX = THREE.MathUtils.damp(this.ramPose.torsoRotX, tTorsoRotX, lam, dt);
-      this.ramPose.torsoRotY = THREE.MathUtils.damp(this.ramPose.torsoRotY, tTorsoRotY, lam, dt);
-      this.ramPose.torsoRotZ = THREE.MathUtils.damp(this.ramPose.torsoRotZ, tTorsoRotZ, lam, dt);
+    tTorsoRotX += torsoPitchAdd;
+    tTorsoRotY += torsoYawAdd;
+    if (armRightPitchOverride !== null) tRightArm = armRightPitchOverride;
+    if (armRightElbowOverride !== null) tRightElbow = armRightElbowOverride;
 
-      rig.leftLeg.rotation.x = this.ramPose.leftHip;
-      rig.rightLeg.rotation.x = this.ramPose.rightHip;
-      rig.leftKnee.rotation.x = this.ramPose.leftKnee;
-      rig.rightKnee.rotation.x = this.ramPose.rightKnee;
-      rig.leftAnkle.rotation.x = this.ramPose.leftAnkle;
-      rig.rightAnkle.rotation.x = this.ramPose.rightAnkle;
-      rig.leftArm.rotation.set(this.ramPose.leftArm, 0, 0);
-      rig.rightArm.rotation.set(this.ramPose.rightArm, 0, 0);
-      rig.leftElbow.rotation.x = this.ramPose.leftElbow;
-      rig.rightElbow.rotation.x = this.ramPose.rightElbow;
+    const pose = rig === this.ramRig ? this.ramPose : poseState;
+    if (pose) {
+      const lam = isGrounded ? 18 : 12;
+      pose.leftHip = THREE.MathUtils.damp(pose.leftHip, tLeftHip, lam, dt);
+      pose.rightHip = THREE.MathUtils.damp(pose.rightHip, tRightHip, lam, dt);
+      pose.leftKnee = THREE.MathUtils.damp(pose.leftKnee, tLeftKnee, lam, dt);
+      pose.rightKnee = THREE.MathUtils.damp(pose.rightKnee, tRightKnee, lam, dt);
+      pose.leftAnkle = THREE.MathUtils.damp(pose.leftAnkle, tLeftAnkle, lam, dt);
+      pose.rightAnkle = THREE.MathUtils.damp(pose.rightAnkle, tRightAnkle, lam, dt);
+      pose.leftLegZ = THREE.MathUtils.damp(pose.leftLegZ, 0, lam, dt);
+      pose.rightLegZ = THREE.MathUtils.damp(pose.rightLegZ, 0, lam, dt);
+      pose.leftArm = THREE.MathUtils.damp(pose.leftArm, tLeftArm, lam, dt);
+      pose.rightArm = THREE.MathUtils.damp(pose.rightArm, tRightArm, lam, dt);
+      pose.leftArmZ = THREE.MathUtils.damp(pose.leftArmZ, 0, lam, dt);
+      pose.rightArmZ = THREE.MathUtils.damp(pose.rightArmZ, 0, lam, dt);
+      pose.leftElbow = THREE.MathUtils.damp(pose.leftElbow, tLeftElbow, lam, dt);
+      pose.rightElbow = THREE.MathUtils.damp(pose.rightElbow, tRightElbow, lam, dt);
+      pose.hipY = THREE.MathUtils.damp(pose.hipY, tHipY, lam, dt);
+      pose.torsoRotX = THREE.MathUtils.damp(pose.torsoRotX, tTorsoRotX, lam, dt);
+      pose.torsoRotY = THREE.MathUtils.damp(pose.torsoRotY, tTorsoRotY, lam, dt);
+      pose.torsoRotZ = THREE.MathUtils.damp(pose.torsoRotZ, tTorsoRotZ, lam, dt);
+      pose.pleatRotX = THREE.MathUtils.damp(pose.pleatRotX, -0.045, lam, dt);
 
-      rig.leftLeg.position.y = this.ramPose.hipY;
-      rig.rightLeg.position.y = this.ramPose.hipY;
-      rig.torso.position.y = this.ramPose.hipY;
-      rig.torso.rotation.x = this.ramPose.torsoRotX;
-      rig.torso.rotation.y = this.ramPose.torsoRotY;
-      rig.torso.rotation.z = this.ramPose.torsoRotZ;
+      rig.leftLeg.rotation.set(pose.leftHip, 0, pose.leftLegZ);
+      rig.rightLeg.rotation.set(pose.rightHip, 0, pose.rightLegZ);
+      rig.leftKnee.rotation.x = pose.leftKnee;
+      rig.rightKnee.rotation.x = pose.rightKnee;
+      rig.leftAnkle.rotation.x = pose.leftAnkle;
+      rig.rightAnkle.rotation.x = pose.rightAnkle;
+      rig.leftArm.rotation.set(pose.leftArm, 0, pose.leftArmZ);
+      rig.rightArm.rotation.set(pose.rightArm, 0, pose.rightArmZ);
+      rig.leftElbow.rotation.x = pose.leftElbow;
+      rig.rightElbow.rotation.x = pose.rightElbow;
+
+      rig.leftLeg.position.y = pose.hipY;
+      rig.rightLeg.position.y = pose.hipY;
+      rig.torso.position.y = pose.hipY;
+      rig.torso.rotation.set(pose.torsoRotX, pose.torsoRotY, pose.torsoRotZ);
+      if (rig.centerPleat) rig.centerPleat.rotation.x = pose.pleatRotX;
     } else {
-      rig.leftLeg.rotation.x = tLeftHip;
-      rig.rightLeg.rotation.x = tRightHip;
+      rig.leftLeg.rotation.set(tLeftHip, 0, 0);
+      rig.rightLeg.rotation.set(tRightHip, 0, 0);
       rig.leftKnee.rotation.x = tLeftKnee;
       rig.rightKnee.rotation.x = tRightKnee;
       rig.leftAnkle.rotation.x = tLeftAnkle;
@@ -5848,9 +6308,7 @@ export class RamayanaWorldEngine {
       rig.leftLeg.position.y = tHipY;
       rig.rightLeg.position.y = tHipY;
       rig.torso.position.y = tHipY;
-      rig.torso.rotation.x = tTorsoRotX;
-      rig.torso.rotation.y = tTorsoRotY;
-      rig.torso.rotation.z = tTorsoRotZ;
+      rig.torso.rotation.set(tTorsoRotX, tTorsoRotY, tTorsoRotZ);
     }
   }
 
@@ -5942,29 +6400,28 @@ export class RamayanaWorldEngine {
       this.fireflyUniforms.uTime.value = elapsed;
     }
 
-    // Animate & distance-cull Mountable Sacred Elephants & Royal Ashvas
+    // Animate Mountable Sacred Elephants & Royal Ashvas (visibility culled after camera lookAt)
     const pxIdle = this.playerX;
     const pzIdle = this.playerZ;
     for (let i = 0; i < this.animals.length; i++) {
       const a = this.animals[i];
-      const anObj = a.horseRig ? a.horseRig.group : a.elephantRig!.group;
       const dx = a.x - pxIdle;
       const dz = a.z - pzIdle;
       const dSq = dx * dx + dz * dz;
       const isMounted = i === this.mountedAnimalIndex;
-      if (!isMounted && dSq > 19600) {
-        anObj.visible = false;
-        continue;
-      }
-      anObj.visible = true;
+      if (!isMounted && dSq > 19600) continue;
+      a.animState.kinematicAccumDt += dt;
       if (!isMounted && dSq > 2500 && ((i + this.simFrameCounter) & 3) !== 0) continue;
+      const animDt = Math.min(0.12, a.animState.kinematicAccumDt);
+      a.animState.kinematicAccumDt = 0;
 
       const moving = Math.abs(a.speed) > 0.35;
       if (a.horseRig) {
         const spdNorm = THREE.MathUtils.clamp(Math.abs(a.speed) / 16, 0, 1);
-        this.animateRoyalHorseRig(a.horseRig, a.gaitPhase, spdNorm, elapsed, i * 1.7);
+        this.animateRoyalHorseRig(a.horseRig, a.gaitPhase, spdNorm, elapsed, i * 1.7, a.animState, animDt);
       } else if (a.elephantRig) {
         const er = a.elephantRig;
+        a.animState.speedBlend = THREE.MathUtils.damp(a.animState.speedBlend, moving ? 1 : 0, 7.5, animDt);
         er.trunkPivot.rotation.x = Math.sin(elapsed * 1.4 + i * 1.9) * 0.16;
         for (let ei = 0; ei < er.earPivots.length; ei++) {
           const side = ei % 2 === 0 ? -1 : 1;
@@ -5972,39 +6429,36 @@ export class RamayanaWorldEngine {
         }
         for (let li = 0; li < er.legs.length; li++) {
           const ph = a.gaitPhase + (li % 2) * Math.PI + (li >= 2 ? 0.6 : 0);
-          er.legs[li].rotation.x = moving ? -Math.sin(ph) * 0.34 : 0;
+          const tLeg = moving ? -Math.sin(ph) * 0.34 * a.animState.speedBlend : 0;
+          a.animState.legX[li] = THREE.MathUtils.damp(a.animState.legX[li], tLeg, 14, animDt);
+          er.legs[li].rotation.x = a.animState.legX[li];
         }
       }
     }
 
-    // Keep idle & parked chariot horses alive with distance-LOD breathing & cull parked chariots > 140m
+    // Keep idle & parked chariot horses alive with distance-LOD breathing (visibility culled after camera lookAt)
     for (let i = 0; i < this.chariots.length; i++) {
-      if (i === this.mountedChariotIndex) {
-        this.chariots[i].rig.root.visible = true;
-        continue;
-      }
+      if (i === this.mountedChariotIndex) continue;
       const ch = this.chariots[i];
       const dSq = (ch.x - pxIdle) * (ch.x - pxIdle) + (ch.z - pzIdle) * (ch.z - pzIdle);
-      if (dSq > 19600) {
-        ch.rig.root.visible = false;
-        continue;
-      }
-      ch.rig.root.visible = true;
       if (dSq > 8100) continue;
-      if (dSq > 2500 && ((i + this.simFrameCounter) & 3) !== 0) continue;
       for (let sIdx = 0; sIdx < ch.rig.steeds.length; sIdx++) {
+        const st = ch.steedStates[sIdx];
+        st.kinematicAccumDt += dt;
+        if (dSq > 2500 && ((i + this.simFrameCounter) & 3) !== 0) continue;
+        const sDt = Math.min(0.12, st.kinematicAccumDt);
+        st.kinematicAccumDt = 0;
         this.animateRoyalHorseRig(
           ch.rig.steeds[sIdx],
           ch.gaitPhase + sIdx * 0.45,
           0,
           elapsed,
-          i * 3.1 + sIdx * 1.4
+          i * 3.1 + sIdx * 1.4,
+          st,
+          sDt
         );
       }
     }
-
-    // Active Aquatic Life Animation (20-ft Deep Sarayu River + Saturated Surya-Kund Stepwell)
-    this.stepAquaticEcosystem(dt, elapsed);
 
     // Gentle river water & normal ripple animation + volcanic bombs/smoke + Demon Village atmosphere shift
     if (this.textures) {
@@ -6152,7 +6606,7 @@ export class RamayanaWorldEngine {
       this.input.autoDriveTogglePressed = false;
       if (this.mountedChariotIndex !== null || this.mountedAnimalIndex !== null) {
         this.autoDriveActive = !this.autoDriveActive;
-        this.chariotAutoWaypoints = [];
+        this.chariotAutoWaypoints.length = 0;
         this.chariotAutoWpIdx = 0;
         this.chariotAutoGoalKey = '';
         soundEngine.playMountChariot();
@@ -6189,7 +6643,7 @@ export class RamayanaWorldEngine {
         this.ramRig.root.position.set(this.playerX, this.playerY, this.playerZ);
         this.ramRig.root.rotation.order = 'YXZ';
         this.ramRig.root.rotation.set(0, this.playerYaw, 0);
-        this.applyThroneSittingPose(this.ramRig, isDrawingBow, elapsed);
+        this.applyThroneSittingPose(this.ramRig, isDrawingBow, elapsed, dt);
       }
     } else if (this.mountedChariotIndex !== null) {
       this.input.jumpPressed = false;
@@ -6205,7 +6659,7 @@ export class RamayanaWorldEngine {
           activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.z : -56;
         const goalKey = `${goalX.toFixed(0)}:${goalZ.toFixed(0)}`;
         if (this.chariotAutoWaypoints.length === 0 || this.chariotAutoGoalKey !== goalKey) {
-          this.chariotAutoWaypoints = buildAutoDriveRoute(ch.x, ch.z, ch.yaw, goalX, goalZ);
+          buildAutoDriveRoute(ch.x, ch.z, ch.yaw, goalX, goalZ, this.chariotAutoWaypoints);
           this.chariotAutoWpIdx = 0;
           this.chariotAutoGoalKey = goalKey;
         }
@@ -6262,7 +6716,7 @@ export class RamayanaWorldEngine {
         ch.gaitPhase += (movedChDist / 2.25) * Math.PI * 2;
       } else {
         // Manual Ratha Control with speed-coupled directional steering & hysteresis (zero erratic spinning)
-        this.chariotAutoWaypoints = [];
+        this.chariotAutoWaypoints.length = 0;
         const maxSpeed = this.input.sprint ? 82 : 28;
         const targetSpeed = my * maxSpeed;
         ch.speed = THREE.MathUtils.damp(ch.speed, targetSpeed, 4.8, dt);
@@ -6310,7 +6764,9 @@ export class RamayanaWorldEngine {
           ch.gaitPhase + sIdx * 0.45,
           chariotSpdNorm,
           elapsed,
-          (this.mountedChariotIndex ?? 0) * 3.1 + sIdx * 1.4
+          (this.mountedChariotIndex ?? 0) * 3.1 + sIdx * 1.4,
+          ch.steedStates[sIdx],
+          dt
         );
       }
 
@@ -6348,7 +6804,8 @@ export class RamayanaWorldEngine {
         this.ramRig,
         steerInput,
         isDrawingBow,
-        elapsed
+        elapsed,
+        dt
       );
     } else if (this.mountedAnimalIndex !== null) {
       this.input.jumpPressed = false;
@@ -6366,7 +6823,7 @@ export class RamayanaWorldEngine {
           activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.z : -56;
         const goalKey = `${goalX.toFixed(0)}:${goalZ.toFixed(0)}`;
         if (this.chariotAutoWaypoints.length === 0 || this.chariotAutoGoalKey !== goalKey) {
-          this.chariotAutoWaypoints = buildAutoDriveRoute(an.x, an.z, an.yaw, goalX, goalZ);
+          buildAutoDriveRoute(an.x, an.z, an.yaw, goalX, goalZ, this.chariotAutoWaypoints);
           this.chariotAutoWpIdx = 0;
           this.chariotAutoGoalKey = goalKey;
         }
@@ -6397,7 +6854,7 @@ export class RamayanaWorldEngine {
         const targetSpd = stopAtGoal ? 0 : maxSpeed * alignFactor;
         an.speed = THREE.MathUtils.damp(an.speed, targetSpd, 5.0, dt);
       } else {
-        this.chariotAutoWaypoints = [];
+        this.chariotAutoWaypoints.length = 0;
         // Camera-relative joystick / keyboard movement for fluid Horse & Elephant riding
         _forward.set(-Math.sin(this.camYaw), 0, -Math.cos(this.camYaw));
         _right.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw));
@@ -6452,7 +6909,8 @@ export class RamayanaWorldEngine {
         an.gaitPhase,
         THREE.MathUtils.clamp(Math.abs(an.speed) / maxSpeed, 0, 1),
         isDrawingBow,
-        elapsed
+        elapsed,
+        dt
       );
     } else {
       this.ramRig.contactShadow.visible = true;
@@ -6460,14 +6918,12 @@ export class RamayanaWorldEngine {
       this.ramRig.root.rotation.order = 'YXZ';
       this.ramRig.root.rotation.x = 0;
 
-      // Determine swimming state in Sarayu River / Surya-Kund Stepwell
       const preGroundY = this.surfaceHeightAt(this.playerX, this.playerZ);
       const waterSurf = waterSurfaceAt(this.playerX, this.playerZ);
       const waterDepth = waterSurf !== null ? waterSurf - preGroundY : 0;
       const swimming = waterSurf !== null && waterDepth > 0.95;
       this.isRamSwimming = swimming;
 
-      // Camera-relative movement direction
       _forward.set(-Math.sin(this.camYaw), 0, -Math.cos(this.camYaw));
       _right.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw));
 
@@ -6504,13 +6960,11 @@ export class RamayanaWorldEngine {
         this.playerZ = resolved.z;
 
         const targetYaw = Math.atan2(_v1.x, _v1.z);
-        // Shortest-angle yaw wrap
         let diff = targetYaw - this.playerYaw;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
         this.playerYaw += diff * Math.min(1, 12 * dt);
 
-        // Drive walkPhase strictly from actual resolved ground/water displacement matched to stance-locked strideLength
         const strideLength = swimming
           ? 2.25
           : this.stealthActive
@@ -6530,7 +6984,6 @@ export class RamayanaWorldEngine {
       this.isRamSwimming = activeSwim;
 
       if (activeSwim && postWaterSurf !== null) {
-        // Full 3D Swimming: Archimedes buoyancy at surface + downward camera-pitch diving + Space surface boost / bank vault
         const surfaceSwimY = postWaterSurf - 1.16 + Math.sin(elapsed * 2.4) * 0.04;
         const wantsDive = this.stealthActive || (my > 0.15 && this.camPitch > 0.22);
         const diveVel = wantsDive
@@ -6546,7 +6999,6 @@ export class RamayanaWorldEngine {
         } else if (wantsDive) {
           this.playerVelY = THREE.MathUtils.damp(this.playerVelY, diveVel, 6.5, dt);
         } else {
-          // Gentle buoyant rise back toward water surface when not actively diving
           const buoyantPull = this.playerY < surfaceSwimY ? 5.2 : 12.0;
           this.playerVelY += (surfaceSwimY - this.playerY) * buoyantPull * dt;
           this.playerVelY *= Math.exp(-5.0 * dt);
@@ -6564,9 +7016,8 @@ export class RamayanaWorldEngine {
         this.ramRig.root.position.set(this.playerX, this.playerY, this.playerZ);
         this.ramRig.root.rotation.y = this.playerYaw;
         const divePitch = this.playerVelY < -0.4 ? Math.min(0.65, -this.playerVelY * 0.14) : 0;
-        this.applySwimmingPose(this.ramRig, this.walkPhase, effectiveMoveIntensity, elapsed, divePitch);
+        this.applySwimmingPose(this.ramRig, this.walkPhase, effectiveMoveIntensity, elapsed, divePitch, this.ramPose, dt);
       } else {
-        // Smooth gravity drop across balconies/ledges > 0.55m instead of single-frame snap teleport
         if (this.input.jumpPressed && this.grounded) {
           this.playerVelY = 9.2;
           this.grounded = false;
@@ -6600,6 +7051,7 @@ export class RamayanaWorldEngine {
         this.ramRig.root.rotation.y = this.playerYaw;
 
         const crouchHipY = this.stealthActive && this.grounded ? 0.81 : 0.93;
+        const stealthLean = this.stealthActive && this.grounded ? 0.22 : 0;
         this.applyArticulatedLocomotion(
           this.ramRig,
           this.walkPhase,
@@ -6610,11 +7062,10 @@ export class RamayanaWorldEngine {
           false,
           crouchHipY,
           elapsed,
-          dt
+          dt,
+          this.ramPose,
+          stealthLean
         );
-        if (this.stealthActive && this.grounded) {
-          this.ramRig.torso.rotation.x += 0.22;
-        }
       }
     }
 
@@ -6916,14 +7367,21 @@ export class RamayanaWorldEngine {
     let spottedByAny = false;
     const detectConeDist = this.mountedChariotIndex !== null ? 8.0 : 6.0;
 
-    for (const e of this.enemies) {
+    for (let eIdx = 0; eIdx < this.enemies.length; eIdx++) {
+      const e = this.enemies[eIdx];
       if (!e.alive) continue;
       const dx = this.playerX - e.x;
       const dz = this.playerZ - e.z;
       const dSq = dx * dx + dz * dz;
       const enemyTier = computeEntityLodTier(dSq);
-      e.rig.root.visible = enemyTier !== 'CULLED';
-      e.rig.contactShadow.visible = enemyTier === 'FULL';
+
+      e.hitReactTimer = Math.max(0, e.hitReactTimer - dt);
+      const recoilT = e.hitReactTimer > 0 ? Math.sin((e.hitReactTimer / 0.28) * Math.PI) : 0;
+      const recoilPitch = e.hitReactPitch * recoilT;
+      const recoilYaw = e.hitReactYaw * recoilT;
+
+      e.kinematicAccumDt += dt;
+      const updatePose = dSq <= 3025 || ((eIdx + this.simFrameCounter) & 3) === 0;
 
       const dist = Math.sqrt(dSq);
       const er = e.isCommander ? 0.92 : 0.68;
@@ -6953,33 +7411,84 @@ export class RamayanaWorldEngine {
           e.yaw += Math.sin(elapsed * 0.65 + e.walkPhase) * 0.25 * dt;
         }
         if (e.variant === 'SHADOW_GHOST') {
-          e.y = groundY + 0.35 + Math.sin(elapsed * 2.8 + e.walkPhase) * 0.16;
+          e.y = THREE.MathUtils.damp(
+            e.y,
+            groundY + 0.35 + Math.sin(elapsed * 2.8 + e.walkPhase) * 0.16,
+            8.0,
+            dt
+          );
           if (e.rig.customParts) e.rig.customParts.rotation.y += dt * 1.4;
-          if (e.rig.ghostOverlayMat) e.rig.ghostOverlayMat.opacity = 0.68;
-        } else if (e.variant === 'BOAR_DEMON' || e.variant === 'RABBIT_DEMON') {
+          e.ghostOpacity = THREE.MathUtils.damp(e.ghostOpacity, 0.68, 8.0, dt);
+          if (e.rig.ghostOverlayMat) e.rig.ghostOverlayMat.opacity = e.ghostOpacity;
+          if (updatePose) {
+            const poseDt = Math.min(0.12, e.kinematicAccumDt);
+            e.kinematicAccumDt = 0;
+            e.pose.torsoRotX = THREE.MathUtils.damp(e.pose.torsoRotX, recoilPitch, 14, poseDt);
+            e.pose.torsoRotY = THREE.MathUtils.damp(e.pose.torsoRotY, recoilYaw, 14, poseDt);
+            e.pose.leftArm = THREE.MathUtils.damp(e.pose.leftArm, -0.35 + Math.sin(elapsed * 2.0) * 0.1, 10, poseDt);
+            e.pose.rightArm = THREE.MathUtils.damp(e.pose.rightArm, -0.35 + Math.cos(elapsed * 2.0) * 0.1, 10, poseDt);
+            e.rig.torso.rotation.set(e.pose.torsoRotX, e.pose.torsoRotY, 0);
+            e.rig.leftArm.rotation.x = e.pose.leftArm;
+            e.rig.rightArm.rotation.x = e.pose.rightArm;
+          }
+        } else if (e.variant === 'BOAR_DEMON') {
           e.y = groundY;
-          e.rig.torso.rotation.x = 0;
+          e.speedBlend = THREE.MathUtils.damp(e.speedBlend, 0, 8.0, dt);
+          if (updatePose) {
+            const poseDt = Math.min(0.12, e.kinematicAccumDt);
+            e.kinematicAccumDt = 0;
+            e.pose.torsoRotX = THREE.MathUtils.damp(e.pose.torsoRotX, recoilPitch, 14, poseDt);
+            e.pose.torsoRotY = THREE.MathUtils.damp(e.pose.torsoRotY, recoilYaw, 14, poseDt);
+            e.pose.leftHip = THREE.MathUtils.damp(e.pose.leftHip, 0, 12, poseDt);
+            e.pose.rightHip = THREE.MathUtils.damp(e.pose.rightHip, 0, 12, poseDt);
+            e.pose.leftArm = THREE.MathUtils.damp(e.pose.leftArm, 0, 12, poseDt);
+            e.pose.rightArm = THREE.MathUtils.damp(e.pose.rightArm, 0, 12, poseDt);
+            e.rig.torso.rotation.set(e.pose.torsoRotX, e.pose.torsoRotY, 0);
+            e.rig.leftLeg.rotation.x = e.pose.leftHip;
+            e.rig.rightLeg.rotation.x = e.pose.rightHip;
+            e.rig.leftArm.rotation.x = e.pose.leftArm;
+            e.rig.rightArm.rotation.x = e.pose.rightArm;
+          }
         } else {
           e.y = groundY;
-          if (enemyTier === 'FULL') {
-            this.applyArticulatedLocomotion(e.rig, e.walkPhase, 0, false, true, false, true, 0.96, elapsed, dt);
+          if (updatePose) {
+            const poseDt = Math.min(0.12, e.kinematicAccumDt);
+            e.kinematicAccumDt = 0;
+            this.applyArticulatedLocomotion(
+              e.rig,
+              e.walkPhase,
+              0,
+              false,
+              true,
+              false,
+              true,
+              e.variant === 'RABBIT_DEMON' ? 0.88 : 0.96,
+              elapsed,
+              poseDt,
+              e.pose,
+              recoilPitch,
+              recoilYaw
+            );
           }
         }
         continue;
       }
       const groundY = groundHeightAt(e.x, e.z);
+      const targetLookYaw = Math.atan2(dx, dz);
 
       // Unique Combat AI per Demon Variant
       if (e.variant === 'BOAR_DEMON') {
         // ANIMAL 1: BOAR DEMON — Bull-rush charge telegraph -> high-speed tusk stampede
+        let boarTargetTorsoX = 0;
+        let boarMoveNorm = 0;
         if (e.abilityState === 'IDLE') {
-          e.yaw = Math.atan2(dx, dz);
+          e.yaw = dampAngle(e.yaw, targetLookYaw, 9.5, dt);
           if (dist < 16 && e.abilityCooldown <= 0) {
             e.abilityState = 'WINDUP';
             e.abilityTimer = 0.65;
             e.chargeDirX = dx / Math.max(0.01, dist);
             e.chargeDirZ = dz / Math.max(0.01, dist);
-            e.rig.torso.rotation.x = 0.28; // lower tusks for bull charge
+            boarTargetTorsoX = 0.28;
           } else if (dist > 2.2) {
             const nx = e.x + (dx / dist) * 4.4 * dt;
             const nz = e.z + (dz / dist) * 4.4 * dt;
@@ -6988,13 +7497,15 @@ export class RamayanaWorldEngine {
             e.x = res.x;
             e.z = res.z;
             e.walkPhase += (movedDist / 1.45) * Math.PI * 2;
+            boarMoveNorm = 0.55;
           } else if (e.attackCooldown <= 0) {
             e.attackCooldown = 1.25;
             this.inflictDamageToPlayer(this.mountedChariotIndex !== null ? 5 : 10, 0);
           }
         } else if (e.abilityState === 'WINDUP') {
           e.abilityTimer -= dt;
-          e.rig.torso.rotation.x = 0.34 + Math.sin(elapsed * 28) * 0.05;
+          boarTargetTorsoX = 0.34 + Math.sin(elapsed * 28) * 0.05;
+          boarMoveNorm = 0.25;
           if (e.abilityTimer <= 0) {
             e.abilityState = 'ACTIVE';
             e.abilityTimer = 1.05;
@@ -7008,7 +7519,8 @@ export class RamayanaWorldEngine {
           e.x = res.x;
           e.z = res.z;
           e.walkPhase += dt * 18;
-          e.rig.torso.rotation.x = 0.22;
+          boarTargetTorsoX = 0.22;
+          boarMoveNorm = 1.0;
           if (Math.hypot(this.playerX - e.x, this.playerZ - e.z) < 2.25 && e.attackCooldown <= 0) {
             e.attackCooldown = 0.9;
             this.inflictDamageToPlayer(this.mountedChariotIndex !== null ? 7 : 15, 0);
@@ -7018,18 +7530,31 @@ export class RamayanaWorldEngine {
           } else if (e.abilityTimer <= 0) {
             e.abilityState = 'IDLE';
             e.abilityCooldown = 3.0;
-            e.rig.torso.rotation.x = 0;
           }
         }
         e.y = groundHeightAt(e.x, e.z);
-        // 4-legged gallop limb animation
-        e.rig.leftLeg.rotation.x = Math.sin(e.walkPhase) * 0.55;
-        e.rig.rightLeg.rotation.x = Math.sin(e.walkPhase + 0.5) * 0.55;
-        e.rig.leftArm.rotation.x = -Math.sin(e.walkPhase) * 0.55;
-        e.rig.rightArm.rotation.x = -Math.sin(e.walkPhase + 0.5) * 0.55;
+        e.speedBlend = THREE.MathUtils.damp(e.speedBlend, boarMoveNorm, 9.5, dt);
+        if (updatePose) {
+          const poseDt = Math.min(0.12, e.kinematicAccumDt);
+          e.kinematicAccumDt = 0;
+          e.pose.torsoRotX = THREE.MathUtils.damp(e.pose.torsoRotX, boarTargetTorsoX + recoilPitch, 14, poseDt);
+          e.pose.torsoRotY = THREE.MathUtils.damp(e.pose.torsoRotY, recoilYaw, 14, poseDt);
+          e.rig.torso.rotation.set(e.pose.torsoRotX, e.pose.torsoRotY, 0);
+          const amp = 0.55 * e.speedBlend;
+          e.pose.leftHip = THREE.MathUtils.damp(e.pose.leftHip, Math.sin(e.walkPhase) * amp, 16, poseDt);
+          e.pose.rightHip = THREE.MathUtils.damp(e.pose.rightHip, Math.sin(e.walkPhase + 0.5) * amp, 16, poseDt);
+          e.pose.leftArm = THREE.MathUtils.damp(e.pose.leftArm, -Math.sin(e.walkPhase) * amp, 16, poseDt);
+          e.pose.rightArm = THREE.MathUtils.damp(e.pose.rightArm, -Math.sin(e.walkPhase + 0.5) * amp, 16, poseDt);
+          e.rig.leftLeg.rotation.x = e.pose.leftHip;
+          e.rig.rightLeg.rotation.x = e.pose.rightHip;
+          e.rig.leftArm.rotation.x = e.pose.leftArm;
+          e.rig.rightArm.rotation.x = e.pose.rightArm;
+        }
       } else if (e.variant === 'RABBIT_DEMON') {
         // ANIMAL 2: DEMON HARE — Evasive zigzag weave & parabolic vault slam with radial thorn burst
-        e.yaw = Math.atan2(dx, dz);
+        e.yaw = dampAngle(e.yaw, targetLookYaw, 12.5, dt);
+        let rabbitMoveNorm = 0;
+        let rabbitGrounded = true;
         if (e.abilityState === 'IDLE') {
           if (dist < 14 && e.abilityCooldown <= 0) {
             e.abilityState = 'ACTIVE';
@@ -7038,6 +7563,8 @@ export class RamayanaWorldEngine {
             e.chargeDirX = dx / Math.max(0.01, dist);
             e.chargeDirZ = dz / Math.max(0.01, dist);
             e.strafeSign *= -1;
+            rabbitMoveNorm = 1.0;
+            rabbitGrounded = false;
           } else {
             // Lateral hop-strafe while closing in
             const invD = 1 / Math.max(0.01, dist);
@@ -7061,7 +7588,8 @@ export class RamayanaWorldEngine {
             e.walkPhase += (movedDist / 1.76) * Math.PI * 2;
             const hopOffset = Math.abs(Math.sin(e.walkPhase)) * 0.36;
             e.y = groundHeightAt(e.x, e.z) + hopOffset;
-            this.applyArticulatedLocomotion(e.rig, e.walkPhase, THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 3.5, 0, 1), true, hopOffset < 0.08, false, true, 0.88, elapsed, dt);
+            rabbitMoveNorm = THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 3.5, 0, 1);
+            rabbitGrounded = hopOffset < 0.08;
           }
         } else {
           // Mid-air vault trajectory -> slam radial bone spikes on touchdown
@@ -7078,13 +7606,15 @@ export class RamayanaWorldEngine {
           e.x = res.x;
           e.z = res.z;
           e.y += e.velY * dt;
-          this.applyArticulatedLocomotion(e.rig, e.walkPhase, 1.0, true, false, false, true, 0.88, elapsed, dt);
+          rabbitMoveNorm = 1.0;
+          rabbitGrounded = false;
           const landY = groundHeightAt(e.x, e.z);
           if (e.y <= landY) {
             e.y = landY;
             e.velY = 0;
             e.abilityState = 'IDLE';
             e.abilityCooldown = 3.1;
+            rabbitGrounded = true;
             this.spawnBlast(e.x, e.y + 0.5, e.z, 0xffb326);
             // Fire 4 radial bone shards on landing
             for (let k = 0; k < 4; k++) {
@@ -7106,12 +7636,32 @@ export class RamayanaWorldEngine {
             }
           }
         }
+        if (updatePose) {
+          const poseDt = Math.min(0.12, e.kinematicAccumDt);
+          e.kinematicAccumDt = 0;
+          this.applyArticulatedLocomotion(
+            e.rig,
+            e.walkPhase,
+            rabbitMoveNorm,
+            true,
+            rabbitGrounded,
+            false,
+            true,
+            0.88,
+            elapsed,
+            poseDt,
+            e.pose,
+            recoilPitch,
+            recoilYaw
+          );
+        }
       } else if (e.variant === 'SHADOW_GHOST') {
         // SHADOW GHOST — Translucent hover + phase-blink flank teleport + draining Soul-Wisp projectile
-        e.yaw = Math.atan2(dx, dz);
+        e.yaw = dampAngle(e.yaw, targetLookYaw, 10.5, dt);
         if (e.rig.customParts) e.rig.customParts.rotation.y += dt * 2.4;
         if (e.abilityState === 'IDLE') {
-          if (e.rig.ghostOverlayMat) e.rig.ghostOverlayMat.opacity = 0.72;
+          e.ghostOpacity = THREE.MathUtils.damp(e.ghostOpacity, 0.72, 10, dt);
+          if (e.rig.ghostOverlayMat) e.rig.ghostOverlayMat.opacity = e.ghostOpacity;
           if (dist < 22 && e.abilityCooldown <= 0) {
             e.abilityState = 'WINDUP';
             e.abilityTimer = 0.65;
@@ -7122,15 +7672,18 @@ export class RamayanaWorldEngine {
             e.x = res.x;
             e.z = res.z;
           }
-          e.y = groundHeightAt(e.x, e.z) + 0.35 + Math.sin(elapsed * 3.1 + e.walkPhase) * 0.18;
-          e.rig.leftArm.rotation.x = -0.45 + Math.sin(elapsed * 2.5) * 0.18;
-          e.rig.rightArm.rotation.x = -0.45 + Math.cos(elapsed * 2.5) * 0.18;
+          e.y = THREE.MathUtils.damp(
+            e.y,
+            groundHeightAt(e.x, e.z) + 0.35 + Math.sin(elapsed * 3.1 + e.walkPhase) * 0.18,
+            9.0,
+            dt
+          );
         } else {
           // Fade out -> blink flank behind player (strictly constrained to Demon Badlands x >= DEMON_ZONE_MIN_X)
           e.abilityTimer -= dt;
-          if (e.rig.ghostOverlayMat) {
-            e.rig.ghostOverlayMat.opacity = THREE.MathUtils.clamp(e.abilityTimer / 0.65, 0.12, 0.72);
-          }
+          const targetAlpha = THREE.MathUtils.clamp(e.abilityTimer / 0.65, 0.12, 0.72);
+          e.ghostOpacity = THREE.MathUtils.damp(e.ghostOpacity, targetAlpha, 14, dt);
+          if (e.rig.ghostOverlayMat) e.rig.ghostOverlayMat.opacity = e.ghostOpacity;
           if (e.abilityTimer <= 0) {
             const flankAngle = this.playerYaw + Math.PI + (Math.random() - 0.5) * 1.4;
             const bx = THREE.MathUtils.clamp(
@@ -7165,9 +7718,25 @@ export class RamayanaWorldEngine {
             e.abilityCooldown = 4.2;
           }
         }
+        if (updatePose) {
+          const poseDt = Math.min(0.12, e.kinematicAccumDt);
+          e.kinematicAccumDt = 0;
+          const tLArm = -0.45 + Math.sin(elapsed * 2.5) * 0.18;
+          const tRArm = e.abilityState === 'WINDUP' ? -1.1 : -0.45 + Math.cos(elapsed * 2.5) * 0.18;
+          e.pose.torsoRotX = THREE.MathUtils.damp(e.pose.torsoRotX, recoilPitch, 14, poseDt);
+          e.pose.torsoRotY = THREE.MathUtils.damp(e.pose.torsoRotY, recoilYaw, 14, poseDt);
+          e.pose.leftArm = THREE.MathUtils.damp(e.pose.leftArm, tLArm, 12, poseDt);
+          e.pose.rightArm = THREE.MathUtils.damp(e.pose.rightArm, tRArm, 12, poseDt);
+          e.rig.torso.rotation.set(e.pose.torsoRotX, e.pose.torsoRotY, 0);
+          e.rig.leftArm.rotation.x = e.pose.leftArm;
+          e.rig.rightArm.rotation.x = e.pose.rightArm;
+        }
       } else if (e.variant === 'SORCERER_HUMAN') {
         // HUMAN 2: CURSED SORCERER — Kites at range, fires 3-orb curse spread & places delayed ground curse sigil
-        e.yaw = Math.atan2(dx, dz);
+        e.yaw = dampAngle(e.yaw, targetLookYaw, 10.5, dt);
+        let sorcIntensity = 0;
+        let armPitchOvr: number | null = null;
+        let armElbowOvr: number | null = null;
         if (e.abilityState === 'IDLE') {
           if (dist < 10) {
             const res = this.moveSweptWithStaticCCD(
@@ -7183,7 +7752,7 @@ export class RamayanaWorldEngine {
             e.x = res.x;
             e.z = res.z;
             e.walkPhase += (movedDist / 1.76) * Math.PI * 2;
-            this.applyArticulatedLocomotion(e.rig, e.walkPhase, THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 3.2, 0, 1), false, true, false, true, 0.96, elapsed, dt);
+            sorcIntensity = THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 3.2, 0, 1);
           } else if (dist > 19) {
             const res = this.moveSweptWithStaticCCD(
               e.x,
@@ -7198,9 +7767,7 @@ export class RamayanaWorldEngine {
             e.x = res.x;
             e.z = res.z;
             e.walkPhase += (movedDist / 1.76) * Math.PI * 2;
-            this.applyArticulatedLocomotion(e.rig, e.walkPhase, THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 3.2, 0, 1), false, true, false, true, 0.96, elapsed, dt);
-          } else {
-            this.applyArticulatedLocomotion(e.rig, e.walkPhase, 0, false, true, false, true, 0.96, elapsed, dt);
+            sorcIntensity = THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 3.2, 0, 1);
           }
           if (dist < 28 && e.abilityCooldown <= 0) {
             e.abilityState = 'WINDUP';
@@ -7208,8 +7775,8 @@ export class RamayanaWorldEngine {
           }
         } else {
           e.abilityTimer -= dt;
-          e.rig.rightArm.rotation.x = -1.65;
-          e.rig.rightElbow.rotation.x = -0.25;
+          armPitchOvr = -1.65;
+          armElbowOvr = -0.25;
           if (e.abilityTimer <= 0) {
             // Fire 3-orb green curse fan OR place Curse Sigil trap beneath player
             if (Math.random() < 0.55) {
@@ -7236,9 +7803,33 @@ export class RamayanaWorldEngine {
           }
         }
         e.y = groundHeightAt(e.x, e.z);
+        if (updatePose) {
+          const poseDt = Math.min(0.12, e.kinematicAccumDt);
+          e.kinematicAccumDt = 0;
+          this.applyArticulatedLocomotion(
+            e.rig,
+            e.walkPhase,
+            sorcIntensity,
+            false,
+            true,
+            false,
+            true,
+            0.96,
+            elapsed,
+            poseDt,
+            e.pose,
+            recoilPitch,
+            recoilYaw,
+            armPitchOvr,
+            armElbowOvr
+          );
+        }
       } else {
         // HUMAN 1: BRUTE_HUMAN (incl. Boss Viradha) — Slow advance + Gada Club Ground-Slam Shockwave
-        e.yaw = Math.atan2(dx, dz);
+        e.yaw = dampAngle(e.yaw, targetLookYaw, 9.5, dt);
+        let bruteIntensity = 0;
+        let armPitchOvr: number | null = null;
+        let armElbowOvr: number | null = null;
         if (e.abilityState === 'IDLE') {
           if (dist < 5.6 && e.abilityCooldown <= 0) {
             e.abilityState = 'WINDUP';
@@ -7258,19 +7849,16 @@ export class RamayanaWorldEngine {
             e.x = res.x;
             e.z = res.z;
             e.walkPhase += (movedDist / 1.76) * Math.PI * 2;
-            this.applyArticulatedLocomotion(e.rig, e.walkPhase, THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 3.2, 0, 1), false, true, false, true, 0.96, elapsed, dt);
-          } else {
-            this.applyArticulatedLocomotion(e.rig, e.walkPhase, 0, false, true, false, true, 0.96, elapsed, dt);
-            if (e.attackCooldown <= 0) {
-              e.attackCooldown = 1.4;
-              this.inflictDamageToPlayer(this.mountedChariotIndex !== null ? 6 : e.isCommander ? 16 : 10, 0);
-            }
+            bruteIntensity = THREE.MathUtils.clamp(movedDist / Math.max(0.001, dt) / 3.2, 0, 1);
+          } else if (e.attackCooldown <= 0) {
+            e.attackCooldown = 1.4;
+            this.inflictDamageToPlayer(this.mountedChariotIndex !== null ? 6 : e.isCommander ? 16 : 10, 0);
           }
         } else {
           // Overhead Gada slam windup -> Shockwave Ring
           e.abilityTimer -= dt;
-          e.rig.rightArm.rotation.x = -2.15;
-          e.rig.rightElbow.rotation.x = -0.3;
+          armPitchOvr = -2.15;
+          armElbowOvr = -0.3;
           if (e.abilityTimer <= 0) {
             this.spawnGroundHazard('GADA_WAVE', e.x, e.z, e.isCommander ? 7.5 : 5.8, e.isCommander ? 16 : 11, 0.6);
             this.spawnBlast(e.x, e.y + 0.5, e.z, 0xff5a12);
@@ -7280,6 +7868,27 @@ export class RamayanaWorldEngine {
           }
         }
         e.y = groundHeightAt(e.x, e.z);
+        if (updatePose) {
+          const poseDt = Math.min(0.12, e.kinematicAccumDt);
+          e.kinematicAccumDt = 0;
+          this.applyArticulatedLocomotion(
+            e.rig,
+            e.walkPhase,
+            bruteIntensity,
+            false,
+            true,
+            false,
+            true,
+            0.96,
+            elapsed,
+            poseDt,
+            e.pose,
+            recoilPitch,
+            recoilYaw,
+            armPitchOvr,
+            armElbowOvr
+          );
+        }
       }
     }
     this.stealthSpotted = this.stealthActive && spottedByAny;
@@ -7298,36 +7907,61 @@ export class RamayanaWorldEngine {
     for (let ci = 0; ci < this.citizens.length; ci++) {
       const c = this.citizens[ci];
       const citDistSq = (c.x - citPx) * (c.x - citPx) + (c.z - citPz) * (c.z - citPz);
-      const citTier = computeEntityLodTier(citDistSq);
+      c.kinematicAccumDt += dt;
+      const updateRigKin = citDistSq <= 3025 || ((ci + this.simFrameCounter) & 3) === 0;
+
       if (this.ascensionActive && c.courtSeat) {
-        c.rig.root.visible = citTier !== 'CULLED';
         if (c.seated) {
-          // Hold clean seated posture right atop the assigned Sabha cushion (top = sabhaBaseY + 0.95m)
+          // Hold clean seated posture right atop the assigned Sabha cushion (smooth transition from walk)
           c.x = c.courtSeat.x;
           c.y = c.courtSeat.y;
           c.z = c.courtSeat.z;
-          c.yaw = c.courtSeat.faceYaw;
-          c.rig.contactShadow.visible = false;
-          c.rig.torso.position.y = 0.56;
-          c.rig.leftLeg.position.y = 0.56;
-          c.rig.rightLeg.position.y = 0.56;
-          c.rig.leftLeg.rotation.x = -1.42;
-          c.rig.rightLeg.rotation.x = -1.42;
-          c.rig.leftKnee.rotation.x = 1.32;
-          c.rig.rightKnee.rotation.x = 1.32;
-          c.rig.leftArm.rotation.x = -0.35;
-          c.rig.rightArm.rotation.x = -0.35;
-          c.rig.leftElbow.rotation.x = -0.55;
-          c.rig.rightElbow.rotation.x = -0.55;
-          if (c.rig.centerPleat) {
-            c.rig.centerPleat.rotation.x = -1.25;
+          c.yaw = dampAngle(c.yaw, c.courtSeat.faceYaw, 9.0, dt);
+          if (updateRigKin) {
+            const poseDt = Math.min(0.12, c.kinematicAccumDt);
+            c.kinematicAccumDt = 0;
+            const p = c.pose;
+            const lam = 12;
+            p.hipY = THREE.MathUtils.damp(p.hipY, 0.56, lam, poseDt);
+            p.leftHip = THREE.MathUtils.damp(p.leftHip, -1.42, lam, poseDt);
+            p.rightHip = THREE.MathUtils.damp(p.rightHip, -1.42, lam, poseDt);
+            p.leftLegZ = THREE.MathUtils.damp(p.leftLegZ, 0, lam, poseDt);
+            p.rightLegZ = THREE.MathUtils.damp(p.rightLegZ, 0, lam, poseDt);
+            p.leftKnee = THREE.MathUtils.damp(p.leftKnee, 1.32, lam, poseDt);
+            p.rightKnee = THREE.MathUtils.damp(p.rightKnee, 1.32, lam, poseDt);
+            p.leftAnkle = THREE.MathUtils.damp(p.leftAnkle, 0, lam, poseDt);
+            p.rightAnkle = THREE.MathUtils.damp(p.rightAnkle, 0, lam, poseDt);
+            p.leftArm = THREE.MathUtils.damp(p.leftArm, -0.35, lam, poseDt);
+            p.rightArm = THREE.MathUtils.damp(p.rightArm, -0.35, lam, poseDt);
+            p.leftArmZ = THREE.MathUtils.damp(p.leftArmZ, 0, lam, poseDt);
+            p.rightArmZ = THREE.MathUtils.damp(p.rightArmZ, 0, lam, poseDt);
+            p.leftElbow = THREE.MathUtils.damp(p.leftElbow, -0.55, lam, poseDt);
+            p.rightElbow = THREE.MathUtils.damp(p.rightElbow, -0.55, lam, poseDt);
+            p.torsoRotX = THREE.MathUtils.damp(p.torsoRotX, 0, lam, poseDt);
+            p.torsoRotY = THREE.MathUtils.damp(p.torsoRotY, 0, lam, poseDt);
+            p.torsoRotZ = THREE.MathUtils.damp(p.torsoRotZ, 0, lam, poseDt);
+            p.pleatRotX = THREE.MathUtils.damp(p.pleatRotX, -1.25, lam, poseDt);
+
+            c.rig.torso.position.y = p.hipY;
+            c.rig.leftLeg.position.y = p.hipY;
+            c.rig.rightLeg.position.y = p.hipY;
+            c.rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
+            c.rig.leftLeg.rotation.set(p.leftHip, 0, p.leftLegZ);
+            c.rig.rightLeg.rotation.set(p.rightHip, 0, p.rightLegZ);
+            c.rig.leftKnee.rotation.x = p.leftKnee;
+            c.rig.rightKnee.rotation.x = p.rightKnee;
+            c.rig.leftAnkle.rotation.x = p.leftAnkle;
+            c.rig.rightAnkle.rotation.x = p.rightAnkle;
+            c.rig.leftArm.rotation.set(p.leftArm, 0, p.leftArmZ);
+            c.rig.rightArm.rotation.set(p.rightArm, 0, p.rightArmZ);
+            c.rig.leftElbow.rotation.x = p.leftElbow;
+            c.rig.rightElbow.rotation.x = p.rightElbow;
+            if (c.rig.centerPleat) c.rig.centerPleat.rotation.x = p.pleatRotX;
           }
           continue;
         }
 
         allCouncilSeated = false;
-        c.rig.contactShadow.visible = citTier === 'FULL';
-        c.rig.torso.rotation.x = 0;
         const sdx = c.courtSeat.x - c.x;
         const sdz = c.courtSeat.z - c.z;
         const dist = Math.hypot(sdx, sdz);
@@ -7336,32 +7970,37 @@ export class RamayanaWorldEngine {
           c.x = c.courtSeat.x;
           c.y = c.courtSeat.y;
           c.z = c.courtSeat.z;
-          c.yaw = c.courtSeat.faceYaw;
           c.seated = true;
-          c.navQueue = [];
+          c.navQueue.length = 0;
+          c.navCursor = 0;
           continue;
         }
 
         // Follow pre-computed obstacle-free Navigation Mesh waypoints strictly without collider bypass
         let tgtX = c.courtSeat.x;
         let tgtZ = c.courtSeat.z;
-        if (!c.navQueue || c.navQueue.length === 0) {
-          c.navQueue = findPalaceNavPath(
+        if (c.navCursor >= c.navQueue.length) {
+          findPalaceNavPath(
             c.x,
             c.y,
             c.z,
             c.courtSeat.x,
             c.courtSeat.y,
             c.courtSeat.z,
-            false
+            false,
+            c.navQueue
           );
+          c.navCursor = 0;
         }
-        while (c.navQueue.length > 0 && Math.hypot(c.navQueue[0].x - c.x, c.navQueue[0].z - c.z) < 1.15) {
-          c.navQueue.shift();
+        while (
+          c.navCursor < c.navQueue.length &&
+          Math.hypot(c.navQueue[c.navCursor].x - c.x, c.navQueue[c.navCursor].z - c.z) < 1.15
+        ) {
+          c.navCursor++;
         }
-        if (c.navQueue.length > 0) {
-          tgtX = c.navQueue[0].x;
-          tgtZ = c.navQueue[0].z;
+        if (c.navCursor < c.navQueue.length) {
+          tgtX = c.navQueue[c.navCursor].x;
+          tgtZ = c.navQueue[c.navCursor].z;
         }
         const wdx = tgtX - c.x;
         const wdz = tgtZ - c.z;
@@ -7371,7 +8010,7 @@ export class RamayanaWorldEngine {
         const speed = THREE.MathUtils.clamp(Math.max(5.5, dist / timeLeft), 5.5, 14.0);
         const dirX = wdx / wDist;
         const dirZ = wdz / wDist;
-        c.yaw = Math.atan2(dirX, dirZ);
+        c.yaw = dampAngle(c.yaw, Math.atan2(dirX, dirZ), 10.5, dt);
         const curSurfY = this.surfaceHeightAt(c.x, c.z, c.y);
         const stepNx = c.x + dirX * speed * dt;
         const stepNz = c.z + dirZ * speed * dt;
@@ -7419,9 +8058,11 @@ export class RamayanaWorldEngine {
         const movedDist = Math.hypot(chosenX - c.x, chosenZ - c.z);
         c.x = chosenX;
         c.z = chosenZ;
-        c.y = this.surfaceHeightAt(c.x, c.z, c.y);
+        c.y = THREE.MathUtils.damp(c.y, this.surfaceHeightAt(c.x, c.z, c.y), 14.0, dt);
         c.walkPhase += (movedDist / 2.2) * Math.PI * 2;
-        if (c.rig.root.visible) {
+        if (updateRigKin) {
+          const poseDt = Math.min(0.12, c.kinematicAccumDt);
+          c.kinematicAccumDt = 0;
           this.applyArticulatedLocomotion(
             c.rig,
             c.walkPhase,
@@ -7432,51 +8073,51 @@ export class RamayanaWorldEngine {
             false,
             0.875,
             elapsed,
-            dt
+            poseDt,
+            c.pose
           );
         }
       } else {
-        // Strict Baked Navigation Mesh Patrol + Distance-LOD Kinematics & Occlusion Culling
+        // Strict Baked Navigation Mesh Patrol + Distance-LOD Kinematics
         if (citDistSq > 11025) {
-          c.rig.root.visible = false;
-          c.rig.contactShadow.visible = false;
           continue;
         }
-        c.rig.root.visible = true;
-        c.rig.contactShadow.visible = citTier === 'FULL';
         c.patrolTimer -= dt;
-        if (!c.navQueue || c.navQueue.length === 0 || c.patrolTimer <= 0) {
+        if (c.navCursor >= c.navQueue.length || c.patrolTimer <= 0) {
           const wantWater = c.canSwim && !c.isSwimming && Math.random() < 0.72;
           c.patrolTimer = c.canSwim ? 7.0 + Math.random() * 4.0 : 5.0 + Math.random() * 4.0;
-          c.navQueue = pickNavMeshPatrolTarget(
+          pickNavMeshPatrolTarget(
             c.x,
             c.y,
             c.z,
             c.homeX,
             c.homeZ,
             c.canSwim,
-            wantWater
+            wantWater,
+            c.navQueue
           );
+          c.navCursor = 0;
         }
 
-        const wp = c.navQueue[0];
+        const wp = c.navCursor < c.navQueue.length ? c.navQueue[c.navCursor] : undefined;
         if (wp) {
           const wpdx = wp.x - c.x;
           const wpdz = wp.z - c.z;
           if (wpdx * wpdx + wpdz * wpdz < 0.7225) {
-            c.navQueue.shift();
+            c.navCursor++;
             c.patrolTimer = Math.min(c.patrolTimer, 0.2);
           }
         }
 
-        const tgtX = c.navQueue[0]?.x ?? c.homeX;
-        const tgtZ = c.navQueue[0]?.z ?? c.homeZ;
+        const activeWp = c.navCursor < c.navQueue.length ? c.navQueue[c.navCursor] : undefined;
+        const tgtX = activeWp ? activeWp.x : c.homeX;
+        const tgtZ = activeWp ? activeWp.z : c.homeZ;
         const pdx = tgtX - c.x;
         const pdz = tgtZ - c.z;
         const pDist = Math.max(0.01, Math.hypot(pdx, pdz));
         const pDirX = pdx / pDist;
         const pDirZ = pdz / pDist;
-        c.yaw = Math.atan2(pDirX, pDirZ);
+        c.yaw = dampAngle(c.yaw, Math.atan2(pDirX, pDirZ), 8.5, dt);
 
         const spd = c.isSwimming ? 2.1 : 1.8;
         const nx = c.x + pDirX * spd * dt;
@@ -7496,33 +8137,37 @@ export class RamayanaWorldEngine {
           );
           movedDist = Math.hypot(res.x - c.x, res.z - c.z);
           if (movedDist < spd * dt * 0.2) {
-            c.navQueue = [];
+            c.navQueue.length = 0;
+            c.navCursor = 0;
             c.patrolTimer = 0;
           }
           c.x = res.x;
           c.z = res.z;
         } else {
-          c.navQueue = [];
+          c.navQueue.length = 0;
+          c.navCursor = 0;
           c.patrolTimer = 0;
         }
 
         const cGroundY = this.surfaceHeightAt(c.x, c.z, c.y);
         const cWaterSurf = c.canSwim ? waterSurfaceAt(c.x, c.z) : null;
-        const updateRigKinematics = citDistSq <= 3025 || ((ci + this.simFrameCounter) & 3) === 0;
         if (cWaterSurf !== null && cWaterSurf - cGroundY > 0.95) {
           c.isSwimming = true;
           const swimTargetY = cWaterSurf - 1.15 + Math.sin(elapsed * 2.2 + c.walkPhase) * 0.04;
           c.y = THREE.MathUtils.damp(c.y, Math.max(cGroundY + 0.1, swimTargetY), 6.0, dt);
           c.walkPhase += Math.max(dt * 3.0, (movedDist / 1.8) * Math.PI * 2);
-          if (updateRigKinematics) {
-            this.applySwimmingPose(c.rig, c.walkPhase, 0.85, elapsed);
+          if (updateRigKin) {
+            const poseDt = Math.min(0.12, c.kinematicAccumDt);
+            c.kinematicAccumDt = 0;
+            this.applySwimmingPose(c.rig, c.walkPhase, 0.85, elapsed, 0, c.pose, poseDt);
           }
         } else {
           c.isSwimming = false;
-          c.rig.torso.rotation.x = 0;
-          c.y = cGroundY;
+          c.y = THREE.MathUtils.damp(c.y, cGroundY, 12.0, dt);
           c.walkPhase += (movedDist / 1.68) * Math.PI * 2;
-          if (updateRigKinematics) {
+          if (updateRigKin) {
+            const poseDt = Math.min(0.12, c.kinematicAccumDt);
+            c.kinematicAccumDt = 0;
             this.applyArticulatedLocomotion(
               c.rig,
               c.walkPhase,
@@ -7533,7 +8178,8 @@ export class RamayanaWorldEngine {
               false,
               0.875,
               elapsed,
-              dt
+              poseDt,
+              c.pose
             );
           }
         }
@@ -7652,16 +8298,7 @@ export class RamayanaWorldEngine {
       }
     }
 
-    for (const e of this.enemies) {
-      if (!e.alive || !e.rig.root.visible) continue;
-      e.rig.root.position.set(e.x, e.y, e.z);
-      e.rig.root.rotation.y = e.yaw;
-    }
-    for (const c of this.citizens) {
-      if (!c.rig.root.visible) continue;
-      c.rig.root.position.set(c.x, c.y, c.z);
-      c.rig.root.rotation.y = c.yaw;
-    }
+
 
     // 9. Update Mission Beacon & Dynamic Night Street Lamps / Torches Pool
     const activeMission = MISSIONS[this.missionIdx];
@@ -7779,6 +8416,127 @@ export class RamayanaWorldEngine {
     this.updateRoofOcclusion(this.camSmoothPos.x, this.camSmoothPos.y, this.camSmoothPos.z);
     this.camera.position.copy(this.camSmoothPos);
     this.camera.lookAt(this.camSmoothLook);
+
+    // 10b. Post-Camera Occlusion Culling, Entity Detail LOD & Transform Sync
+    const fog = this.scene.fog as THREE.FogExp2 | null;
+    this.occlusionManager.prepareCullingBasis(this.camera, fog ? fog.density : 0.0044);
+
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      if (!e.alive) continue;
+      const dSq =
+        (e.x - this.playerX) * (e.x - this.playerX) +
+        (e.z - this.playerZ) * (e.z - this.playerZ);
+      const tier = computeEntityLodTier(dSq);
+      const vis =
+        tier !== 'CULLED' &&
+        this.occlusionManager.isSphereVisible(
+          e.x,
+          e.y + 1.05,
+          e.z,
+          e.isCommander ? 1.85 : 1.45,
+          15625,
+          144
+        );
+      e.rig.root.visible = vis;
+      if (!vis) {
+        e.rig.contactShadow.visible = false;
+        continue;
+      }
+      e.rig.contactShadow.visible = tier === 'FULL';
+      applyRigLodDetailTier(e.rig.root, tier);
+      e.rig.root.position.set(e.x, e.y, e.z);
+      e.rig.root.rotation.y = e.yaw;
+    }
+
+    for (let i = 0; i < this.citizens.length; i++) {
+      const c = this.citizens[i];
+      const dSq =
+        (c.x - this.playerX) * (c.x - this.playerX) +
+        (c.z - this.playerZ) * (c.z - this.playerZ);
+      const isCouncil = this.ascensionActive && c.courtSeat !== null;
+      const maxRange = isCouncil ? 15625 : 11025;
+      const tier = computeEntityLodTier(dSq, 1600, 6724, maxRange);
+      const vis =
+        tier !== 'CULLED' &&
+        this.occlusionManager.isSphereVisible(
+          c.x,
+          c.y + 0.95,
+          c.z,
+          1.3,
+          maxRange,
+          100
+        );
+      c.rig.root.visible = vis;
+      if (!vis) {
+        c.rig.contactShadow.visible = false;
+        continue;
+      }
+      c.rig.contactShadow.visible = tier === 'FULL' && !c.seated;
+      applyRigLodDetailTier(c.rig.root, tier);
+      c.rig.root.position.set(c.x, c.y, c.z);
+      c.rig.root.rotation.y = c.yaw;
+    }
+
+    for (let i = 0; i < this.animals.length; i++) {
+      const a = this.animals[i];
+      const obj = a.horseRig ? a.horseRig.group : a.elephantRig!.group;
+      if (i === this.mountedAnimalIndex) {
+        obj.visible = true;
+        applyRigLodDetailTier(obj, 'FULL');
+        continue;
+      }
+      const dSq =
+        (a.x - this.playerX) * (a.x - this.playerX) +
+        (a.z - this.playerZ) * (a.z - this.playerZ);
+      const tier = computeEntityLodTier(dSq, 2500, 8100, 19600);
+      const isEle = a.kind === 'ELEPHANT';
+      const vis =
+        tier !== 'CULLED' &&
+        this.occlusionManager.isSphereVisible(
+          a.x,
+          a.y + (isEle ? 1.8 : 1.15),
+          a.z,
+          isEle ? 2.9 : 1.9,
+          19600,
+          196
+        );
+      obj.visible = vis;
+      if (vis) {
+        applyRigLodDetailTier(obj, tier);
+      }
+    }
+
+    for (let i = 0; i < this.chariots.length; i++) {
+      const ch = this.chariots[i];
+      if (i === this.mountedChariotIndex) {
+        ch.rig.root.visible = true;
+        ch.rig.contactShadow.visible = true;
+        applyRigLodDetailTier(ch.rig.root, 'FULL');
+        continue;
+      }
+      const dSq =
+        (ch.x - this.playerX) * (ch.x - this.playerX) +
+        (ch.z - this.playerZ) * (ch.z - this.playerZ);
+      const tier = computeEntityLodTier(dSq, 2500, 8100, 19600);
+      const vis =
+        tier !== 'CULLED' &&
+        this.occlusionManager.isSphereVisible(
+          ch.x,
+          ch.y + 1.4,
+          ch.z,
+          3.8,
+          19600,
+          256
+        );
+      ch.rig.root.visible = vis;
+      ch.rig.contactShadow.visible = vis && tier === 'FULL';
+      if (vis) {
+        applyRigLodDetailTier(ch.rig.root, tier);
+      }
+    }
+
+    this.stepAquaticEcosystem(dt, elapsed);
 
     // Update Underwater Post-Processing Volume based on exact camera submergence below Sarayu / Stepwell surface
     this.updateUnderwaterPostProcessing(elapsed);
@@ -8008,14 +8766,13 @@ export class RamayanaWorldEngine {
         if (t.z > 165) t.z = -165;
         if (t.z < -165) t.z = 165;
         const wx = riverCenterX(t.z) + t.xOff;
-        const dSq = (wx - camX) * (wx - camX) + (t.z - camZ) * (t.z - camZ);
-        if (dSq > 19600) {
+        const wave = Math.sin(elapsed * 0.55 + t.phase);
+        const y = THREE.MathUtils.lerp(RIVER_SURFACE_Y - 2.9, RIVER_SURFACE_Y - 0.06, (wave + 1) * 0.5);
+        if (!this.occlusionManager.isSphereVisible(wx, y, t.z, 2.2, 19600)) {
           t.root.visible = false;
           continue;
         }
         t.root.visible = true;
-        const wave = Math.sin(elapsed * 0.55 + t.phase);
-        const y = THREE.MathUtils.lerp(RIVER_SURFACE_Y - 2.9, RIVER_SURFACE_Y - 0.06, (wave + 1) * 0.5);
         t.root.position.set(wx, y, t.z);
         t.root.rotation.y = i % 2 === 0 ? 0 : Math.PI;
         t.root.rotation.x = -Math.cos(elapsed * 0.55 + t.phase) * 0.18;
@@ -8032,17 +8789,13 @@ export class RamayanaWorldEngine {
         if (c.z > 160) c.z = -160;
         if (c.z < -160) c.z = 160;
         const wx = riverCenterX(c.z) + c.xOff;
-        const dSq = (wx - camX) * (wx - camX) + (c.z - camZ) * (c.z - camZ);
-        if (dSq > 19600) {
+        const cy = RIVER_SURFACE_Y - 0.16 + Math.sin(elapsed * 1.4 + c.phase) * 0.05;
+        if (!this.occlusionManager.isSphereVisible(wx, cy, c.z, 2.5, 19600)) {
           c.root.visible = false;
           continue;
         }
         c.root.visible = true;
-        c.root.position.set(
-          wx,
-          RIVER_SURFACE_Y - 0.16 + Math.sin(elapsed * 1.4 + c.phase) * 0.05,
-          c.z
-        );
+        c.root.position.set(wx, cy, c.z);
         c.root.rotation.y = c.speed >= 0 ? 0 : Math.PI;
         c.tailPivot.rotation.y = Math.sin(elapsed * 4.5 + c.phase) * 0.32;
       }
@@ -8051,14 +8804,14 @@ export class RamayanaWorldEngine {
       for (let i = 0; i < this.riverJellyfish.length; i++) {
         const jf = this.riverJellyfish[i];
         const wx = riverCenterX(jf.z) + jf.xOff + Math.sin(elapsed * 0.8 + jf.phase) * 0.65;
-        const dSq = (wx - camX) * (wx - camX) + (jf.z - camZ) * (jf.z - camZ);
-        if (dSq > 14400) {
+        const pulse = Math.sin(elapsed * 2.6 + jf.phase);
+        const jy = jf.baseY + pulse * 0.38;
+        if (!this.occlusionManager.isSphereVisible(wx, jy, jf.z, 1.3, 14400)) {
           jf.root.visible = false;
           continue;
         }
         jf.root.visible = true;
-        const pulse = Math.sin(elapsed * 2.6 + jf.phase);
-        jf.root.position.set(wx, jf.baseY + pulse * 0.38, jf.z);
+        jf.root.position.set(wx, jy, jf.z);
         jf.bell.scale.set(1 - pulse * 0.12, 1 + pulse * 0.15, 1 - pulse * 0.12);
       }
 
@@ -8068,17 +8821,16 @@ export class RamayanaWorldEngine {
         d.z += 5.4 * dt;
         if (d.z > 160) d.z = -160;
         const wx = riverCenterX(d.z) + d.xOff;
-        const dSq = (wx - camX) * (wx - camX) + (d.z - camZ) * (d.z - camZ);
-        if (dSq > 19600) {
-          d.root.visible = false;
-          continue;
-        }
-        d.root.visible = true;
         const leapCycle = (elapsed * 0.72 + d.phase) % (Math.PI * 2);
         const isLeaping = leapCycle < Math.PI;
         const y = isLeaping
           ? RIVER_SURFACE_Y + Math.sin(leapCycle) * 1.95 - 0.15
           : RIVER_SURFACE_Y - 1.5 - Math.sin(leapCycle - Math.PI) * 1.1;
+        if (!this.occlusionManager.isSphereVisible(wx, y, d.z, 2.2, 19600)) {
+          d.root.visible = false;
+          continue;
+        }
+        d.root.visible = true;
         const pitch = isLeaping
           ? -Math.cos(leapCycle) * 0.65
           : Math.cos(leapCycle - Math.PI) * 0.32;
@@ -8094,8 +8846,7 @@ export class RamayanaWorldEngine {
         if (s.z > 168) s.z = -168;
         if (s.z < -168) s.z = 168;
         const wx = riverCenterX(s.z) + s.xOff + Math.sin(elapsed * 0.9 + s.phase) * 1.2;
-        const dSq = (wx - camX) * (wx - camX) + (s.z - camZ) * (s.z - camZ);
-        if (dSq > 19600) {
+        if (!this.occlusionManager.isSphereVisible(wx, s.baseY, s.z, 2.6, 19600)) {
           s.root.visible = false;
           continue;
         }
@@ -8153,11 +8904,16 @@ export class RamayanaWorldEngine {
 
       for (let i = 0; i < this.stepwellTurtles.length; i++) {
         const st = this.stepwellTurtles[i];
-        st.root.visible = true;
         st.angle += 0.28 * dt;
         const sx = STEPWELL_POS.x + Math.cos(st.angle) * st.radius;
         const sz = STEPWELL_POS.z + Math.sin(st.angle) * st.radius;
-        st.root.position.set(sx, -0.56 + Math.sin(elapsed * 1.4 + st.phase) * 0.04, sz);
+        const sy = -0.56 + Math.sin(elapsed * 1.4 + st.phase) * 0.04;
+        if (!this.occlusionManager.isSphereVisible(sx, sy, sz, 1.2, 18225)) {
+          st.root.visible = false;
+          continue;
+        }
+        st.root.visible = true;
+        st.root.position.set(sx, sy, sz);
         st.root.rotation.y = Math.atan2(-Math.sin(st.angle), Math.cos(st.angle));
         st.headGroup.rotation.x = Math.sin(elapsed * 2.5 + st.phase) * 0.12;
         for (let f = 0; f < st.flippers.length; f++) {
@@ -8472,7 +9228,8 @@ export class RamayanaWorldEngine {
       ? currentAnimal.kind
       : 'NONE';
 
-    const blips: RadarBlip[] = [];
+    const blips = this.activeBlips;
+    blips.length = 0;
     let blipCursor = 0;
     const pushBlip = (id: string, kind: RadarBlip['kind'], x: number, z: number) => {
       let slot = this.blipPool[blipCursor];

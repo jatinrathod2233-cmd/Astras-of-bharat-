@@ -332,7 +332,17 @@ export class OcclusionCullingManager {
     return false;
   }
 
-  public update(camera: THREE.Camera, fogDensity: number): void {
+  private cachedCamX = 0;
+  private cachedCamY = 0;
+  private cachedCamZ = 0;
+  private cachedFogCutoffBase = 540;
+
+  /**
+   * Refreshes camera frustum, fog-extinction horizon, and active nearby solid occluders.
+   * Call once after camera transforms settle so both static entries and dynamic `isSphereVisible()`
+   * queries share the exact same frame basis with zero redundant matrix work.
+   */
+  public prepareCullingBasis(camera: THREE.Camera, fogDensity: number): void {
     camera.updateMatrixWorld();
     this.projScreenMatrix.multiplyMatrices(
       camera.projectionMatrix,
@@ -341,15 +351,110 @@ export class OcclusionCullingManager {
     this.frustum.setFromProjectionMatrix(this.projScreenMatrix);
 
     const camPos = camera.position;
-    const camX = camPos.x;
-    const camY = camPos.y;
-    const camZ = camPos.z;
+    this.cachedCamX = camPos.x;
+    this.cachedCamY = camPos.y;
+    this.cachedCamZ = camPos.z;
 
-    // Conservative exponential fog extinction range: exp(-(d * fogDensity)^2) < 0.004 at d * density >= 2.35
+    // Conservative exponential fog extinction range: exp(-(d * fogDensity)^2) < 0.004 at d * density >= 2.4
     const safeFog = Math.max(0.0022, fogDensity);
-    const fogCutoffBase = 2.4 / safeFog;
+    this.cachedFogCutoffBase = 2.4 / safeFog;
 
-    this.selectActiveOccluders(camX, camY, camZ);
+    this.selectActiveOccluders(this.cachedCamX, this.cachedCamY, this.cachedCamZ);
+  }
+
+  /**
+   * Zero-allocation conservative visibility query for dynamic moving entities (NPCs, demons,
+   * horses, elephants, chariots, and aquatic creatures). Checks:
+   * 1. Exponential fog extinction horizon
+   * 2. Camera frustum sphere intersection
+   * 3. Conservative solid AABB occluder shadow-cone (requires center AND 6 axial envelope points
+   *    at +-0.72*radius to be strictly occluded before hiding, eliminating corner pop-in).
+   */
+  public isSphereVisible(
+    x: number,
+    y: number,
+    z: number,
+    radius: number,
+    maxRangeSq = 0,
+    alwaysKeepDistSq = 0,
+    skipOccluderCull = false
+  ): boolean {
+    const camX = this.cachedCamX;
+    const camY = this.cachedCamY;
+    const camZ = this.cachedCamZ;
+    const dx = x - camX;
+    const dy = y - camY;
+    const dz = z - camZ;
+    const dSq = dx * dx + dy * dy + dz * dz;
+
+    if (alwaysKeepDistSq > 0 && dSq <= alwaysKeepDistSq) {
+      return true;
+    }
+
+    if (maxRangeSq > 0 && dSq > maxRangeSq) {
+      return false;
+    }
+
+    const fogMaxDist = this.cachedFogCutoffBase + radius;
+    if (dSq > fogMaxDist * fogMaxDist) {
+      return false;
+    }
+
+    this.tmpSphere.center.set(x, y, z);
+    this.tmpSphere.radius = radius;
+    if (!this.frustum.intersectsSphere(this.tmpSphere)) {
+      return false;
+    }
+
+    if (
+      !skipOccluderCull &&
+      this.activeOccluderCount > 0 &&
+      dSq > (radius + 16) * (radius + 16)
+    ) {
+      const rTest = radius * 0.72;
+      const minX = x - radius;
+      const maxX = x + radius;
+      const minY = y - radius;
+      const maxY = y + radius;
+      const minZ = z - radius;
+      const maxZ = z + radius;
+
+      for (let k = 0; k < this.activeOccluderCount; k++) {
+        const occ = this.occluders[this.activeOccluderIdx[k]];
+        if (
+          minX <= occ.maxX &&
+          maxX >= occ.minX &&
+          minY <= occ.maxY &&
+          maxY >= occ.minY &&
+          minZ <= occ.maxZ &&
+          maxZ >= occ.minZ
+        ) {
+          continue;
+        }
+        if (
+          this.segmentExitsBoxBeforeTarget(camX, camY, camZ, x, y, z, occ) &&
+          this.segmentExitsBoxBeforeTarget(camX, camY, camZ, x - rTest, y, z, occ) &&
+          this.segmentExitsBoxBeforeTarget(camX, camY, camZ, x + rTest, y, z, occ) &&
+          this.segmentExitsBoxBeforeTarget(camX, camY, camZ, x, y - rTest, z, occ) &&
+          this.segmentExitsBoxBeforeTarget(camX, camY, camZ, x, y + rTest, z, occ) &&
+          this.segmentExitsBoxBeforeTarget(camX, camY, camZ, x, y, z - rTest, occ) &&
+          this.segmentExitsBoxBeforeTarget(camX, camY, camZ, x, y, z + rTest, occ)
+        ) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  public update(camera: THREE.Camera, fogDensity: number): void {
+    this.prepareCullingBasis(camera, fogDensity);
+
+    const camX = this.cachedCamX;
+    const camY = this.cachedCamY;
+    const camZ = this.cachedCamZ;
+    const fogCutoffBase = this.cachedFogCutoffBase;
 
     let visCount = 0;
     let frustumCount = 0;
@@ -440,5 +545,6 @@ export class OcclusionCullingManager {
   public clear(): void {
     this.entries.length = 0;
     this.occluders.length = 0;
+    this.activeOccluderCount = 0;
   }
 }

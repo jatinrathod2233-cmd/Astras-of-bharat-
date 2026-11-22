@@ -3002,6 +3002,7 @@ export function createCitizenModel(
       new THREE.TubeGeometry(buildJaneuCurve(strandOffset), 34, 0.0055, 6, true),
       janeuWhiteMat
     );
+    strand.userData._lodDetail = true;
     torso.add(strand);
   });
 
@@ -3010,6 +3011,7 @@ export function createCitizenModel(
     new THREE.SphereGeometry(0.015, 8, 8),
     janeuWhiteMat
   );
+  janeuKnot.userData._lodDetail = true;
   janeuKnot.position.set(-0.095, 0.56, 0.16);
   torso.add(janeuKnot);
 
@@ -3047,6 +3049,7 @@ export function createCitizenModel(
     new THREE.BoxGeometry(0.014, 0.042, 0.012),
     role === 'MINISTER' || role === 'COMMANDER' ? goldTrimMat : janeuWhiteMat
   );
+  tilak.userData._lodDetail = true;
   tilak.position.set(0, 0.072, 0.145);
   head.add(tilak);
 
@@ -3093,6 +3096,7 @@ export function createCitizenModel(
         new THREE.OctahedronGeometry(0.036, 0),
         goldTrimMat
       );
+      crest.userData._lodDetail = true;
       crest.position.set(0, 0.16, 0.125);
       head.add(crest);
     }
@@ -3309,6 +3313,7 @@ export function createRoyalHorseUnit(
     new THREE.TorusGeometry(0.428, 0.024, 6, 20),
     goldMat
   );
+  goldTrimBand.userData._lodDetail = true;
   goldTrimBand.position.set(0, 1.26, 0.24);
   group.add(goldTrimBand);
 
@@ -3333,6 +3338,7 @@ export function createRoyalHorseUnit(
   group.add(chestCollar);
 
   const chestGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.068, 0), gemMat);
+  chestGem.userData._lodDetail = true;
   chestGem.position.set(0, 1.18, 0.96);
   group.add(chestGem);
 
@@ -3406,6 +3412,7 @@ export function createRoyalHorseUnit(
 
     // Flared Nostrils
     const nostrilRim = new THREE.Mesh(new THREE.TorusGeometry(0.024, 0.009, 6, 10), coatMat);
+    nostrilRim.userData._lodDetail = true;
     nostrilRim.rotation.y = side * 0.65;
     nostrilRim.position.set(side * 0.068, -0.015, 0.47);
     headPivot.add(nostrilRim);
@@ -3448,19 +3455,23 @@ export function createRoyalHorseUnit(
 
   // Ornate Golden Bridle, Headstall, Noseband & Crown Jewel
   const browband = new THREE.Mesh(new THREE.TorusGeometry(0.135, 0.016, 6, 16), goldMat);
+  browband.userData._lodDetail = true;
   browband.rotation.x = Math.PI / 2;
   browband.position.set(0, 0.09, 0.15);
   headPivot.add(browband);
 
   const noseband = new THREE.Mesh(new THREE.TorusGeometry(0.112, 0.015, 6, 16), goldMat);
+  noseband.userData._lodDetail = true;
   noseband.position.set(0, -0.01, 0.36);
   headPivot.add(noseband);
 
   const crestCrown = new THREE.Mesh(new THREE.ConeGeometry(0.042, 0.14, 8), goldMat);
+  crestCrown.userData._lodDetail = true;
   crestCrown.position.set(0, 0.18, 0.12);
   headPivot.add(crestCrown);
 
   const crestGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.028, 0), gemMat);
+  crestGem.userData._lodDetail = true;
   crestGem.position.set(0, 0.13, 0.2);
   headPivot.add(crestGem);
 
@@ -3476,6 +3487,7 @@ export function createRoyalHorseUnit(
   tailGroup.add(tailDock);
 
   const goldCrupper = new THREE.Mesh(new THREE.TorusGeometry(0.102, 0.02, 6, 14), goldMat);
+  goldCrupper.userData._lodDetail = true;
   goldCrupper.rotation.x = 0.45;
   goldCrupper.position.set(0, -0.01, -0.01);
   tailGroup.add(goldCrupper);
@@ -3525,6 +3537,7 @@ export function createRoyalHorseUnit(
     kneePivot.add(cannon);
 
     const anklet = new THREE.Mesh(new THREE.TorusGeometry(0.055, 0.015, 6, 12), goldMat);
+    anklet.userData._lodDetail = true;
     anklet.rotation.x = Math.PI / 2;
     anklet.position.y = -0.41;
     kneePivot.add(anklet);
@@ -3668,6 +3681,7 @@ export function createRathaChariotModel(
       new THREE.CylinderGeometry(0.036, 0.042, 0.94, 8),
       goldMat
     );
+    baluster.userData._lodDetail = true;
     baluster.position.set(Math.sin(ba) * 1.2, 1.56, 0.22 + Math.cos(ba) * 1.2);
     root.add(baluster);
   }
@@ -3706,6 +3720,7 @@ export function createRathaChariotModel(
     new THREE.ConeGeometry(0.24, 0.6, 12),
     goldMat
   );
+  kalasha.userData._lodDetail = true;
   kalasha.position.set(0, 4.35, -0.72);
   root.add(kalasha);
 
@@ -3886,25 +3901,32 @@ export function updateDynamicReinMesh(
   _reinP2.lerpVectors(_reinP0, _reinP3, 0.68);
   _reinP2.y -= sag * 0.85;
 
-  const evalBezier = (t: number, out: THREE.Vector3) => {
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
     const it = 1 - t;
     const a = it * it * it;
     const b = 3 * it * it * t;
     const c = 3 * it * t * t;
     const d = t * t * t;
-    out.set(
+    _reinPt.set(
       a * _reinP0.x + b * _reinP1.x + c * _reinP2.x + d * _reinP3.x,
       a * _reinP0.y + b * _reinP1.y + c * _reinP2.y + d * _reinP3.y,
       a * _reinP0.z + b * _reinP1.z + c * _reinP2.z + d * _reinP3.z
     );
-  };
 
-  for (let i = 0; i <= segs; i++) {
-    const t = i / segs;
-    evalBezier(t, _reinPt);
-    evalBezier(Math.min(1, t + 0.04), _reinNext);
+    const t2 = i === segs ? t - 0.04 : Math.min(1, t + 0.04);
+    const it2 = 1 - t2;
+    const a2 = it2 * it2 * it2;
+    const b2 = 3 * it2 * it2 * t2;
+    const c2 = 3 * it2 * t2 * t2;
+    const d2 = t2 * t2 * t2;
+    _reinNext.set(
+      a2 * _reinP0.x + b2 * _reinP1.x + c2 * _reinP2.x + d2 * _reinP3.x,
+      a2 * _reinP0.y + b2 * _reinP1.y + c2 * _reinP2.y + d2 * _reinP3.y,
+      a2 * _reinP0.z + b2 * _reinP1.z + c2 * _reinP2.z + d2 * _reinP3.z
+    );
+
     if (i === segs) {
-      evalBezier(t - 0.04, _reinNext);
       _reinTan.subVectors(_reinPt, _reinNext);
     } else {
       _reinTan.subVectors(_reinNext, _reinPt);
@@ -5355,6 +5377,7 @@ export function createDemonModel(
       pauldron.position.set(px, 0.64, 0);
       torso.add(pauldron);
       const spk = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.24, 5), ivoryBoneMat);
+      spk.userData._lodDetail = true;
       spk.position.set(px * 1.18, 0.78, 0);
       spk.rotation.z = px > 0 ? -0.45 : 0.45;
       torso.add(spk);
@@ -5363,6 +5386,7 @@ export function createDemonModel(
       new THREE.OctahedronGeometry(0.11, 0),
       glowMat
     );
+    magmaScar.userData._lodDetail = true;
     magmaScar.position.set(0, 0.42, 0.28);
     torso.add(magmaScar);
   } else {
@@ -5372,6 +5396,7 @@ export function createDemonModel(
         new THREE.SphereGeometry(0.045, 7, 7),
         ivoryBoneMat
       );
+      boneBead.userData._lodDetail = true;
       boneBead.position.set(b * 0.08, 0.62 - Math.abs(b) * 0.02, 0.22);
       torso.add(boneBead);
     }

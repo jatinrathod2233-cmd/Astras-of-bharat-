@@ -21,6 +21,7 @@ export class MobileLodAssetCache {
   public readonly emberMat: THREE.MeshStandardMaterial;
   public readonly volcanoRockMat: THREE.MeshStandardMaterial;
   public readonly volcanoMagmaMat: THREE.MeshPhysicalMaterial;
+  public readonly statueGraniteMat: THREE.MeshStandardMaterial;
 
   public readonly unitBoxGeo: THREE.BoxGeometry;
   public readonly pyramidFourGeo: THREE.ConeGeometry;
@@ -107,6 +108,14 @@ export class MobileLodAssetCache {
         emissive: 0xff3b08,
         emissiveIntensity: 2.2,
         roughness: 0.34,
+      })
+    );
+    this.statueGraniteMat = this.trackMat(
+      new THREE.MeshStandardMaterial({
+        map: textures.darkBasalt,
+        color: 0x3b404c,
+        roughness: 0.62,
+        metalness: 0.16,
       })
     );
   }
@@ -214,6 +223,116 @@ export function wrapPavilionWithLod(
   farGroup.add(roof);
 
   lod.addLevel(farGroup, 68);
+  return lod;
+}
+
+/**
+ * Wraps the monumental central Mahadev Statue & Shivling sanctuary in a 2-level THREE.LOD (switch at 92m).
+ */
+export function wrapMahadevWithLod(
+  fullGroup: THREE.Group,
+  x: number,
+  z: number,
+  cache: MobileLodAssetCache
+): THREE.LOD {
+  const lod = new THREE.LOD();
+  const baseY = groundHeightAt(x, z);
+  lod.position.set(x, baseY, z);
+  fullGroup.position.set(0, 0, 0);
+  lod.addLevel(fullGroup, 0);
+
+  const farGroup = new THREE.Group();
+  const plinth = new THREE.Mesh(cache.octCylinderGeo, cache.templeStoneMat);
+  plinth.scale.set(6.4, 2.8, 6.4);
+  plinth.position.y = 1.4;
+  farGroup.add(plinth);
+
+  const torso = new THREE.Mesh(cache.octCylinderGeo, cache.statueGraniteMat);
+  torso.scale.set(2.4, 7.5, 2.0);
+  torso.position.y = 6.2;
+  farGroup.add(torso);
+
+  const jata = new THREE.Mesh(cache.coneSixGeo, cache.statueGraniteMat);
+  jata.scale.set(1.3, 2.6, 1.3);
+  jata.position.y = 11.2;
+  farGroup.add(jata);
+
+  const trishul = new THREE.Mesh(cache.unitBoxGeo, cache.templeGoldMat);
+  trishul.scale.set(0.28, 10.5, 0.28);
+  trishul.position.set(3.2, 7.5, 0);
+  farGroup.add(trishul);
+
+  lod.addLevel(farGroup, 92);
+  return lod;
+}
+
+/**
+ * Wraps a Grand Royal Torana Archway in a 2-level THREE.LOD (switch at 82m).
+ */
+export function wrapToranaWithLod(
+  fullGroup: THREE.Group,
+  x: number,
+  z: number,
+  rotY: number,
+  cache: MobileLodAssetCache
+): THREE.LOD {
+  const lod = new THREE.LOD();
+  lod.position.set(x, 0, z);
+  lod.rotation.y = rotY;
+  fullGroup.position.set(0, 0, 0);
+  fullGroup.rotation.set(0, 0, 0);
+  lod.addLevel(fullGroup, 0);
+
+  const farGroup = new THREE.Group();
+  const leftPillar = new THREE.Mesh(cache.unitBoxGeo, cache.pavilionWallMat);
+  leftPillar.scale.set(1.1, 7.0, 1.1);
+  leftPillar.position.set(-7.6, 3.5, 0);
+  farGroup.add(leftPillar);
+
+  const rightPillar = new THREE.Mesh(cache.unitBoxGeo, cache.pavilionWallMat);
+  rightPillar.scale.set(1.1, 7.0, 1.1);
+  rightPillar.position.set(7.6, 3.5, 0);
+  farGroup.add(rightPillar);
+
+  const lintel = new THREE.Mesh(cache.unitBoxGeo, cache.templeGoldMat);
+  lintel.scale.set(18.2, 1.25, 1.1);
+  lintel.position.set(0, 7.9, 0);
+  farGroup.add(lintel);
+
+  lod.addLevel(farGroup, 82);
+  return lod;
+}
+
+/**
+ * Wraps each 40-segment Arched Sandstone Bridge in a 2-level THREE.LOD (switch at 95m).
+ * Cuts ~85% of bridge triangle count from distant views while keeping closeup stonework sharp.
+ */
+export function wrapBridgeWithLod(
+  fullGroup: THREE.Group,
+  centerX: number,
+  bz: number,
+  halfSpan: number,
+  cache: MobileLodAssetCache
+): THREE.LOD {
+  const lod = new THREE.LOD();
+  lod.position.set(centerX, 0, bz);
+  fullGroup.position.set(0, 0, 0);
+  lod.addLevel(fullGroup, 0);
+
+  const farGroup = new THREE.Group();
+  const deck = new THREE.Mesh(cache.unitBoxGeo, cache.pavilionWallMat);
+  deck.scale.set(halfSpan * 2, 0.75, 12.6);
+  deck.position.set(0, 1.35, 0);
+  farGroup.add(deck);
+
+  for (let s = -1; s <= 1; s += 2) {
+    const rail = new THREE.Mesh(cache.unitBoxGeo, cache.templeTrimMat);
+    rail.scale.set(halfSpan * 2, 0.9, 0.6);
+    rail.position.set(0, 2.15, s * 5.9);
+    farGroup.add(rail);
+  }
+
+  lod.addLevel(farGroup, 95);
   return lod;
 }
 
@@ -342,12 +461,64 @@ export function wrapBlackMountainWithLod(
 }
 
 /**
+ * Tags fine secondary ornaments/jewelry/filigree meshes inside any rig hierarchy so they can be toggled
+ * in O(1) at MEDIUM/FAR entity LOD distances without allocating or swapping materials.
+ */
+export function collectLodDetailMeshes(root: THREE.Object3D): THREE.Object3D[] {
+  const list: THREE.Object3D[] = [];
+  root.traverse((obj) => {
+    if (obj.userData && obj.userData._lodDetail === true) {
+      list.push(obj);
+    }
+  });
+  return list;
+}
+
+/**
+ * Applies cached LOD detail visibility in O(1) per rig when tier changes (zero traversal in loop).
+ */
+export function applyRigLodDetailTier(
+  root: THREE.Object3D,
+  tier: DynamicLodTier
+): void {
+  const prevTier = root.userData._activeLodTier as DynamicLodTier | undefined;
+  if (prevTier === tier) return;
+  root.userData._activeLodTier = tier;
+
+  let details = root.userData._lodDetailCache as THREE.Object3D[] | undefined;
+  if (!details) {
+    details = collectLodDetailMeshes(root);
+    root.userData._lodDetailCache = details;
+  }
+  const showDetail = tier === 'FULL';
+  for (let i = 0; i < details.length; i++) {
+    details[i].visible = showDetail;
+  }
+
+  let shadowCasters = root.userData._lodShadowCasters as THREE.Mesh[] | undefined;
+  if (!shadowCasters) {
+    shadowCasters = [];
+    root.traverse((obj) => {
+      const m = obj as THREE.Mesh;
+      if (m.isMesh && m.castShadow) {
+        shadowCasters!.push(m);
+      }
+    });
+    root.userData._lodShadowCasters = shadowCasters;
+  }
+  const castShadows = tier === 'FULL' || tier === 'MEDIUM';
+  for (let i = 0; i < shadowCasters.length; i++) {
+    shadowCasters[i].castShadow = castShadows;
+  }
+}
+
+/**
  * Computes distance-based simulation / animation / shadow LOD tier using squared distance.
  */
 export function computeEntityLodTier(
   distSq: number,
-  fullDistSq = 1764,   // 42m
-  medDistSq = 7225,    // 85m
+  fullDistSq = 1600,   // 40m
+  medDistSq = 6724,    // 82m
   farDistSq = 15625    // 125m
 ): DynamicLodTier {
   if (distSq <= fullDistSq) return 'FULL';
