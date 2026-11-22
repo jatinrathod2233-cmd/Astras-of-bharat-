@@ -22,6 +22,7 @@ export const OverlayModals: React.FC<OverlayModalsProps> = ({
   if (mode === 'PLAYING') return null;
 
   if (mode === 'TITLE') {
+    const pct = Math.min(100, Math.max(0, Math.round(hud.assetProgress)));
     return (
       <div className="fixed inset-0 z-30 flex items-center justify-center bg-[#0D1016]/65 p-6">
         <div className="w-full max-w-[560px] rounded-xl border border-amber-300/35 bg-[#0D1016]/95 p-7 sm:p-8 space-y-6">
@@ -55,14 +56,36 @@ export const OverlayModals: React.FC<OverlayModalsProps> = ({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onStartGame}
-            className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-[#D99B26] px-6 py-3.5 text-sm font-semibold text-[#101319] hover:bg-[#E8AE3B] transition-colors cursor-pointer"
-          >
-            <Play className="h-4 w-4 fill-current" aria-hidden="true" />
-            <span>Start Game</span>
-          </button>
+          {!hud.assetsReady ? (
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between text-xs text-[#DFD7C8]">
+                <span>{hud.assetStage || 'Preparing realm...'}</span>
+                <span className="font-mono-tabular text-amber-300">{pct}%</span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-[#1C2230] border border-amber-200/20">
+                <div
+                  className="h-full bg-[#D99B26] transition-[width] duration-150 ease-out"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+              <button
+                type="button"
+                disabled
+                className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-[#D99B26]/40 px-6 py-3.5 text-sm font-semibold text-[#F7F1E3]/70 cursor-not-allowed"
+              >
+                <span>Loading Realm...</span>
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onStartGame}
+              className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-[#D99B26] px-6 py-3.5 text-sm font-semibold text-[#101319] hover:bg-[#E8AE3B] transition-colors cursor-pointer"
+            >
+              <Play className="h-4 w-4 fill-current" aria-hidden="true" />
+              <span>Start Game</span>
+            </button>
+          )}
         </div>
       </div>
     );

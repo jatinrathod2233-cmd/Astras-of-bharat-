@@ -41,6 +41,9 @@ const INITIAL_HUD: WorldHudSnapshot = {
   promptHint: null,
   blips: [],
   webglError: null,
+  assetsReady: false,
+  assetProgress: 0,
+  assetStage: 'Initializing realm...',
 };
 
 export default function App() {
@@ -390,6 +393,7 @@ export default function App() {
         mode={mode}
         hud={hud}
         onStartGame={() => {
+          if (!hud.assetsReady) return;
           resetAllInputs();
           soundEngine.playMissionChime();
           engineRef.current?.setMode('PLAYING');

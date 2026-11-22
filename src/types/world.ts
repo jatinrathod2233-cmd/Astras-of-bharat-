@@ -72,6 +72,9 @@ export interface WorldHudSnapshot {
   promptHint: string | null;
   blips: RadarBlip[];
   webglError: string | null;
+  assetsReady: boolean;
+  assetProgress: number;
+  assetStage: string;
 }
 
 export type DemonVariant =

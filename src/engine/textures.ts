@@ -39,6 +39,13 @@ export interface ProceduralTextures {
   dispose: () => void;
 }
 
+export interface AsyncTextureLoadOptions {
+  signal?: AbortSignal;
+  onProgress?: (fraction: number, label: string) => void;
+  /** Time slice budget in ms before yielding to main thread (default 6ms for 60fps mobile). */
+  frameBudgetMs?: number;
+}
+
 function configureColorTexture(
   canvas: HTMLCanvasElement,
   repeatX: number,
@@ -128,7 +135,6 @@ function buildNormalMapFromHeight(
   ctx.putImageData(img, 0, 0);
 
   const tex = new THREE.CanvasTexture(canvas);
-  // Data maps must stay in linear NoColorSpace; trilinear mipmapping + full anisotropy prevents shimmering & blur
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeatX, repeatY);
@@ -168,7 +174,6 @@ function buildRoughnessMapFromHeight(
   }
   ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(canvas);
-  // Roughness is a linear data channel (NoColorSpace) with trilinear mipmaps & max anisotropy
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeatX, repeatY);
@@ -212,28 +217,28 @@ function fbm(x: number, y: number, octaves = 4): number {
   return val;
 }
 
-export function createProceduralTextures(
-  renderer: THREE.WebGLRenderer,
-  isSoftwareGl = false
-): ProceduralTextures {
-  // Enforce full hardware-supported anisotropic filtering + 1024px crisp texel density on desktop GPU (512px on constrained mobile/software)
-  const maxAniso = Math.max(1, renderer.capabilities.getMaxAnisotropy());
-  const maxTexSize = renderer.capabilities.maxTextureSize || 2048;
-  const isConstrainedMobile =
-    typeof navigator !== 'undefined' &&
-    (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) || maxTexSize < 4096);
-  const S = !isSoftwareGl && maxTexSize >= 2048 && !isConstrainedMobile ? 1024 : 512;
-  const K = S / 256;
-  const invK = 1 / K;
+interface TextureSynthContext {
+  S: number;
+  K: number;
+  invK: number;
+  maxAniso: number;
+  scratchHeight: Float32Array;
+  created: THREE.CanvasTexture[];
+}
 
-  // 1. Carved Sandstone + Normal
+function trackTex<T extends THREE.CanvasTexture>(ctx: TextureSynthContext, t: T): T {
+  ctx.created.push(t);
+  return t;
+}
+
+function synthSandstone(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight: sandHeight } = ctx;
   const sandCanvas = document.createElement('canvas');
   sandCanvas.width = S;
   sandCanvas.height = S;
   const sctx = sandCanvas.getContext('2d')!;
   const sandImg = sctx.createImageData(S, S);
   const sandD32 = new Uint32Array(sandImg.data.buffer);
-  const sandHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
@@ -263,18 +268,21 @@ export function createProceduralTextures(
     }
   }
   sctx.putImageData(sandImg, 0, 0);
-  const sandstone = configureColorTexture(sandCanvas, 2.5, 2.5, maxAniso);
-  const sandstoneNormal = buildNormalMapFromHeight(sandHeight, S, 3.0, 2.5, 2.5, maxAniso);
-  const sandstoneRoughness = buildRoughnessMapFromHeight(sandHeight, S, 0.72, 1.0, true, 2.5, 2.5, maxAniso);
+  return {
+    sandstone: trackTex(ctx, configureColorTexture(sandCanvas, 2.5, 2.5, maxAniso)),
+    sandstoneNormal: trackTex(ctx, buildNormalMapFromHeight(sandHeight, S, 3.0, 2.5, 2.5, maxAniso)),
+    sandstoneRoughness: trackTex(ctx, buildRoughnessMapFromHeight(sandHeight, S, 0.72, 1.0, true, 2.5, 2.5, maxAniso)),
+  };
+}
 
-  // 2. Organic Dressed Sandstone Pathway (Zero rigid grid-tile seams) + Normal
+function synthAvenueStone(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight: aveHeight } = ctx;
   const aveCanvas = document.createElement('canvas');
   aveCanvas.width = S;
   aveCanvas.height = S;
   const actx = aveCanvas.getContext('2d')!;
   const aveImg = actx.createImageData(S, S);
   const aveD32 = new Uint32Array(aveImg.data.buffer);
-  const aveHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
@@ -306,18 +314,21 @@ export function createProceduralTextures(
     }
   }
   actx.putImageData(aveImg, 0, 0);
-  const avenueStone = configureColorTexture(aveCanvas, 24, 24, maxAniso);
-  const avenueNormal = buildNormalMapFromHeight(aveHeight, S, 1.85, 24, 24, maxAniso);
-  const avenueRoughness = buildRoughnessMapFromHeight(aveHeight, S, 0.74, 1.0, true, 24, 24, maxAniso);
+  return {
+    avenueStone: trackTex(ctx, configureColorTexture(aveCanvas, 24, 24, maxAniso)),
+    avenueNormal: trackTex(ctx, buildNormalMapFromHeight(aveHeight, S, 1.85, 24, 24, maxAniso)),
+    avenueRoughness: trackTex(ctx, buildRoughnessMapFromHeight(aveHeight, S, 0.74, 1.0, true, 24, 24, maxAniso)),
+  };
+}
 
-  // 3. Lush Grass & Earth + Normal
+function synthGrassEarth(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight: grassHeight } = ctx;
   const grassCanvas = document.createElement('canvas');
   grassCanvas.width = S;
   grassCanvas.height = S;
   const gctx = grassCanvas.getContext('2d')!;
   const grassImg = gctx.createImageData(S, S);
   const grassD32 = new Uint32Array(grassImg.data.buffer);
-  const grassHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
@@ -336,18 +347,21 @@ export function createProceduralTextures(
     }
   }
   gctx.putImageData(grassImg, 0, 0);
-  const grassEarth = configureColorTexture(grassCanvas, 72, 72, maxAniso);
-  const grassNormal = buildNormalMapFromHeight(grassHeight, S, 2.2, 72, 72, maxAniso);
-  const grassRoughness = buildRoughnessMapFromHeight(grassHeight, S, 0.78, 1.0, true, 72, 72, maxAniso);
+  return {
+    grassEarth: trackTex(ctx, configureColorTexture(grassCanvas, 72, 72, maxAniso)),
+    grassNormal: trackTex(ctx, buildNormalMapFromHeight(grassHeight, S, 2.2, 72, 72, maxAniso)),
+    grassRoughness: trackTex(ctx, buildRoughnessMapFromHeight(grassHeight, S, 0.78, 1.0, true, 72, 72, maxAniso)),
+  };
+}
 
-  // 4. Sarayu Water + Rippled Normal
+function synthWater(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight: waterHeight } = ctx;
   const waterCanvas = document.createElement('canvas');
   waterCanvas.width = S;
   waterCanvas.height = S;
   const wctx = waterCanvas.getContext('2d')!;
   const waterImg = wctx.createImageData(S, S);
   const waterD32 = new Uint32Array(waterImg.data.buffer);
-  const waterHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
@@ -367,17 +381,20 @@ export function createProceduralTextures(
     }
   }
   wctx.putImageData(waterImg, 0, 0);
-  const water = configureColorTexture(waterCanvas, 4, 18, maxAniso);
-  const waterNormal = buildNormalMapFromHeight(waterHeight, S, 2.5, 4, 18, maxAniso);
+  return {
+    water: trackTex(ctx, configureColorTexture(waterCanvas, 4, 18, maxAniso)),
+    waterNormal: trackTex(ctx, buildNormalMapFromHeight(waterHeight, S, 2.5, 4, 18, maxAniso)),
+  };
+}
 
-  // 5. Tree Bark PBR (Furrowed Banyan/Ashoka Bark) + Normal
+function synthBark(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight: barkHeight } = ctx;
   const barkCanvas = document.createElement('canvas');
   barkCanvas.width = S;
   barkCanvas.height = S;
   const bctx = barkCanvas.getContext('2d')!;
   const barkImg = bctx.createImageData(S, S);
   const barkD32 = new Uint32Array(barkImg.data.buffer);
-  const barkHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
@@ -398,10 +415,14 @@ export function createProceduralTextures(
     }
   }
   bctx.putImageData(barkImg, 0, 0);
-  const bark = configureColorTexture(barkCanvas, 2, 3, maxAniso);
-  const barkNormal = buildNormalMapFromHeight(barkHeight, S, 3.8, 2, 3, maxAniso);
+  return {
+    bark: trackTex(ctx, configureColorTexture(barkCanvas, 2, 3, maxAniso)),
+    barkNormal: trackTex(ctx, buildNormalMapFromHeight(barkHeight, S, 3.8, 2, 3, maxAniso)),
+  };
+}
 
-  // 6. Realistic Layered Foliage Texture (Overlapping Ashoka/Banyan Leaves + Alpha)
+function synthFoliage(ctx: TextureSynthContext) {
+  const { S, K, maxAniso, scratchHeight: folHeight } = ctx;
   const folCanvas = document.createElement('canvas');
   folCanvas.width = S;
   folCanvas.height = S;
@@ -410,7 +431,6 @@ export function createProceduralTextures(
   fctx.save();
   fctx.scale(K, K);
 
-  const folHeight = new Float32Array(S * S);
   for (let i = 0; i < 165; i++) {
     const cx = hash2d(i, 3.1) * 256;
     const cy = hash2d(i, 7.7) * 256;
@@ -448,7 +468,6 @@ export function createProceduralTextures(
     fctx.quadraticCurveTo(0, wid, -len * 0.85, 0);
     fctx.fill();
 
-    // Central leaf vein
     fctx.strokeStyle = 'rgba(170, 212, 110, 0.45)';
     fctx.lineWidth = 1.1;
     fctx.beginPath();
@@ -463,17 +482,20 @@ export function createProceduralTextures(
   for (let i = 0; i < S * S; i++) {
     folHeight[i] = fData[i * 4 + 3] > 20 ? fData[i * 4 + 1] / 255 : 0;
   }
-  const foliage = configureColorTexture(folCanvas, 1, 1, maxAniso, true);
-  const foliageNormal = buildNormalMapFromHeight(folHeight, S, 2.0, 1, 1, maxAniso);
+  return {
+    foliage: trackTex(ctx, configureColorTexture(folCanvas, 1, 1, maxAniso, true)),
+    foliageNormal: trackTex(ctx, buildNormalMapFromHeight(folHeight, S, 2.0, 1, 1, maxAniso)),
+  };
+}
 
-  // 7. Heroic Silk Brocade (Saffron Pitambara with Gold Zari Weave)
+function synthSilkGold(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight: silkHeight } = ctx;
   const silkCanvas = document.createElement('canvas');
   silkCanvas.width = S;
   silkCanvas.height = S;
   const slCtx = silkCanvas.getContext('2d')!;
   const silkImg = slCtx.createImageData(S, S);
   const silkD32 = new Uint32Array(silkImg.data.buffer);
-  const silkHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
@@ -501,18 +523,21 @@ export function createProceduralTextures(
     }
   }
   slCtx.putImageData(silkImg, 0, 0);
-  const silkGold = configureColorTexture(silkCanvas, 2, 2, maxAniso);
-  const silkNormal = buildNormalMapFromHeight(silkHeight, S, 1.9, 2, 2, maxAniso);
-  const silkRoughness = buildRoughnessMapFromHeight(silkHeight, S, 0.68, 1.0, true, 2, 2, maxAniso);
+  return {
+    silkGold: trackTex(ctx, configureColorTexture(silkCanvas, 2, 2, maxAniso)),
+    silkNormal: trackTex(ctx, buildNormalMapFromHeight(silkHeight, S, 1.9, 2, 2, maxAniso)),
+    silkRoughness: trackTex(ctx, buildRoughnessMapFromHeight(silkHeight, S, 0.68, 1.0, true, 2, 2, maxAniso)),
+  };
+}
 
-  // 8. Hammered Armor & Gold Filigree Texture
+function synthArmorMetal(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight: armHeight } = ctx;
   const armCanvas = document.createElement('canvas');
   armCanvas.width = S;
   armCanvas.height = S;
   const arCtx = armCanvas.getContext('2d')!;
   const armImg = arCtx.createImageData(S, S);
   const armD32 = new Uint32Array(armImg.data.buffer);
-  const armHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
@@ -534,18 +559,21 @@ export function createProceduralTextures(
     }
   }
   arCtx.putImageData(armImg, 0, 0);
-  const armorMetal = configureColorTexture(armCanvas, 2, 2, maxAniso);
-  const armorNormal = buildNormalMapFromHeight(armHeight, S, 3.0, 2, 2, maxAniso);
-  const armorRoughness = buildRoughnessMapFromHeight(armHeight, S, 0.64, 1.0, true, 2, 2, maxAniso);
+  return {
+    armorMetal: trackTex(ctx, configureColorTexture(armCanvas, 2, 2, maxAniso)),
+    armorNormal: trackTex(ctx, buildNormalMapFromHeight(armHeight, S, 3.0, 2, 2, maxAniso)),
+    armorRoughness: trackTex(ctx, buildRoughnessMapFromHeight(armHeight, S, 0.64, 1.0, true, 2, 2, maxAniso)),
+  };
+}
 
-  // 9. Seamless Silky Shyam Varna Dark-Blue Skin Texture + Smooth Normal Map
+function synthRoyalSkinAndBasalt(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight } = ctx;
   const skinCanvas = document.createElement('canvas');
   skinCanvas.width = S;
   skinCanvas.height = S;
   const skCtx = skinCanvas.getContext('2d')!;
   const skinImg = skCtx.createImageData(S, S);
   const skinD32 = new Uint32Array(skinImg.data.buffer);
-  const skinHeight = new Float32Array(S * S);
   const twoPiOverS = (Math.PI * 2) / S;
 
   for (let y = 0; y < S; y++) {
@@ -555,7 +583,7 @@ export function createProceduralTextures(
       const nx = Math.sin(x * twoPiOverS);
       const micro = 0.5 + 0.25 * Math.sin(nx * 4.0 + ny * 3.0) + 0.15 * Math.cos(nx * 7.0 - ny * 5.0);
       const tone = 0.96 + micro * 0.04;
-      skinHeight[rowOff + x] = 0.5 + micro * 0.04;
+      scratchHeight[rowOff + x] = 0.5 + micro * 0.04;
       skinD32[rowOff + x] = packRGBA(
         clampByte((42 * tone + 0.5) | 0),
         clampByte((78 * tone + 0.5) | 0),
@@ -565,17 +593,15 @@ export function createProceduralTextures(
     }
   }
   skCtx.putImageData(skinImg, 0, 0);
-  const royalSkin = configureColorTexture(skinCanvas, 1, 1, maxAniso);
-  const royalSkinNormal = buildNormalMapFromHeight(skinHeight, S, 0.28, 1, 1, maxAniso);
+  const royalSkin = trackTex(ctx, configureColorTexture(skinCanvas, 1, 1, maxAniso));
+  const royalSkinNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.28, 1, 1, maxAniso));
 
-  // 10. Carved Polished Black Basalt Stone (for Lord Mahadev Shivling Base & River Boulders)
   const basCanvas = document.createElement('canvas');
   basCanvas.width = S;
   basCanvas.height = S;
   const baCtx = basCanvas.getContext('2d')!;
   const basImg = baCtx.createImageData(S, S);
   const basD32 = new Uint32Array(basImg.data.buffer);
-  const basHeight = new Float32Array(S * S);
 
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
@@ -585,7 +611,7 @@ export function createProceduralTextures(
       const vein = Math.sin(sx * 0.05 + fbm(sx * 0.04, sy * 0.04, 3) * 5.2) * 0.5 + 0.5;
       const grain = fbm(sx * 0.14, sy * 0.14, 3);
       const h = vein * 0.45 + grain * 0.55;
-      basHeight[rowOff + x] = h;
+      scratchHeight[rowOff + x] = h;
       const v = 26 + h * 34;
       basD32[rowOff + x] = packRGBA(
         (v * 0.96 + 0.5) | 0,
@@ -596,10 +622,16 @@ export function createProceduralTextures(
     }
   }
   baCtx.putImageData(basImg, 0, 0);
-  const darkBasalt = configureColorTexture(basCanvas, 2, 2, maxAniso);
-  const darkBasaltNormal = buildNormalMapFromHeight(basHeight, S, 1.9, 2, 2, maxAniso);
+  return {
+    royalSkin,
+    royalSkinNormal,
+    darkBasalt: trackTex(ctx, configureColorTexture(basCanvas, 2, 2, maxAniso)),
+    darkBasaltNormal: trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 1.9, 2, 2, maxAniso)),
+  };
+}
 
-  // 11. Carved Epigraphic Inscription Tablet (Brahmi/Devanagari Royal Lineage Relief)
+function synthEpigraphAndMythArt(ctx: TextureSynthContext) {
+  const { S, K, maxAniso, scratchHeight } = ctx;
   const epiCanvas = document.createElement('canvas');
   epiCanvas.width = S;
   epiCanvas.height = S;
@@ -608,14 +640,12 @@ export function createProceduralTextures(
   ectx.scale(K, K);
   ectx.fillStyle = '#c99c68';
   ectx.fillRect(0, 0, 256, 256);
-  // Carved stepped sandstone frame border
   ectx.strokeStyle = '#754924';
   ectx.lineWidth = 10;
   ectx.strokeRect(8, 8, 256 - 16, 256 - 16);
   ectx.strokeStyle = '#ebc068';
   ectx.lineWidth = 3;
   ectx.strokeRect(18, 18, 256 - 36, 256 - 36);
-  // Central engraved Suryadev emblem header
   ectx.fillStyle = '#e7b249';
   ectx.beginPath();
   ectx.arc(128, 46, 15, 0, Math.PI * 2);
@@ -629,7 +659,6 @@ export function createProceduralTextures(
     ectx.lineTo(128 + Math.cos(a) * 25, 46 + Math.sin(a) * 25);
     ectx.stroke();
   }
-  // 6 rows of deeply incised Sanskrit/Brahmi epigraphic glyphs
   for (let row = 0; row < 6; row++) {
     const ry = 86 + row * 25;
     ectx.strokeStyle = '#4e2c14';
@@ -661,16 +690,14 @@ export function createProceduralTextures(
   }
   ectx.restore();
   const epiData = ectx.getImageData(0, 0, S, S).data;
-  const epiHeight = new Float32Array(S * S);
   const inv765 = 1 / 765;
   for (let i = 0; i < S * S; i++) {
     const o = i << 2;
-    epiHeight[i] = (epiData[o] + epiData[o + 1] + epiData[o + 2]) * inv765;
+    scratchHeight[i] = (epiData[o] + epiData[o + 1] + epiData[o + 2]) * inv765;
   }
-  const royalEpigraph = configureColorTexture(epiCanvas, 1, 1, maxAniso, true);
-  const royalEpigraphNormal = buildNormalMapFromHeight(epiHeight, S, 3.6, 1, 1, maxAniso);
+  const royalEpigraph = trackTex(ctx, configureColorTexture(epiCanvas, 1, 1, maxAniso, true));
+  const royalEpigraphNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 3.6, 1, 1, maxAniso));
 
-  // 12. Carved Hindu Mythological Pillar Artwork & Normal Relief (Lotus Chakras, Suryadev Rays, Kalasha & Makara Borders)
   const mythCanvas = document.createElement('canvas');
   mythCanvas.width = S;
   mythCanvas.height = S;
@@ -679,14 +706,12 @@ export function createProceduralTextures(
   mctx.scale(K, K);
   mctx.fillStyle = '#cfa06b';
   mctx.fillRect(0, 0, 256, 256);
-  // Lapis & terracotta inlaid horizontal frieze bands
   mctx.fillStyle = '#243c64';
   mctx.fillRect(0, 0, 256, 24);
   mctx.fillRect(0, 256 - 24, 256, 24);
   mctx.fillStyle = '#8e2920';
   mctx.fillRect(0, 24, 256, 12);
   mctx.fillRect(0, 256 - 36, 256, 12);
-  // Gold leaf scalloped petal arches & carved pillar relief panels
   for (let row = 0; row < 2; row++) {
     const cy = 78 + row * 100;
     for (let col = 0; col < 2; col++) {
@@ -728,22 +753,29 @@ export function createProceduralTextures(
   }
   mctx.restore();
   const mythData = mctx.getImageData(0, 0, S, S).data;
-  const mythHeight = new Float32Array(S * S);
   for (let i = 0; i < S * S; i++) {
     const o = i << 2;
-    mythHeight[i] = (mythData[o] + mythData[o + 1] + mythData[o + 2]) * inv765;
+    scratchHeight[i] = (mythData[o] + mythData[o + 1] + mythData[o + 2]) * inv765;
   }
-  const mythologyArt = configureColorTexture(mythCanvas, 2, 2, maxAniso);
-  const mythologyArtNormal = buildNormalMapFromHeight(mythHeight, S, 3.4, 2, 2, maxAniso);
+  const mythologyArt = trackTex(ctx, configureColorTexture(mythCanvas, 2, 2, maxAniso));
+  const mythologyArtNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 3.4, 2, 2, maxAniso));
 
-  // 13. Pleated Royal Crimson & Gold Brocade Silk Curtain + Normal Map
+  return {
+    royalEpigraph,
+    royalEpigraphNormal,
+    mythologyArt,
+    mythologyArtNormal,
+  };
+}
+
+function synthVelvetCurtain(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight: curtHeight } = ctx;
   const curtCanvas = document.createElement('canvas');
   curtCanvas.width = S;
   curtCanvas.height = S;
   const cctx = curtCanvas.getContext('2d')!;
   const curtImg = cctx.createImageData(S, S);
   const curtD32 = new Uint32Array(curtImg.data.buffer);
-  const curtHeight = new Float32Array(S * S);
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
     const goldHem = sy > 256 - 34 || sy < 20;
@@ -776,17 +808,20 @@ export function createProceduralTextures(
     }
   }
   cctx.putImageData(curtImg, 0, 0);
-  const velvetCurtain = configureColorTexture(curtCanvas, 1, 1, maxAniso);
-  const velvetCurtainNormal = buildNormalMapFromHeight(curtHeight, S, 2.8, 1, 1, maxAniso);
+  return {
+    velvetCurtain: trackTex(ctx, configureColorTexture(curtCanvas, 1, 1, maxAniso)),
+    velvetCurtainNormal: trackTex(ctx, buildNormalMapFromHeight(curtHeight, S, 2.8, 1, 1, maxAniso)),
+  };
+}
 
-  // 13b. High-Quality Woven Royal Red Carpet + Gold Mandala Relief Normal Map
+function synthRedCarpetAndShadow(ctx: TextureSynthContext) {
+  const { S, invK, maxAniso, scratchHeight: carpHeight } = ctx;
   const carpCanvas = document.createElement('canvas');
   carpCanvas.width = S;
   carpCanvas.height = S;
   const rpCtx = carpCanvas.getContext('2d')!;
   const carpImg = rpCtx.createImageData(S, S);
   const carpD32 = new Uint32Array(carpImg.data.buffer);
-  const carpHeight = new Float32Array(S * S);
 
   const halfS = S * 0.5;
   const invHalfS = 1 / halfS;
@@ -817,7 +852,9 @@ export function createProceduralTextures(
         Math.abs(Math.sin(ang * 8)) > 0.55 &&
         Math.abs(dist - 0.3) < 0.095;
       const centerBoss = dist < 0.12;
-      const outerRing = Math.abs(dist - 0.56) < 0.025 || (Math.abs(dist - 0.66) < 0.03 && Math.sin(ang * 16) > 0.35);
+      const outerRing =
+        Math.abs(dist - 0.56) < 0.025 ||
+        (Math.abs(dist - 0.66) < 0.03 && Math.sin(ang * 16) > 0.35);
       const isGoldMotif = edgeBand || innerBead || lotusPetal || centerBoss || outerRing;
 
       carpHeight[rowOff + x] = 0.48 + pile * 0.26 + warpWeft * 0.14 + (isGoldMotif ? 0.24 : 0);
@@ -844,11 +881,10 @@ export function createProceduralTextures(
     }
   }
   rpCtx.putImageData(carpImg, 0, 0);
-  const redCarpet = configureColorTexture(carpCanvas, 1, 1, maxAniso);
-  const redCarpetNormal = buildNormalMapFromHeight(carpHeight, S, 2.4, 1, 1, maxAniso);
-  const redCarpetRoughness = buildRoughnessMapFromHeight(carpHeight, S, 0.66, 1.0, true, 1, 1, maxAniso);
+  const redCarpet = trackTex(ctx, configureColorTexture(carpCanvas, 1, 1, maxAniso));
+  const redCarpetNormal = trackTex(ctx, buildNormalMapFromHeight(carpHeight, S, 2.4, 1, 1, maxAniso));
+  const redCarpetRoughness = trackTex(ctx, buildRoughnessMapFromHeight(carpHeight, S, 0.66, 1.0, true, 1, 1, maxAniso));
 
-  // 14. Contact Shadow Radial Texture
   const shadCanvas = document.createElement('canvas');
   shadCanvas.width = 256;
   shadCanvas.height = 256;
@@ -859,84 +895,148 @@ export function createProceduralTextures(
   grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
   shctx.fillStyle = grad;
   shctx.fillRect(0, 0, 256, 256);
-  const contactShadow = configureColorTexture(shadCanvas, 1, 1, maxAniso, true);
-
-  const allTex = [
-    sandstone,
-    sandstoneNormal,
-    sandstoneRoughness,
-    avenueStone,
-    avenueNormal,
-    avenueRoughness,
-    grassEarth,
-    grassNormal,
-    grassRoughness,
-    water,
-    waterNormal,
-    bark,
-    barkNormal,
-    foliage,
-    foliageNormal,
-    silkGold,
-    silkNormal,
-    silkRoughness,
-    armorMetal,
-    armorNormal,
-    armorRoughness,
-    royalSkin,
-    royalSkinNormal,
-    darkBasalt,
-    darkBasaltNormal,
-    royalEpigraph,
-    royalEpigraphNormal,
-    mythologyArt,
-    mythologyArtNormal,
-    velvetCurtain,
-    velvetCurtainNormal,
-    redCarpet,
-    redCarpetNormal,
-    redCarpetRoughness,
-    contactShadow,
-  ];
+  const contactShadow = trackTex(ctx, configureColorTexture(shadCanvas, 1, 1, maxAniso, true));
 
   return {
-    sandstone,
-    sandstoneNormal,
-    sandstoneRoughness,
-    avenueStone,
-    avenueNormal,
-    avenueRoughness,
-    grassEarth,
-    grassNormal,
-    grassRoughness,
-    water,
-    waterNormal,
-    bark,
-    barkNormal,
-    foliage,
-    foliageNormal,
-    silkGold,
-    silkNormal,
-    silkRoughness,
-    armorMetal,
-    armorNormal,
-    armorRoughness,
-    royalSkin,
-    royalSkinNormal,
-    darkBasalt,
-    darkBasaltNormal,
-    royalEpigraph,
-    royalEpigraphNormal,
-    mythologyArt,
-    mythologyArtNormal,
-    velvetCurtain,
-    velvetCurtainNormal,
     redCarpet,
     redCarpetNormal,
     redCarpetRoughness,
     contactShadow,
+  };
+}
+
+function createSynthContext(
+  renderer: THREE.WebGLRenderer,
+  isSoftwareGl = false
+): TextureSynthContext {
+  const maxAniso = Math.max(1, renderer.capabilities.getMaxAnisotropy());
+  const maxTexSize = renderer.capabilities.maxTextureSize || 2048;
+  const isConstrainedMobile =
+    typeof navigator !== 'undefined' &&
+    (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) || maxTexSize < 4096);
+  const S = !isSoftwareGl && maxTexSize >= 2048 && !isConstrainedMobile ? 1024 : 512;
+  const K = S / 256;
+  return {
+    S,
+    K,
+    invK: 1 / K,
+    maxAniso,
+    scratchHeight: new Float32Array(S * S),
+    created: [],
+  };
+}
+
+function yieldFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+export async function createProceduralTexturesAsync(
+  renderer: THREE.WebGLRenderer,
+  isSoftwareGl = false,
+  options: AsyncTextureLoadOptions = {}
+): Promise<ProceduralTextures> {
+  const ctx = createSynthContext(renderer, isSoftwareGl);
+  const { signal, onProgress, frameBudgetMs = 6 } = options;
+  let lastYield = performance.now();
+
+  const checkpoint = async (fraction: number, label: string) => {
+    if (signal?.aborted) {
+      ctx.created.forEach((t) => t.dispose());
+      throw new DOMException('Texture loading aborted', 'AbortError');
+    }
+    onProgress?.(fraction, label);
+    if (performance.now() - lastYield >= frameBudgetMs) {
+      await yieldFrame();
+      lastYield = performance.now();
+      if (signal?.aborted) {
+        ctx.created.forEach((t) => t.dispose());
+        throw new DOMException('Texture loading aborted', 'AbortError');
+      }
+    }
+  };
+
+  await checkpoint(0.05, 'Carving Ayodhya sandstone maps');
+  const s1 = synthSandstone(ctx);
+  await checkpoint(0.16, 'Dressing avenue & highway stone');
+  const s2 = synthAvenueStone(ctx);
+  await checkpoint(0.27, 'Synthesizing Sarayu meadow & earth');
+  const s3 = synthGrassEarth(ctx);
+  await checkpoint(0.37, 'Generating Sarayu ripples & normals');
+  const s4 = synthWater(ctx);
+  await checkpoint(0.46, 'Weaving banyan bark & foliage');
+  const s5 = synthBark(ctx);
+  const s6 = synthFoliage(ctx);
+  await checkpoint(0.58, 'Spinning Pitambara silk brocade');
+  const s7 = synthSilkGold(ctx);
+  await checkpoint(0.68, 'Forging Suryavanshi bronze & armor');
+  const s8 = synthArmorMetal(ctx);
+  await checkpoint(0.78, 'Finishing basalt & heroic textures');
+  const s9 = synthRoyalSkinAndBasalt(ctx);
+  await checkpoint(0.86, 'Incising royal epigraphs & reliefs');
+  const s10 = synthEpigraphAndMythArt(ctx);
+  await checkpoint(0.93, 'Weaving velvet curtains & carpets');
+  const s11 = synthVelvetCurtain(ctx);
+  const s12 = synthRedCarpetAndShadow(ctx);
+  await checkpoint(1.0, 'Textures ready');
+
+  return {
+    ...s1,
+    ...s2,
+    ...s3,
+    ...s4,
+    ...s5,
+    ...s6,
+    ...s7,
+    ...s8,
+    ...s9,
+    ...s10,
+    ...s11,
+    ...s12,
     dispose: () => {
-      allTex.forEach((t) => t.dispose());
+      ctx.created.forEach((t) => t.dispose());
+    },
+  };
+}
+
+export function createProceduralTextures(
+  renderer: THREE.WebGLRenderer,
+  isSoftwareGl = false
+): ProceduralTextures {
+  const ctx = createSynthContext(renderer, isSoftwareGl);
+  const s1 = synthSandstone(ctx);
+  const s2 = synthAvenueStone(ctx);
+  const s3 = synthGrassEarth(ctx);
+  const s4 = synthWater(ctx);
+  const s5 = synthBark(ctx);
+  const s6 = synthFoliage(ctx);
+  const s7 = synthSilkGold(ctx);
+  const s8 = synthArmorMetal(ctx);
+  const s9 = synthRoyalSkinAndBasalt(ctx);
+  const s10 = synthEpigraphAndMythArt(ctx);
+  const s11 = synthVelvetCurtain(ctx);
+  const s12 = synthRedCarpetAndShadow(ctx);
+
+  return {
+    ...s1,
+    ...s2,
+    ...s3,
+    ...s4,
+    ...s5,
+    ...s6,
+    ...s7,
+    ...s8,
+    ...s9,
+    ...s10,
+    ...s11,
+    ...s12,
+    dispose: () => {
+      ctx.created.forEach((t) => t.dispose());
     },
   };
 }
