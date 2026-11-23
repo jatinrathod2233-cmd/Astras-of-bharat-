@@ -75,6 +75,8 @@ export interface RoyalHorseRig {
   tailGroup: THREE.Group;
   tailPlumes: THREE.Mesh[];
   tailChains: Array<[THREE.Group, THREE.Group, THREE.Group]>;
+  maneChains: Array<[THREE.Group, THREE.Group]>;
+  forelockChain: [THREE.Group, THREE.Group];
   ears: THREE.Mesh[];
   leftBitAnchor: THREE.Object3D;
   rightBitAnchor: THREE.Object3D;
@@ -3264,6 +3266,7 @@ export function createRoyalHorseUnit(
   const knees: THREE.Group[] = [];
   const tailPlumes: THREE.Mesh[] = [];
   const tailChains: Array<[THREE.Group, THREE.Group, THREE.Group]> = [];
+  const maneChains: Array<[THREE.Group, THREE.Group]> = [];
   const ears: THREE.Mesh[] = [];
 
   const hoofMat = new THREE.MeshPhysicalMaterial({ color: 0x1b1a1e, roughness: 0.44, metalness: 0.14, ior: 1.52, clearcoat: 0.35 });
@@ -3350,22 +3353,46 @@ export function createRoyalHorseUnit(
     group.add(yokeRing);
   }
 
-  // Arched Neck, Sculpted Head, Detailed Eyes, Nostrils, Pointed Ears, 7-Tuft Mane & Forelock
+  // Arched Neck, Sculpted Head, Detailed Eyes, Nostrils, Pointed Ears, Articulated 7x2 Mane & 2-Link Forelock
   const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.29, 0.78, 12), coatMat);
   neck.rotation.x = 0.52;
   neck.position.set(0, 1.66, 0.84);
   neck.castShadow = true;
   group.add(neck);
 
-  // 7-Tuft Flowing Mane along dorsal crest
+  // Articulated 7-Tuft Dual-Link Physics-Driven Flowing Mane along dorsal crest (root -> flowing tip)
+  const maneBaseGeo = new THREE.CylinderGeometry(0.048, 0.068, 0.16, 7);
+  maneBaseGeo.translate(0, -0.075, 0);
+  const maneTipGeo = new THREE.ConeGeometry(0.056, 0.19, 7);
+  maneTipGeo.rotateX(Math.PI);
+  maneTipGeo.translate(0, -0.09, 0);
+
   for (let m = 0; m < 7; m++) {
     const t = m / 6;
-    const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.095 - t * 0.025, 0.26, 7), maneMat);
-    tuft.rotation.x = -Math.PI * 0.62;
-    tuft.rotation.z = (m % 2 === 0 ? 1 : -1) * 0.16;
-    tuft.position.set((m % 2 === 0 ? -1 : 1) * 0.04, 1.48 + t * 0.54, 0.58 + t * 0.42);
-    tuft.castShadow = true;
-    group.add(tuft);
+    const sideSign = m % 2 === 0 ? -1 : 1;
+    const sizeScale = 1.04 - t * 0.22;
+
+    const rootPivot = new THREE.Group();
+    rootPivot.position.set(sideSign * 0.036, 1.52 + t * 0.5, 0.58 + t * 0.41);
+    rootPivot.rotation.set(-0.34, 0, sideSign * 0.24);
+    group.add(rootPivot);
+
+    const rootMesh = new THREE.Mesh(maneBaseGeo, maneMat);
+    rootMesh.scale.set(sizeScale, 1.0, sizeScale);
+    rootMesh.castShadow = true;
+    rootPivot.add(rootMesh);
+
+    const tipPivot = new THREE.Group();
+    tipPivot.position.set(0, -0.14, 0);
+    tipPivot.rotation.set(-0.14, 0, sideSign * 0.08);
+    rootPivot.add(tipPivot);
+
+    const tipMesh = new THREE.Mesh(maneTipGeo, maneMat);
+    tipMesh.scale.set(sizeScale, 1.0, sizeScale);
+    tipMesh.castShadow = true;
+    tipPivot.add(tipMesh);
+
+    maneChains.push([rootPivot, tipPivot]);
   }
 
   const headPivot = new THREE.Group();
@@ -3384,11 +3411,25 @@ export function createRoyalHorseUnit(
   muzzle.castShadow = true;
   headPivot.add(muzzle);
 
-  // Forelock between ears
-  const forelock = new THREE.Mesh(new THREE.ConeGeometry(0.075, 0.24, 7), maneMat);
-  forelock.rotation.x = Math.PI * 0.65;
-  forelock.position.set(0, 0.14, 0.22);
-  headPivot.add(forelock);
+  // Articulated 2-Link Physics-Driven Forelock between ears
+  const forelockBaseGeo = new THREE.CylinderGeometry(0.042, 0.056, 0.13, 7);
+  forelockBaseGeo.translate(0, -0.06, 0);
+  const forelockTipGeo = new THREE.ConeGeometry(0.046, 0.15, 7);
+  forelockTipGeo.rotateX(Math.PI);
+  forelockTipGeo.translate(0, -0.072, 0);
+
+  const forelockRoot = new THREE.Group();
+  forelockRoot.position.set(0, 0.15, 0.16);
+  forelockRoot.rotation.set(-0.55, 0, 0);
+  headPivot.add(forelockRoot);
+  forelockRoot.add(new THREE.Mesh(forelockBaseGeo, maneMat));
+
+  const forelockTip = new THREE.Group();
+  forelockTip.position.set(0, -0.115, 0);
+  forelockTip.rotation.set(-0.18, 0, 0);
+  forelockRoot.add(forelockTip);
+  forelockTip.add(new THREE.Mesh(forelockTipGeo, maneMat));
+  const forelockChain: [THREE.Group, THREE.Group] = [forelockRoot, forelockTip];
 
   // Sculpted Eyes (Sclera + Iris + Specular Catchlight), Flared Nostrils, Ears & Golden Bridle Bit Rings
   const leftBitAnchor = new THREE.Object3D();
@@ -3615,6 +3656,8 @@ export function createRoyalHorseUnit(
     tailGroup,
     tailPlumes,
     tailChains,
+    maneChains,
+    forelockChain,
     ears,
     leftBitAnchor,
     rightBitAnchor,
@@ -3834,14 +3877,20 @@ export function createRathaChariotModel(
   const steeds: RoyalHorseRig[] = [];
   const horseCoatMat = new THREE.MeshPhysicalMaterial({
     color: 0xf8f5ed,
-    roughness: 0.4,
+    roughness: 0.36,
     metalness: 0.04,
-    sheen: 0.35,
+    clearcoat: 0.22,
+    clearcoatRoughness: 0.45,
+    sheen: 0.42,
+    sheenRoughness: 0.48,
     sheenColor: new THREE.Color(0xffffff),
   });
-  const whiteManeMat = new THREE.MeshStandardMaterial({
+  const whiteManeMat = new THREE.MeshPhysicalMaterial({
     color: 0xf2eee3,
-    roughness: 0.65,
+    roughness: 0.46,
+    sheen: 0.85,
+    sheenRoughness: 0.35,
+    sheenColor: new THREE.Color(0xfff7e6),
   });
   const horseGemMat = new THREE.MeshPhysicalMaterial({
     color: 0xd1263c,
@@ -8142,14 +8191,20 @@ export function createHorseStableModel(
     const pal = coatPalette[idx % coatPalette.length];
     const coatMat = new THREE.MeshPhysicalMaterial({
       color: pal.coat,
-      roughness: 0.38,
+      roughness: 0.36,
       metalness: 0.04,
-      sheen: 0.35,
+      clearcoat: 0.22,
+      clearcoatRoughness: 0.45,
+      sheen: 0.42,
+      sheenRoughness: 0.48,
       sheenColor: new THREE.Color(0xffffff),
     });
-    const maneMat = new THREE.MeshStandardMaterial({
+    const maneMat = new THREE.MeshPhysicalMaterial({
       color: pal.mane,
-      roughness: 0.65,
+      roughness: 0.46,
+      sheen: 0.85,
+      sheenRoughness: 0.35,
+      sheenColor: new THREE.Color(0xfff5e0),
     });
 
     const steed = createRoyalHorseUnit(coatMat, maneMat, caparisonMat, goldMat, gemMat, false);

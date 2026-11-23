@@ -419,10 +419,19 @@ export interface QuadrupedAnimState {
   kneeX: [number, number, number, number];
   headX: number;
   headY: number;
+  prevHeadX: number;
   tailX: number;
   tailZ: number;
   tailVelX: number;
   tailVelZ: number;
+  maneX: number;
+  maneZ: number;
+  maneVelX: number;
+  maneVelZ: number;
+  forelockX: number;
+  forelockZ: number;
+  forelockVelX: number;
+  forelockVelZ: number;
   prevYaw: number;
   yawRate: number;
   kinematicAccumDt: number;
@@ -435,10 +444,19 @@ function createDefaultQuadrupedState(initialYaw = 0): QuadrupedAnimState {
     kneeX: [0.04, 0.04, 0.04, 0.04],
     headX: 0.56,
     headY: 0,
+    prevHeadX: 0.56,
     tailX: -0.06,
     tailZ: 0,
     tailVelX: 0,
     tailVelZ: 0,
+    maneX: -0.34,
+    maneZ: 0,
+    maneVelX: 0,
+    maneVelZ: 0,
+    forelockX: -0.55,
+    forelockZ: 0,
+    forelockVelX: 0,
+    forelockVelZ: 0,
     prevYaw: initialYaw,
     yawRate: 0,
     kinematicAccumDt: 0,
@@ -1006,7 +1024,9 @@ export class RamayanaWorldEngine {
     this.keyLight = new THREE.DirectionalLight(0xfff1d6, 2.25);
     this.keyLight.position.set(48, 72, 36);
     this.keyLight.castShadow = !this.isSoftwareGl;
-    this.keyLight.shadow.mapSize.set(initProfile.keyShadowSize, initProfile.keyShadowSize);
+    const maxShadowTex = this.renderer.capabilities.maxTextureSize || 2048;
+    const clampedKeyShadow = Math.min(maxShadowTex, initProfile.keyShadowSize);
+    this.keyLight.shadow.mapSize.set(clampedKeyShadow, clampedKeyShadow);
     const d = initProfile.shadowFrustumHalf;
     this.keyLight.shadow.camera.left = -d;
     this.keyLight.shadow.camera.right = d;
@@ -1014,9 +1034,9 @@ export class RamayanaWorldEngine {
     this.keyLight.shadow.camera.bottom = -d;
     this.keyLight.shadow.camera.near = 4;
     this.keyLight.shadow.camera.far = 148;
-    this.keyLight.shadow.bias = -0.00018;
-    this.keyLight.shadow.normalBias = 0.015;
-    this.keyLight.shadow.radius = 1.6;
+    this.keyLight.shadow.bias = -0.00014;
+    this.keyLight.shadow.normalBias = 0.012;
+    this.keyLight.shadow.radius = 1.85;
     this.scene.add(this.keyLight);
     this.scene.add(this.keyLight.target);
 
@@ -1208,10 +1228,12 @@ export class RamayanaWorldEngine {
       this.camera.updateProjectionMatrix();
     }
 
-    if (this.keyLight.shadow.mapSize.width !== profile.keyShadowSize) {
+    const maxShadowTex = this.renderer.capabilities.maxTextureSize || 2048;
+    const targetKeyShadow = Math.min(maxShadowTex, profile.keyShadowSize);
+    if (this.keyLight.shadow.mapSize.width !== targetKeyShadow) {
       this.keyLight.shadow.map?.dispose();
       this.keyLight.shadow.map = null;
-      this.keyLight.shadow.mapSize.set(profile.keyShadowSize, profile.keyShadowSize);
+      this.keyLight.shadow.mapSize.set(targetKeyShadow, targetKeyShadow);
     }
     const frustumHalf = profile.shadowFrustumHalf;
     if (this.keyLight.shadow.camera.right !== frustumHalf) {
@@ -1508,6 +1530,13 @@ export class RamayanaWorldEngine {
         ch[1].rotation.set(0, 0, 0);
         ch[2].rotation.set(0, 0, 0);
       }
+      for (let m = 0; m < st.maneChains.length; m++) {
+        const mc = st.maneChains[m];
+        mc[0].rotation.set(0, 0, 0);
+        mc[1].rotation.set(0, 0, 0);
+      }
+      st.forelockChain[0].rotation.set(-0.55, 0, 0);
+      st.forelockChain[1].rotation.set(-0.18, 0, 0);
     }
   }
 
@@ -2882,12 +2911,21 @@ export class RamayanaWorldEngine {
     COURTYARD_ASHVA_SPAWNS.forEach((sp, idx) => {
       const coatMat = new THREE.MeshPhysicalMaterial({
         color: sp.coat,
-        roughness: 0.38,
+        roughness: 0.36,
         metalness: 0.04,
-        sheen: 0.35,
+        clearcoat: 0.22,
+        clearcoatRoughness: 0.45,
+        sheen: 0.42,
+        sheenRoughness: 0.48,
         sheenColor: new THREE.Color(0xffffff),
       });
-      const maneMat = new THREE.MeshStandardMaterial({ color: sp.mane, roughness: 0.65 });
+      const maneMat = new THREE.MeshPhysicalMaterial({
+        color: sp.mane,
+        roughness: 0.46,
+        sheen: 0.85,
+        sheenRoughness: 0.35,
+        sheenColor: new THREE.Color(0xfff5e0),
+      });
       const rig = createRoyalHorseUnit(coatMat, maneMat, sharedCaparisonMat, sharedGoldMat, sharedGemMat, false);
       const homeY = Math.max(RIVER_SURFACE_Y + 0.35, groundHeightAt(sp.x, sp.z));
       this.scene.add(rig.group);
@@ -6715,18 +6753,21 @@ export class RamayanaWorldEngine {
 
     let tailXAngle = targetTailX;
     let tailZAngle = targetTailZ;
+    let headPitchRate = 0;
 
     if (state) {
+      state.prevHeadX = state.headX;
       state.headX = THREE.MathUtils.damp(state.headX, tHeadX, 11, safeDt);
       state.headY = THREE.MathUtils.damp(state.headY, tHeadY, 11, safeDt);
+      headPitchRate = THREE.MathUtils.clamp((state.headX - state.prevHeadX) / safeDt, -3.5, 3.5);
 
-      // Spring-damper integration (k = 68, c = 11.5)
+      // Spring-damper integration for tail (k = 68, c = 11.5)
       const accX = -68.0 * (state.tailX - targetTailX) - 11.5 * state.tailVelX;
       const accZ = -58.0 * (state.tailZ - targetTailZ) - 10.2 * state.tailVelZ;
       state.tailVelX += accX * safeDt;
       state.tailVelZ += accZ * safeDt;
-      state.tailX = THREE.MathUtils.clamp(state.tailX + state.tailVelX * safeDt, -0.92, 0.06);
-      state.tailZ = THREE.MathUtils.clamp(state.tailZ + state.tailVelZ * safeDt, -0.62, 0.62);
+      state.tailX = THREE.MathUtils.clamp(state.tailX + state.tailVelX * safeDt, -0.95, 0.08);
+      state.tailZ = THREE.MathUtils.clamp(state.tailZ + state.tailVelZ * safeDt, -0.68, 0.68);
       tailXAngle = state.tailX;
       tailZAngle = state.tailZ;
 
@@ -6742,31 +6783,121 @@ export class RamayanaWorldEngine {
 
     // Cascade traveling wind & gallop whip wave down all 5x3 articulated horse tail hair chains
     const chains = hr.tailChains;
-    const chainVelImpulse = state ? state.tailVelX * 0.032 : 0;
-    const chainLatVelImpulse = state ? state.tailVelZ * 0.045 : 0;
+    const chainVelImpulse = state ? state.tailVelX * 0.036 : 0;
+    const chainLatVelImpulse = state ? state.tailVelZ * 0.048 : 0;
     for (let p = 0; p < chains.length; p++) {
       const spread = p - 2;
       const [seg0, seg1, seg2] = chains[p];
       const phaseSeed = seed + p * 0.65;
-      const wave0 = Math.sin(elapsed * (3.2 + amp * 5.2) + phaseSeed) * (0.045 + amp * 0.08);
-      const wave1 = Math.sin(elapsed * (3.2 + amp * 5.2) - 0.85 + phaseSeed) * (0.065 + amp * 0.12);
-      const wave2 = Math.sin(elapsed * (3.2 + amp * 5.2) - 1.7 + phaseSeed) * (0.085 + amp * 0.16);
-      const swishZ1 = Math.sin(elapsed * (2.9 + amp * 3.8) - 0.6 + phaseSeed) * (0.04 + amp * 0.075);
-      const swishZ2 = Math.sin(elapsed * (2.9 + amp * 3.8) - 1.3 + phaseSeed) * (0.065 + amp * 0.11);
+      const wave0 = Math.sin(elapsed * (3.2 + amp * 5.2) + phaseSeed) * (0.045 + amp * 0.085);
+      const wave1 = Math.sin(elapsed * (3.2 + amp * 5.2) - 0.85 + phaseSeed) * (0.068 + amp * 0.13);
+      const wave2 = Math.sin(elapsed * (3.2 + amp * 5.2) - 1.7 + phaseSeed) * (0.09 + amp * 0.175);
+      const swishZ1 = Math.sin(elapsed * (2.9 + amp * 3.8) - 0.6 + phaseSeed) * (0.04 + amp * 0.08);
+      const swishZ2 = Math.sin(elapsed * (2.9 + amp * 3.8) - 1.3 + phaseSeed) * (0.068 + amp * 0.12);
 
       seg0.rotation.x = THREE.MathUtils.clamp(
-        -0.32 - Math.abs(spread) * 0.04 - amp * 0.24 + wave0 + chainVelImpulse,
-        -1.15,
+        -0.32 - Math.abs(spread) * 0.04 - amp * 0.25 + wave0 + chainVelImpulse,
+        -1.18,
         0.04
       );
-      seg0.rotation.z = spread * 0.075 + tailZAngle * 0.18;
+      seg0.rotation.z = spread * (0.075 + amp * 0.025) + tailZAngle * 0.2;
 
-      seg1.rotation.x = THREE.MathUtils.clamp(0.14 - amp * 0.18 + wave1 - chainVelImpulse * 0.8, -0.58, 0.42);
-      seg1.rotation.z = swishZ1 + chainLatVelImpulse * 0.7;
+      seg1.rotation.x = THREE.MathUtils.clamp(0.14 - amp * 0.18 + wave1 - chainVelImpulse * 0.85, -0.62, 0.42);
+      seg1.rotation.z = swishZ1 + chainLatVelImpulse * 0.72;
 
-      seg2.rotation.x = THREE.MathUtils.clamp(0.12 - amp * 0.16 + wave2 - chainVelImpulse * 1.1, -0.68, 0.46);
+      seg2.rotation.x = THREE.MathUtils.clamp(0.12 - amp * 0.16 + wave2 - chainVelImpulse * 1.15, -0.72, 0.46);
       seg2.rotation.z = swishZ2 + chainLatVelImpulse;
     }
+
+    // 2nd-order spring-damper for 7x2 Dorsal Mane & 2-Link Forelock (gravity drape + gallop lift + headwind + centrifugal turn whip)
+    const gallopBounce = moving ? Math.sin(gaitPhase * 2.0 + 0.5) * 0.16 * amp : 0;
+    const targetManeX = THREE.MathUtils.clamp(
+      -0.34 - 0.48 * amp + windGust * 1.2 + gallopBounce - headPitchRate * 0.06,
+      -1.08,
+      -0.08
+    );
+    const targetManeZ = THREE.MathUtils.clamp(
+      lateralWind * 0.85 + centrifugalWhip * 0.75,
+      -0.52,
+      0.52
+    );
+
+    const targetForelockX = THREE.MathUtils.clamp(
+      -0.55 - 0.36 * amp + windGust * 1.4 + gallopBounce * 0.9 - headPitchRate * 0.11,
+      -1.2,
+      -0.12
+    );
+    const targetForelockZ = THREE.MathUtils.clamp(
+      lateralWind * 0.9 + centrifugalWhip * 0.85,
+      -0.48,
+      0.48
+    );
+
+    let maneXAngle = targetManeX;
+    let maneZAngle = targetManeZ;
+    let forelockXAngle = targetForelockX;
+    let forelockZAngle = targetForelockZ;
+    let maneVelX = 0;
+    let maneVelZ = 0;
+    let forelockVelX = 0;
+
+    if (state) {
+      const mAccX = -76.0 * (state.maneX - targetManeX) - 12.2 * state.maneVelX;
+      const mAccZ = -64.0 * (state.maneZ - targetManeZ) - 10.6 * state.maneVelZ;
+      state.maneVelX += mAccX * safeDt;
+      state.maneVelZ += mAccZ * safeDt;
+      state.maneX = THREE.MathUtils.clamp(state.maneX + state.maneVelX * safeDt, -1.16, -0.05);
+      state.maneZ = THREE.MathUtils.clamp(state.maneZ + state.maneVelZ * safeDt, -0.58, 0.58);
+      maneXAngle = state.maneX;
+      maneZAngle = state.maneZ;
+      maneVelX = state.maneVelX;
+      maneVelZ = state.maneVelZ;
+
+      const fAccX = -82.0 * (state.forelockX - targetForelockX) - 11.4 * state.forelockVelX;
+      const fAccZ = -70.0 * (state.forelockZ - targetForelockZ) - 10.0 * state.forelockVelZ;
+      state.forelockVelX += fAccX * safeDt;
+      state.forelockVelZ += fAccZ * safeDt;
+      state.forelockX = THREE.MathUtils.clamp(state.forelockX + state.forelockVelX * safeDt, -1.28, -0.08);
+      state.forelockZ = THREE.MathUtils.clamp(state.forelockZ + state.forelockVelZ * safeDt, -0.52, 0.52);
+      forelockXAngle = state.forelockX;
+      forelockZAngle = state.forelockZ;
+      forelockVelX = state.forelockVelX;
+    }
+
+    const maneChains = hr.maneChains;
+    const maneWaveFreq = 3.6 + amp * 5.6;
+    for (let m = 0; m < maneChains.length; m++) {
+      const [mRoot, mTip] = maneChains[m];
+      const sideSign = m % 2 === 0 ? -1 : 1;
+      const mSeed = seed + (6 - m) * 0.42;
+      const rootWave = Math.sin(elapsed * maneWaveFreq + mSeed) * (0.045 + amp * 0.11);
+      const tipWave = Math.sin(elapsed * maneWaveFreq - 0.95 + mSeed) * (0.075 + amp * 0.17);
+      const latFlutter = Math.cos(elapsed * (3.1 + amp * 4.2) + mSeed) * (0.04 + amp * 0.085);
+
+      mRoot.rotation.x = THREE.MathUtils.clamp(
+        maneXAngle + rootWave + maneVelX * 0.025,
+        -1.25,
+        -0.02
+      );
+      mRoot.rotation.z = sideSign * (0.24 + amp * 0.08) + maneZAngle * 0.65;
+
+      mTip.rotation.x = THREE.MathUtils.clamp(
+        -0.14 - 0.24 * amp + tipWave - maneVelX * 0.04,
+        -0.88,
+        0.38
+      );
+      mTip.rotation.z = sideSign * 0.08 + latFlutter + maneVelZ * 0.045;
+    }
+
+    const [fRoot, fTip] = hr.forelockChain;
+    fRoot.rotation.x = forelockXAngle;
+    fRoot.rotation.z = forelockZAngle * 0.6;
+    fTip.rotation.x = THREE.MathUtils.clamp(
+      -0.18 - 0.22 * amp + Math.sin(elapsed * maneWaveFreq - 0.7 + seed) * (0.06 + amp * 0.14) - forelockVelX * 0.035,
+      -0.85,
+      0.32
+    );
+    fTip.rotation.z = forelockZAngle * 0.8 + Math.cos(elapsed * 3.8 + seed) * (0.035 + amp * 0.07);
 
     for (let ei = 0; ei < hr.ears.length; ei++) {
       hr.ears[ei].rotation.x = 0.25 + Math.sin(elapsed * 3.4 + seed + ei) * 0.08;

@@ -54,9 +54,8 @@ class MainActivity : AppCompatActivity() {
         setupGameWebView()
         registerBackHandler()
 
-        if (savedInstanceState == null || gameWebView.restoreState(savedInstanceState) == null) {
-            gameWebView.loadUrl(ENTRY_URL)
-        }
+        // Always load fresh local game entry so Android process recreation never restores a dead WebGL context
+        gameWebView.loadUrl(ENTRY_URL)
     }
 
     private fun configureImmersiveFullscreen() {
@@ -105,6 +104,7 @@ class MainActivity : AppCompatActivity() {
             setSupportZoom(false)
             builtInZoomControls = false
             displayZoomControls = false
+            textZoom = 100
             cacheMode = WebSettings.LOAD_DEFAULT
         }
 
@@ -250,10 +250,12 @@ class MainActivity : AppCompatActivity() {
     private fun mapGamepadKeyCode(keyCode: Int): String? = when (keyCode) {
         KeyEvent.KEYCODE_BUTTON_A -> "Space"
         KeyEvent.KEYCODE_BUTTON_X -> "KeyF"
-        KeyEvent.KEYCODE_BUTTON_Y -> "KeyQ"
+        KeyEvent.KEYCODE_BUTTON_Y -> "KeyX"
         KeyEvent.KEYCODE_BUTTON_B -> "KeyE"
         KeyEvent.KEYCODE_BUTTON_L1 -> "KeyC"
         KeyEvent.KEYCODE_BUTTON_R1 -> "ShiftLeft"
+        KeyEvent.KEYCODE_BUTTON_L2 -> "KeyQ"
+        KeyEvent.KEYCODE_BUTTON_R2 -> "KeyR"
         KeyEvent.KEYCODE_BUTTON_SELECT -> "KeyV"
         KeyEvent.KEYCODE_BUTTON_START -> "Escape"
         KeyEvent.KEYCODE_DPAD_UP -> "ArrowUp"
@@ -281,21 +283,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        gameWebView.saveState(outState)
-    }
-
     override fun onResume() {
         super.onResume()
         configureImmersiveFullscreen()
         gameWebView.onResume()
-        gameWebView.resumeTimers()
     }
 
     override fun onPause() {
         gameWebView.onPause()
-        gameWebView.pauseTimers()
         super.onPause()
     }
 

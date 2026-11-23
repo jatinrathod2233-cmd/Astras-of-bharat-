@@ -20,7 +20,7 @@ export interface QualityProfile {
   particleScale: number;
   cameraFar: number;
   fogFarScale: number;
-  textureSize: 1024 | 512 | 256;
+  textureSize: 2048 | 1024 | 512 | 256;
   anisotropyCap: number;
   skipNonEssentialMipmaps: boolean;
   distanceCullScale: number;
@@ -29,6 +29,7 @@ export interface QualityProfile {
 export interface DeviceCapabilityInfo {
   isMobile: boolean;
   isVeryWeak: boolean;
+  isHighEndDesktop: boolean;
   cores: number;
   memoryGb: number | null;
   dpr: number;
@@ -63,6 +64,7 @@ export function detectDeviceCapabilities(isSoftwareGl: boolean): DeviceCapabilit
     return {
       isMobile,
       isVeryWeak: true,
+      isHighEndDesktop: false,
       cores,
       memoryGb,
       dpr,
@@ -104,9 +106,15 @@ export function detectDeviceCapabilities(isSoftwareGl: boolean): DeviceCapabilit
     }
   }
 
+  const isHighEndDesktop =
+    !isMobile &&
+    cores >= 6 &&
+    (memoryGb === null || memoryGb >= 8);
+
   return {
     isMobile,
     isVeryWeak,
+    isHighEndDesktop,
     cores,
     memoryGb,
     dpr,
@@ -118,29 +126,33 @@ export function detectDeviceCapabilities(isSoftwareGl: boolean): DeviceCapabilit
 export function buildQualityProfile(
   tier: QualityTier,
   isSoftwareGl: boolean,
-  isVeryWeak: boolean
+  isVeryWeak: boolean,
+  capabilities?: DeviceCapabilityInfo
 ): QualityProfile {
+  const isMobile = capabilities?.isMobile ?? false;
+  const isHighEndDesktop = capabilities?.isHighEndDesktop ?? false;
+
   if (tier === 'HIGH' && !isSoftwareGl) {
     return {
       tier: 'HIGH',
-      pixelRatioCap: 2.0,
-      keyShadowSize: 2048,
-      shadowFrustumHalf: 22,
+      pixelRatioCap: isMobile ? 2.0 : 2.5,
+      keyShadowSize: isMobile ? 2048 : 4096,
+      shadowFrustumHalf: isMobile ? 22 : 26,
       shadowType: THREE.PCFSoftShadowMap,
       torchShadowSize: 1024,
       torchShadowEnabled: true,
-      maxActiveNightLamps: 4,
+      maxActiveNightLamps: isMobile ? 4 : 6,
       composerSamples: 4,
       composerHalfFloat: true,
       underwaterScale: 1.0,
       toneMapping: THREE.ACESFilmicToneMapping,
-      particleScale: 1.0,
-      cameraFar: 850,
-      fogFarScale: 1.0,
-      textureSize: 1024,
-      anisotropyCap: 4,
+      particleScale: isHighEndDesktop ? 1.25 : 1.0,
+      cameraFar: isMobile ? 850 : 1050,
+      fogFarScale: isMobile ? 1.0 : 1.15,
+      textureSize: isHighEndDesktop ? 2048 : 1024,
+      anisotropyCap: isMobile ? 6 : 16,
       skipNonEssentialMipmaps: false,
-      distanceCullScale: 1.0,
+      distanceCullScale: isMobile ? 1.0 : 1.25,
     };
   }
 
@@ -240,7 +252,8 @@ export class QualityManager {
     this.activeProfile = buildQualityProfile(
       this.activeTier,
       this.isSoftwareGl,
-      this.capabilities.isVeryWeak
+      this.capabilities.isVeryWeak,
+      this.capabilities
     );
   }
 
@@ -291,7 +304,8 @@ export class QualityManager {
     this.activeProfile = buildQualityProfile(
       tier,
       this.isSoftwareGl,
-      this.capabilities.isVeryWeak
+      this.capabilities.isVeryWeak,
+      this.capabilities
     );
     try {
       localStorage.setItem(STORAGE_TIER_KEY, tier);

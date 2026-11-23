@@ -102,9 +102,11 @@ val appAssetsDir = layout.projectDirectory.dir("src/main/assets").asFile
 val syncDistAssets by tasks.registering {
     onlyIf { distSourceDir.exists() && File(distSourceDir, "index.html").exists() }
     doLast {
-        val staleAssetsDir = File(appAssetsDir, "assets")
-        if (staleAssetsDir.exists()) {
-            staleAssetsDir.deleteRecursively()
+        listOf("assets", "src").forEach { dirName ->
+            val staleDir = File(appAssetsDir, dirName)
+            if (staleDir.exists()) {
+                staleDir.deleteRecursively()
+            }
         }
         appAssetsDir.mkdirs()
         distSourceDir.copyRecursively(appAssetsDir, overwrite = true)

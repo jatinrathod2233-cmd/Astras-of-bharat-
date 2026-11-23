@@ -45,9 +45,9 @@ export interface AsyncTextureLoadOptions {
   onProgress?: (fraction: number, label: string) => void;
   /** Time slice budget in ms before yielding to main thread (default 6ms for 60fps mobile). */
   frameBudgetMs?: number;
-  /** Target procedural texture resolution (1024 | 512 | 256). */
-  textureSize?: 1024 | 512 | 256;
-  /** Maximum anisotropic filtering cap (HIGH: 4, MEDIUM: 2, LOW: 1). */
+  /** Target procedural texture resolution (2048 | 1024 | 512 | 256). */
+  textureSize?: 2048 | 1024 | 512 | 256;
+  /** Maximum anisotropic filtering cap (HIGH: up to 16, MEDIUM: 2, LOW: 1). */
   maxAnisotropy?: number;
   /** Skip mipmap generation on secondary roughness/detail maps to save GPU memory & bandwidth. */
   skipNonEssentialMipmaps?: boolean;
