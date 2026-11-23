@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { GameHUD } from './components/GameHUD';
 import { OverlayModals } from './components/OverlayModals';
 import { RamayanaWorldEngine } from './engine/RamayanaWorldEngine';
-import { PlayMode, WorldHudSnapshot } from './types/world';
+import { PlayMode, QualityMode, WorldHudSnapshot } from './types/world';
 import { soundEngine } from './utils/audio';
 
 const INITIAL_HUD: WorldHudSnapshot = {
@@ -44,7 +44,12 @@ const INITIAL_HUD: WorldHudSnapshot = {
   assetsReady: false,
   assetProgress: 0,
   assetStage: 'Initializing realm...',
+  qualityMode: 'AUTO',
+  qualityTier: 'HIGH',
+  fps: 60,
 };
+
+const SHOW_FPS_STORAGE_KEY = 'astras_show_fps_v1';
 
 export default function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -54,6 +59,13 @@ export default function App() {
   const [hud, setHud] = useState<WorldHudSnapshot>(INITIAL_HUD);
   const [muted, setMuted] = useState<boolean>(() => soundEngine.isMuted());
   const [touchSprint, setTouchSprint] = useState(false);
+  const [showPerfStats, setShowPerfStats] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SHOW_FPS_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
 
   // Separate refs for keyboard vs virtual joystick so they blend cleanly
   const modeRef = useRef<PlayMode>('TITLE');
@@ -139,6 +151,26 @@ export default function App() {
       (window as unknown as { __ramayanaEngine?: RamayanaWorldEngine }).__ramayanaEngine = undefined;
       engine.dispose();
       engineRef.current = null;
+    };
+  }, []);
+
+  // Prevent browser pinch-zoom or rubber-band scrolling on mobile touchscreens
+  useEffect(() => {
+    const container = mountRef.current;
+    if (!container) return;
+    const preventWheel = (e: WheelEvent) => {
+      e.preventDefault();
+    };
+    const preventTouchMove = (e: TouchEvent) => {
+      if (e.touches.length > 1 || modeRef.current === 'PLAYING') {
+        e.preventDefault();
+      }
+    };
+    container.addEventListener('wheel', preventWheel, { passive: false });
+    container.addEventListener('touchmove', preventTouchMove, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', preventWheel);
+      container.removeEventListener('touchmove', preventTouchMove);
     };
   }, []);
 
@@ -352,6 +384,45 @@ export default function App() {
     if (engineRef.current) engineRef.current.input.autoDriveTogglePressed = true;
   }, []);
 
+  const handleStartGame = useCallback(() => {
+    if (!engineRef.current) return;
+    resetAllInputs();
+    soundEngine.playMissionChime();
+    engineRef.current.setMode('PLAYING');
+  }, [resetAllInputs]);
+
+  const handleResume = useCallback(() => {
+    resetAllInputs();
+    engineRef.current?.setMode('PLAYING');
+  }, [resetAllInputs]);
+
+  const handleRevive = useCallback(() => {
+    resetAllInputs();
+    engineRef.current?.reviveAtPalace();
+  }, [resetAllInputs]);
+
+  const handleRestart = useCallback(() => {
+    resetAllInputs();
+    engineRef.current?.resetWorldEntities();
+    engineRef.current?.setMode('PLAYING');
+  }, [resetAllInputs]);
+
+  const handleChangeQualityMode = useCallback((nextQuality: QualityMode) => {
+    engineRef.current?.setQualityMode(nextQuality);
+  }, []);
+
+  const handleTogglePerfStats = useCallback(() => {
+    setShowPerfStats((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SHOW_FPS_STORAGE_KEY, next ? '1' : '0');
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  }, []);
+
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#0D1016] select-none">
       {/* Dedicated Three.js WebGL Mount Container */}
@@ -372,6 +443,7 @@ export default function App() {
           hud={hud}
           muted={muted}
           sprintActive={touchSprint}
+          showPerfStats={showPerfStats}
           onToggleMute={handleToggleMute}
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
@@ -392,25 +464,13 @@ export default function App() {
       <OverlayModals
         mode={mode}
         hud={hud}
-        onStartGame={() => {
-          if (!hud.assetsReady) return;
-          resetAllInputs();
-          soundEngine.playMissionChime();
-          engineRef.current?.setMode('PLAYING');
-        }}
-        onResume={() => {
-          resetAllInputs();
-          engineRef.current?.setMode('PLAYING');
-        }}
-        onRevive={() => {
-          resetAllInputs();
-          engineRef.current?.reviveAtPalace();
-        }}
-        onRestart={() => {
-          resetAllInputs();
-          engineRef.current?.resetWorldEntities();
-          engineRef.current?.setMode('PLAYING');
-        }}
+        showPerfStats={showPerfStats}
+        onStartGame={handleStartGame}
+        onResume={handleResume}
+        onRevive={handleRevive}
+        onRestart={handleRestart}
+        onChangeQualityMode={handleChangeQualityMode}
+        onTogglePerfStats={handleTogglePerfStats}
       />
     </div>
   );

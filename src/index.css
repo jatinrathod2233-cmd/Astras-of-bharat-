@@ -7,11 +7,20 @@
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   }
 
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    touch-action: none;
+    overscroll-behavior: none;
+  }
+
   html {
     font-family: var(--font-body);
     background-color: #0D1016;
     color: #EFE9DC;
-    scroll-behavior: smooth;
   }
 
   h1, h2, h3, .font-display {

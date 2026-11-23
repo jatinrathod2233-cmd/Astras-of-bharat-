@@ -342,7 +342,11 @@ export class OcclusionCullingManager {
    * Call once after camera transforms settle so both static entries and dynamic `isSphereVisible()`
    * queries share the exact same frame basis with zero redundant matrix work.
    */
-  public prepareCullingBasis(camera: THREE.Camera, fogDensity: number): void {
+  public prepareCullingBasis(
+    camera: THREE.Camera,
+    fogDensityOrFar: number,
+    isLinearFog = false
+  ): void {
     camera.updateMatrixWorld();
     this.projScreenMatrix.multiplyMatrices(
       camera.projectionMatrix,
@@ -355,9 +359,13 @@ export class OcclusionCullingManager {
     this.cachedCamY = camPos.y;
     this.cachedCamZ = camPos.z;
 
-    // Conservative exponential fog extinction range: exp(-(d * fogDensity)^2) < 0.004 at d * density >= 2.4
-    const safeFog = Math.max(0.0022, fogDensity);
-    this.cachedFogCutoffBase = 2.4 / safeFog;
+    if (isLinearFog) {
+      this.cachedFogCutoffBase = Math.max(90, fogDensityOrFar * 1.06);
+    } else {
+      // Conservative exponential fog extinction range: exp(-(d * fogDensity)^2) < 0.004 at d * density >= 2.4
+      const safeFog = Math.max(0.0022, fogDensityOrFar);
+      this.cachedFogCutoffBase = 2.4 / safeFog;
+    }
 
     this.selectActiveOccluders(this.cachedCamX, this.cachedCamY, this.cachedCamZ);
   }
@@ -365,7 +373,7 @@ export class OcclusionCullingManager {
   /**
    * Zero-allocation conservative visibility query for dynamic moving entities (NPCs, demons,
    * horses, elephants, chariots, and aquatic creatures). Checks:
-   * 1. Exponential fog extinction horizon
+   * 1. Fog extinction horizon
    * 2. Camera frustum sphere intersection
    * 3. Conservative solid AABB occluder shadow-cone (requires center AND 6 axial envelope points
    *    at +-0.72*radius to be strictly occluded before hiding, eliminating corner pop-in).
@@ -448,8 +456,12 @@ export class OcclusionCullingManager {
     return true;
   }
 
-  public update(camera: THREE.Camera, fogDensity: number): void {
-    this.prepareCullingBasis(camera, fogDensity);
+  public update(
+    camera: THREE.Camera,
+    fogDensityOrFar: number,
+    isLinearFog = false
+  ): void {
+    this.prepareCullingBasis(camera, fogDensityOrFar, isLinearFog);
 
     const camX = this.cachedCamX;
     const camY = this.cachedCamY;

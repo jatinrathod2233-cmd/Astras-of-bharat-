@@ -23,7 +23,7 @@ interface TouchActionPadProps {
   onToggleAutoDrive: () => void;
 }
 
-export const TouchActionPad: React.FC<TouchActionPadProps> = ({
+export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(({
   chakraCooldown,
   chakraMaxCooldown,
   mountKind,
@@ -235,4 +235,4 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = ({
       </div>
     </div>
   );
-};
+});

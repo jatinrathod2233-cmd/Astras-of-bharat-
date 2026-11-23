@@ -36,6 +36,7 @@ export interface ProceduralTextures {
   redCarpetNormal: THREE.CanvasTexture;
   redCarpetRoughness: THREE.CanvasTexture;
   contactShadow: THREE.CanvasTexture;
+  setAnisotropy: (cap: number) => void;
   dispose: () => void;
 }
 
@@ -44,6 +45,12 @@ export interface AsyncTextureLoadOptions {
   onProgress?: (fraction: number, label: string) => void;
   /** Time slice budget in ms before yielding to main thread (default 6ms for 60fps mobile). */
   frameBudgetMs?: number;
+  /** Target procedural texture resolution (1024 | 512 | 256). */
+  textureSize?: 1024 | 512 | 256;
+  /** Maximum anisotropic filtering cap (HIGH: 4, MEDIUM: 2, LOW: 1). */
+  maxAnisotropy?: number;
+  /** Skip mipmap generation on secondary roughness/detail maps to save GPU memory & bandwidth. */
+  skipNonEssentialMipmaps?: boolean;
 }
 
 function configureColorTexture(
@@ -51,15 +58,16 @@ function configureColorTexture(
   repeatX: number,
   repeatY: number,
   anisotropy: number,
-  clamp = false
+  clamp = false,
+  generateMipmaps = true
 ): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.wrapS = clamp ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
   tex.wrapT = clamp ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
   tex.repeat.set(repeatX, repeatY);
-  tex.generateMipmaps = true;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = generateMipmaps;
+  tex.minFilter = generateMipmaps ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.anisotropy = anisotropy;
   tex.needsUpdate = true;
@@ -85,7 +93,8 @@ function buildNormalMapFromHeight(
   strength: number,
   repeatX: number,
   repeatY: number,
-  anisotropy: number
+  anisotropy: number,
+  generateMipmaps = true
 ): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -138,8 +147,8 @@ function buildNormalMapFromHeight(
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeatX, repeatY);
-  tex.generateMipmaps = true;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = generateMipmaps;
+  tex.minFilter = generateMipmaps ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.anisotropy = anisotropy;
   tex.needsUpdate = true;
@@ -154,7 +163,8 @@ function buildRoughnessMapFromHeight(
   invert: boolean,
   repeatX: number,
   repeatY: number,
-  anisotropy: number
+  anisotropy: number,
+  generateMipmaps = true
 ): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -177,8 +187,8 @@ function buildRoughnessMapFromHeight(
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeatX, repeatY);
-  tex.generateMipmaps = true;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = generateMipmaps;
+  tex.minFilter = generateMipmaps ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.anisotropy = anisotropy;
   tex.needsUpdate = true;
@@ -222,6 +232,7 @@ interface TextureSynthContext {
   K: number;
   invK: number;
   maxAniso: number;
+  useSecondaryMips: boolean;
   scratchHeight: Float32Array;
   created: THREE.CanvasTexture[];
 }
@@ -270,8 +281,8 @@ function synthSandstone(ctx: TextureSynthContext) {
   sctx.putImageData(sandImg, 0, 0);
   return {
     sandstone: trackTex(ctx, configureColorTexture(sandCanvas, 2.5, 2.5, maxAniso)),
-    sandstoneNormal: trackTex(ctx, buildNormalMapFromHeight(sandHeight, S, 3.0, 2.5, 2.5, maxAniso)),
-    sandstoneRoughness: trackTex(ctx, buildRoughnessMapFromHeight(sandHeight, S, 0.72, 1.0, true, 2.5, 2.5, maxAniso)),
+    sandstoneNormal: trackTex(ctx, buildNormalMapFromHeight(sandHeight, S, 3.0, 2.5, 2.5, maxAniso, ctx.useSecondaryMips)),
+    sandstoneRoughness: trackTex(ctx, buildRoughnessMapFromHeight(sandHeight, S, 0.72, 1.0, true, 2.5, 2.5, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -316,8 +327,8 @@ function synthAvenueStone(ctx: TextureSynthContext) {
   actx.putImageData(aveImg, 0, 0);
   return {
     avenueStone: trackTex(ctx, configureColorTexture(aveCanvas, 24, 24, maxAniso)),
-    avenueNormal: trackTex(ctx, buildNormalMapFromHeight(aveHeight, S, 1.85, 24, 24, maxAniso)),
-    avenueRoughness: trackTex(ctx, buildRoughnessMapFromHeight(aveHeight, S, 0.74, 1.0, true, 24, 24, maxAniso)),
+    avenueNormal: trackTex(ctx, buildNormalMapFromHeight(aveHeight, S, 1.85, 24, 24, maxAniso, ctx.useSecondaryMips)),
+    avenueRoughness: trackTex(ctx, buildRoughnessMapFromHeight(aveHeight, S, 0.74, 1.0, true, 24, 24, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -349,8 +360,8 @@ function synthGrassEarth(ctx: TextureSynthContext) {
   gctx.putImageData(grassImg, 0, 0);
   return {
     grassEarth: trackTex(ctx, configureColorTexture(grassCanvas, 72, 72, maxAniso)),
-    grassNormal: trackTex(ctx, buildNormalMapFromHeight(grassHeight, S, 2.2, 72, 72, maxAniso)),
-    grassRoughness: trackTex(ctx, buildRoughnessMapFromHeight(grassHeight, S, 0.78, 1.0, true, 72, 72, maxAniso)),
+    grassNormal: trackTex(ctx, buildNormalMapFromHeight(grassHeight, S, 2.2, 72, 72, maxAniso, ctx.useSecondaryMips)),
+    grassRoughness: trackTex(ctx, buildRoughnessMapFromHeight(grassHeight, S, 0.78, 1.0, true, 72, 72, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -525,8 +536,8 @@ function synthSilkGold(ctx: TextureSynthContext) {
   slCtx.putImageData(silkImg, 0, 0);
   return {
     silkGold: trackTex(ctx, configureColorTexture(silkCanvas, 2, 2, maxAniso)),
-    silkNormal: trackTex(ctx, buildNormalMapFromHeight(silkHeight, S, 1.9, 2, 2, maxAniso)),
-    silkRoughness: trackTex(ctx, buildRoughnessMapFromHeight(silkHeight, S, 0.68, 1.0, true, 2, 2, maxAniso)),
+    silkNormal: trackTex(ctx, buildNormalMapFromHeight(silkHeight, S, 1.9, 2, 2, maxAniso, ctx.useSecondaryMips)),
+    silkRoughness: trackTex(ctx, buildRoughnessMapFromHeight(silkHeight, S, 0.68, 1.0, true, 2, 2, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -561,8 +572,8 @@ function synthArmorMetal(ctx: TextureSynthContext) {
   arCtx.putImageData(armImg, 0, 0);
   return {
     armorMetal: trackTex(ctx, configureColorTexture(armCanvas, 2, 2, maxAniso)),
-    armorNormal: trackTex(ctx, buildNormalMapFromHeight(armHeight, S, 3.0, 2, 2, maxAniso)),
-    armorRoughness: trackTex(ctx, buildRoughnessMapFromHeight(armHeight, S, 0.64, 1.0, true, 2, 2, maxAniso)),
+    armorNormal: trackTex(ctx, buildNormalMapFromHeight(armHeight, S, 3.0, 2, 2, maxAniso, ctx.useSecondaryMips)),
+    armorRoughness: trackTex(ctx, buildRoughnessMapFromHeight(armHeight, S, 0.64, 1.0, true, 2, 2, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -593,8 +604,8 @@ function synthRoyalSkinAndBasalt(ctx: TextureSynthContext) {
     }
   }
   skCtx.putImageData(skinImg, 0, 0);
-  const royalSkin = trackTex(ctx, configureColorTexture(skinCanvas, 1, 1, maxAniso));
-  const royalSkinNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.28, 1, 1, maxAniso));
+  const royalSkin = trackTex(ctx, configureColorTexture(skinCanvas, 1, 1, maxAniso, false, ctx.useSecondaryMips));
+  const royalSkinNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.28, 1, 1, maxAniso, ctx.useSecondaryMips));
 
   const basCanvas = document.createElement('canvas');
   basCanvas.width = S;
@@ -695,8 +706,8 @@ function synthEpigraphAndMythArt(ctx: TextureSynthContext) {
     const o = i << 2;
     scratchHeight[i] = (epiData[o] + epiData[o + 1] + epiData[o + 2]) * inv765;
   }
-  const royalEpigraph = trackTex(ctx, configureColorTexture(epiCanvas, 1, 1, maxAniso, true));
-  const royalEpigraphNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 3.6, 1, 1, maxAniso));
+  const royalEpigraph = trackTex(ctx, configureColorTexture(epiCanvas, 1, 1, maxAniso, true, ctx.useSecondaryMips));
+  const royalEpigraphNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 3.6, 1, 1, maxAniso, ctx.useSecondaryMips));
 
   const mythCanvas = document.createElement('canvas');
   mythCanvas.width = S;
@@ -757,8 +768,8 @@ function synthEpigraphAndMythArt(ctx: TextureSynthContext) {
     const o = i << 2;
     scratchHeight[i] = (mythData[o] + mythData[o + 1] + mythData[o + 2]) * inv765;
   }
-  const mythologyArt = trackTex(ctx, configureColorTexture(mythCanvas, 2, 2, maxAniso));
-  const mythologyArtNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 3.4, 2, 2, maxAniso));
+  const mythologyArt = trackTex(ctx, configureColorTexture(mythCanvas, 2, 2, maxAniso, false, ctx.useSecondaryMips));
+  const mythologyArtNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 3.4, 2, 2, maxAniso, ctx.useSecondaryMips));
 
   return {
     royalEpigraph,
@@ -882,8 +893,8 @@ function synthRedCarpetAndShadow(ctx: TextureSynthContext) {
   }
   rpCtx.putImageData(carpImg, 0, 0);
   const redCarpet = trackTex(ctx, configureColorTexture(carpCanvas, 1, 1, maxAniso));
-  const redCarpetNormal = trackTex(ctx, buildNormalMapFromHeight(carpHeight, S, 2.4, 1, 1, maxAniso));
-  const redCarpetRoughness = trackTex(ctx, buildRoughnessMapFromHeight(carpHeight, S, 0.66, 1.0, true, 1, 1, maxAniso));
+  const redCarpetNormal = trackTex(ctx, buildNormalMapFromHeight(carpHeight, S, 2.4, 1, 1, maxAniso, ctx.useSecondaryMips));
+  const redCarpetRoughness = trackTex(ctx, buildRoughnessMapFromHeight(carpHeight, S, 0.66, 1.0, true, 1, 1, maxAniso, ctx.useSecondaryMips));
 
   const shadCanvas = document.createElement('canvas');
   shadCanvas.width = 256;
@@ -895,7 +906,7 @@ function synthRedCarpetAndShadow(ctx: TextureSynthContext) {
   grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
   shctx.fillStyle = grad;
   shctx.fillRect(0, 0, 256, 256);
-  const contactShadow = trackTex(ctx, configureColorTexture(shadCanvas, 1, 1, maxAniso, true));
+  const contactShadow = trackTex(ctx, configureColorTexture(shadCanvas, 1, 1, 1, true, false));
 
   return {
     redCarpet,
@@ -907,20 +918,25 @@ function synthRedCarpetAndShadow(ctx: TextureSynthContext) {
 
 function createSynthContext(
   renderer: THREE.WebGLRenderer,
-  isSoftwareGl = false
+  isSoftwareGl = false,
+  options: AsyncTextureLoadOptions = {}
 ): TextureSynthContext {
-  const maxAniso = Math.max(1, renderer.capabilities.getMaxAnisotropy());
+  const hwMaxAniso = Math.max(1, renderer.capabilities.getMaxAnisotropy());
+  const requestedCap = options.maxAnisotropy ?? (isSoftwareGl ? 1 : 4);
+  const maxAniso = Math.max(1, Math.min(hwMaxAniso, requestedCap));
   const maxTexSize = renderer.capabilities.maxTextureSize || 2048;
   const isConstrainedMobile =
     typeof navigator !== 'undefined' &&
     (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) || maxTexSize < 4096);
-  const S = !isSoftwareGl && maxTexSize >= 2048 && !isConstrainedMobile ? 1024 : 512;
+  const defaultS = !isSoftwareGl && maxTexSize >= 2048 && !isConstrainedMobile ? 1024 : 512;
+  const S = Math.min(maxTexSize, options.textureSize ?? defaultS);
   const K = S / 256;
   return {
     S,
     K,
     invK: 1 / K,
     maxAniso,
+    useSecondaryMips: !options.skipNonEssentialMipmaps,
     scratchHeight: new Float32Array(S * S),
     created: [],
   };
@@ -941,7 +957,7 @@ export async function createProceduralTexturesAsync(
   isSoftwareGl = false,
   options: AsyncTextureLoadOptions = {}
 ): Promise<ProceduralTextures> {
-  const ctx = createSynthContext(renderer, isSoftwareGl);
+  const ctx = createSynthContext(renderer, isSoftwareGl, options);
   const { signal, onProgress, frameBudgetMs = 6 } = options;
   let lastYield = performance.now();
 
@@ -998,6 +1014,13 @@ export async function createProceduralTexturesAsync(
     ...s10,
     ...s11,
     ...s12,
+    setAnisotropy: (cap: number) => {
+      const clamped = Math.max(1, Math.min(renderer.capabilities.getMaxAnisotropy() || 1, cap));
+      for (let i = 0; i < ctx.created.length; i++) {
+        ctx.created[i].anisotropy = clamped;
+        ctx.created[i].needsUpdate = true;
+      }
+    },
     dispose: () => {
       ctx.created.forEach((t) => t.dispose());
     },
@@ -1035,6 +1058,13 @@ export function createProceduralTextures(
     ...s10,
     ...s11,
     ...s12,
+    setAnisotropy: (cap: number) => {
+      const clamped = Math.max(1, Math.min(renderer.capabilities.getMaxAnisotropy() || 1, cap));
+      for (let i = 0; i < ctx.created.length; i++) {
+        ctx.created[i].anisotropy = clamped;
+        ctx.created[i].needsUpdate = true;
+      }
+    },
     dispose: () => {
       ctx.created.forEach((t) => t.dispose());
     },

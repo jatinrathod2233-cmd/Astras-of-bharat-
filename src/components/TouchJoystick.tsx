@@ -4,7 +4,7 @@ interface TouchJoystickProps {
   onChange: (x: number, y: number) => void;
 }
 
-export const TouchJoystick: React.FC<TouchJoystickProps> = ({ onChange }) => {
+export const TouchJoystick: React.FC<TouchJoystickProps> = React.memo(({ onChange }) => {
   const baseRef = useRef<HTMLDivElement | null>(null);
   const activePointerId = useRef<number | null>(null);
   const [knobOffset, setKnobOffset] = useState<{ x: number; y: number }>({
@@ -110,4 +110,4 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({ onChange }) => {
       </div>
     </div>
   );
-};
+});

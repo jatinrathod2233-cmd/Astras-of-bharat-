@@ -12,12 +12,15 @@ import {
   MountKind,
   NpcRole,
   PlayMode,
+  QualityMode,
+  QualityTier,
   RadarBlip,
   WorldHudSnapshot,
 } from '../types/world';
 import { soundEngine } from '../utils/audio';
 import { ObjectPoolManager, swapRemoveAt } from './ObjectPoolManager';
 import { OcclusionCullingManager } from './OcclusionCullingManager';
+import { QualityManager, QualityProfile } from './QualityManager';
 import {
   applyRigLodDetailTier,
   computeEntityLodTier,
@@ -409,18 +412,26 @@ export interface QuadrupedAnimState {
   headY: number;
   tailX: number;
   tailZ: number;
+  tailVelX: number;
+  tailVelZ: number;
+  prevYaw: number;
+  yawRate: number;
   kinematicAccumDt: number;
 }
 
-function createDefaultQuadrupedState(): QuadrupedAnimState {
+function createDefaultQuadrupedState(initialYaw = 0): QuadrupedAnimState {
   return {
     speedBlend: 0,
     legX: [0, 0, 0, 0],
     kneeX: [0.04, 0.04, 0.04, 0.04],
     headX: 0.56,
     headY: 0,
-    tailX: -0.04,
+    tailX: -0.06,
     tailZ: 0,
+    tailVelX: 0,
+    tailVelZ: 0,
+    prevYaw: initialYaw,
+    yawRate: 0,
     kinematicAccumDt: 0,
   };
 }
@@ -572,6 +583,7 @@ export class RamayanaWorldEngine {
   private textures: ProceduralTextures | null = null;
   private poolManager: ObjectPoolManager;
   private occlusionManager = new OcclusionCullingManager();
+  private qualityManager: QualityManager;
   private lodCache: MobileLodAssetCache | null = null;
   private loadAbort = new AbortController();
   private worldReady = false;
@@ -580,6 +592,8 @@ export class RamayanaWorldEngine {
   private assetStage = 'Initializing realm...';
   private blipPool: RadarBlip[] = [];
   private activeBlips: RadarBlip[] = [];
+  private hudBlipsSnapshot: RadarBlip[] = [];
+  private lastHudKey = '';
   private hemiLight: THREE.HemisphereLight;
   private giLightProbe: THREE.LightProbe;
   private bounceLight: THREE.DirectionalLight;
@@ -589,7 +603,19 @@ export class RamayanaWorldEngine {
   private heroFillLight: THREE.PointLight;
   private combatLight: THREE.PointLight;
   private volcanoGlowLight: THREE.PointLight;
+  private sabhaBounceLight: THREE.RectAreaLight | null = null;
+  private palaceBounceLight: THREE.RectAreaLight | null = null;
   private isSoftwareGl: boolean;
+  private shivlingWaterUniforms: { uTime: { value: number } } | null = null;
+  private lampHaloPoints: THREE.Points | null = null;
+  private lampHaloUniforms: { uOpacity: { value: number } } | null = null;
+  private starCountMax = 2400;
+  private ffCountMax = 190;
+  private volcanicBombCountMax = 48;
+  private volcanicSmokeCountMax = 72;
+  private riverFishCountMax = 240;
+  private stepwellKoiCountMax = 22;
+  private tabPaused = false;
   private lampCoords: [number, number][] = [];
   private torchFlamesOuter: THREE.InstancedMesh | null = null;
   private torchFlamesCore: THREE.InstancedMesh | null = null;
@@ -751,6 +777,7 @@ export class RamayanaWorldEngine {
   private mountedChariotIndex: number | null = null;
   private mountedAnimalIndex: number | null = null;
   private composer: EffectComposer | null = null;
+  private composerRenderTarget: THREE.WebGLRenderTarget | null = null;
   private underwaterPass: ShaderPass | null = null;
   private underwaterSoftwareQuad: THREE.Mesh | null = null;
   private skyUniforms: {
@@ -784,6 +811,7 @@ export class RamayanaWorldEngine {
   private autoDriveActive = false;
   private stealthActive = false;
   private stealthSpotted = false;
+  private stealthRootMatsCache = new Map<THREE.Object3D, THREE.Material[]>();
   private stealthMaterialCache = new Map<
     THREE.Material,
     {
@@ -853,24 +881,29 @@ export class RamayanaWorldEngine {
       }
     })();
 
-    const nativePixelRatio = this.isSoftwareGl
-      ? 1
-      : Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    this.qualityManager = new QualityManager(this.isSoftwareGl);
+    const initProfile = this.qualityManager.getProfile();
+    const initialPixelRatio = this.getEffectivePixelRatio(initProfile);
+
     this.renderer = new THREE.WebGLRenderer({
-      antialias: !this.isSoftwareGl,
+      antialias: !this.isSoftwareGl && initProfile.tier !== 'LOW',
       powerPreference: 'high-performance',
+      alpha: false,
+      stencil: false,
+      preserveDrawingBuffer: false,
     });
     this.maxAnisotropy = Math.max(1, this.renderer.capabilities.getMaxAnisotropy());
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMapping = initProfile.toneMapping;
     this.renderer.toneMappingExposure = 1.05;
-    this.renderer.setPixelRatio(nativePixelRatio);
+    this.renderer.setPixelRatio(initialPixelRatio);
     this.renderer.setSize(
       container.clientWidth || window.innerWidth,
       container.clientHeight || window.innerHeight
     );
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = initProfile.shadowType;
+    this.renderer.shadowMap.autoUpdate = initProfile.tier !== 'LOW';
     this.renderer.domElement.style.display = 'block';
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
@@ -887,18 +920,18 @@ export class RamayanaWorldEngine {
       this.emitHud();
     });
 
-    // Scene, thick misty atmospheric fog & matched horizon sky dome
+    // Scene, linear distance fog & matched horizon sky dome
     this.scene = new THREE.Scene();
     const mistColor = new THREE.Color(0xc8c2b9);
     this.scene.background = mistColor;
-    this.scene.fog = new THREE.FogExp2(0xc8c2b9, 0.0086);
+    this.scene.fog = new THREE.Fog(0xc8c2b9, 44, 340 * initProfile.fogFarScale);
 
     this.camera = new THREE.PerspectiveCamera(
       58,
       (container.clientWidth || window.innerWidth) /
         (container.clientHeight || window.innerHeight),
       0.5,
-      850
+      initProfile.cameraFar
     );
 
     // Synchronous lightweight sky & studio lights so Title frame renders immediately at 60 FPS while heavy realm geometry streams in
@@ -922,9 +955,8 @@ export class RamayanaWorldEngine {
     this.keyLight = new THREE.DirectionalLight(0xfff1d6, 2.25);
     this.keyLight.position.set(48, 72, 36);
     this.keyLight.castShadow = !this.isSoftwareGl;
-    const shadowSize = this.isSoftwareGl ? 1024 : 2048;
-    this.keyLight.shadow.mapSize.set(shadowSize, shadowSize);
-    const d = 22;
+    this.keyLight.shadow.mapSize.set(initProfile.keyShadowSize, initProfile.keyShadowSize);
+    const d = initProfile.shadowFrustumHalf;
     this.keyLight.shadow.camera.left = -d;
     this.keyLight.shadow.camera.right = d;
     this.keyLight.shadow.camera.top = d;
@@ -942,10 +974,11 @@ export class RamayanaWorldEngine {
     this.scene.add(this.rimLight);
     this.scene.add(this.rimLight.target);
 
-    // Secondary Dynamic Shadow-Casting SpotLight for nearest active Street Lamp / Torch flame at night (disabled in daytime for 60 FPS)
+    // Secondary Dynamic Shadow-Casting SpotLight for nearest active Street Lamp / Torch flame at night (disabled in daytime & LOW tier)
     this.torchShadowLight = new THREE.SpotLight(0xff9b38, 0, 28, Math.PI * 0.44, 0.6, 1.4);
     this.torchShadowLight.castShadow = false;
-    this.torchShadowLight.shadow.mapSize.set(this.isSoftwareGl ? 512 : 1024, this.isSoftwareGl ? 512 : 1024);
+    const initTorchShadowSize = Math.max(256, initProfile.torchShadowSize || 512);
+    this.torchShadowLight.shadow.mapSize.set(initTorchShadowSize, initTorchShadowSize);
     this.torchShadowLight.shadow.camera.near = 0.4;
     this.torchShadowLight.shadow.camera.far = 28;
     this.torchShadowLight.shadow.bias = -0.00025;
@@ -953,17 +986,19 @@ export class RamayanaWorldEngine {
     this.scene.add(this.torchShadowLight);
     this.scene.add(this.torchShadowLight.target);
 
-    // Warm Architectural Bounce RectAreaLights inside Sabha & Palace portals (hardware GPU)
+    // Warm Architectural Bounce RectAreaLights inside Sabha & Palace portals (hardware GPU, HIGH/MEDIUM)
     if (!this.isSoftwareGl) {
-      const sabhaBounce = new THREE.RectAreaLight(0xffcfa0, 2.2, 8.5, 4.0);
-      sabhaBounce.position.set(SABHA_HALL_POS.x, groundHeightAt(SABHA_HALL_POS.x, SABHA_HALL_POS.z) + 4.4, SABHA_HALL_POS.z);
-      sabhaBounce.lookAt(SABHA_HALL_POS.x, 0, SABHA_HALL_POS.z);
-      this.scene.add(sabhaBounce);
+      this.sabhaBounceLight = new THREE.RectAreaLight(0xffcfa0, 2.2, 8.5, 4.0);
+      this.sabhaBounceLight.position.set(SABHA_HALL_POS.x, groundHeightAt(SABHA_HALL_POS.x, SABHA_HALL_POS.z) + 4.4, SABHA_HALL_POS.z);
+      this.sabhaBounceLight.lookAt(SABHA_HALL_POS.x, 0, SABHA_HALL_POS.z);
+      this.sabhaBounceLight.visible = initProfile.tier !== 'LOW';
+      this.scene.add(this.sabhaBounceLight);
 
-      const palaceBounce = new THREE.RectAreaLight(0xffd4a8, 2.0, 9.0, 4.2);
-      palaceBounce.position.set(PALACE_CORE_POS.x, groundHeightAt(PALACE_CORE_POS.x, PALACE_CORE_POS.z) + 4.6, PALACE_CORE_POS.z);
-      palaceBounce.lookAt(PALACE_CORE_POS.x, 0, PALACE_CORE_POS.z);
-      this.scene.add(palaceBounce);
+      this.palaceBounceLight = new THREE.RectAreaLight(0xffd4a8, 2.0, 9.0, 4.2);
+      this.palaceBounceLight.position.set(PALACE_CORE_POS.x, groundHeightAt(PALACE_CORE_POS.x, PALACE_CORE_POS.z) + 4.6, PALACE_CORE_POS.z);
+      this.palaceBounceLight.lookAt(PALACE_CORE_POS.x, 0, PALACE_CORE_POS.z);
+      this.palaceBounceLight.visible = initProfile.tier !== 'LOW';
+      this.scene.add(this.palaceBounceLight);
     }
 
     // Subtle dynamic ground/lamp warm bounce light near Lord Ram for muscular definition
@@ -986,30 +1021,12 @@ export class RamayanaWorldEngine {
       this.nightLampLights.push(lp);
     }
 
-    // Underwater Post-Processing Volume (Native-Resolution MSAA EffectComposer + UnderwaterVolumeShader + OutputPass;
-    // zero Bloom or Depth-of-Field blur passes). Direct hardware MSAA backbuffer is used above water.
+    // Underwater Post-Processing Volume (Adaptive MSAA/resolution EffectComposer + UnderwaterVolumeShader + OutputPass).
+    // Direct hardware backbuffer is used above water so zero fullscreen post-pass overhead occurs unless submerged.
     const rtWidth = container.clientWidth || window.innerWidth;
     const rtHeight = container.clientHeight || window.innerHeight;
     if (!this.isSoftwareGl) {
-      const maxSamples = this.renderer.capabilities.maxSamples || 4;
-      const msaaSamples = Math.min(8, Math.max(4, maxSamples));
-      const renderTarget = new THREE.WebGLRenderTarget(
-        Math.max(1, Math.floor(rtWidth * nativePixelRatio)),
-        Math.max(1, Math.floor(rtHeight * nativePixelRatio)),
-        {
-          type: THREE.HalfFloatType,
-          samples: msaaSamples,
-          minFilter: THREE.LinearFilter,
-          magFilter: THREE.LinearFilter,
-        }
-      );
-      this.composer = new EffectComposer(this.renderer, renderTarget);
-      this.composer.setPixelRatio(nativePixelRatio);
-      this.composer.setSize(rtWidth, rtHeight);
-      this.composer.addPass(new RenderPass(this.scene, this.camera));
-      this.underwaterPass = new ShaderPass(UnderwaterVolumeShader);
-      this.composer.addPass(this.underwaterPass);
-      this.composer.addPass(new OutputPass());
+      this.rebuildUnderwaterComposer(rtWidth, rtHeight, initProfile);
     } else {
       const swOverlayMat = new THREE.ShaderMaterial({
         uniforms: {
@@ -1064,9 +1081,150 @@ export class RamayanaWorldEngine {
     this.poolManager = new ObjectPoolManager(this.scene);
 
     window.addEventListener('resize', this.handleResize);
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
     this.emitHud();
     this.startLoop();
     void this.initializeWorldAsync();
+  }
+
+  private getEffectivePixelRatio(profile: QualityProfile): number {
+    if (this.isSoftwareGl) return 1;
+    if (profile.pixelRatioCap < 1) return profile.pixelRatioCap;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    return Math.min(dpr, profile.pixelRatioCap);
+  }
+
+  private handleVisibilityChange = (): void => {
+    const hidden = typeof document !== 'undefined' && document.hidden;
+    this.tabPaused = hidden;
+    if (!hidden) {
+      this.clock.getDelta();
+      this.qualityManager.resetFrameMetrics(2.5);
+    }
+  };
+
+  private rebuildUnderwaterComposer(
+    width: number,
+    height: number,
+    profile: QualityProfile
+  ): void {
+    if (this.isSoftwareGl) return;
+    const w = Math.max(64, Math.floor(width * profile.underwaterScale));
+    const h = Math.max(64, Math.floor(height * profile.underwaterScale));
+    const prevSub = this.underwaterPass ? this.underwaterPass.uniforms.uSubmerged.value : 0.0;
+    const prevDepth = this.underwaterPass ? this.underwaterPass.uniforms.uDepthFactor.value : 0.0;
+    const prevDay = this.underwaterPass ? this.underwaterPass.uniforms.uDaylight.value : this.daylightFactor;
+
+    this.composer?.dispose();
+    this.composerRenderTarget?.dispose();
+
+    const rt = new THREE.WebGLRenderTarget(w, h, {
+      type: profile.composerHalfFloat ? THREE.HalfFloatType : THREE.UnsignedByteType,
+      samples: profile.composerSamples,
+    });
+    this.composerRenderTarget = rt;
+
+    const composer = new EffectComposer(this.renderer, rt);
+    composer.setPixelRatio(this.getEffectivePixelRatio(profile));
+    composer.setSize(w, h);
+    composer.addPass(new RenderPass(this.scene, this.camera));
+
+    const uwPass = new ShaderPass(UnderwaterVolumeShader);
+    uwPass.uniforms.uSubmerged.value = prevSub;
+    uwPass.uniforms.uDepthFactor.value = prevDepth;
+    uwPass.uniforms.uDaylight.value = prevDay;
+    composer.addPass(uwPass);
+    composer.addPass(new OutputPass());
+
+    this.composer = composer;
+    this.underwaterPass = uwPass;
+  }
+
+  private applyQualityProfile(profile: QualityProfile): void {
+    const width = this.container.clientWidth || window.innerWidth;
+    const height = this.container.clientHeight || window.innerHeight;
+    const pr = this.getEffectivePixelRatio(profile);
+
+    this.renderer.setPixelRatio(pr);
+    this.renderer.setSize(width, height);
+    this.renderer.toneMapping = profile.toneMapping;
+    this.renderer.shadowMap.type = profile.shadowType;
+    this.renderer.shadowMap.autoUpdate = profile.tier !== 'LOW';
+    this.renderer.shadowMap.needsUpdate = true;
+
+    if (Math.abs(this.camera.far - profile.cameraFar) > 1) {
+      this.camera.far = profile.cameraFar;
+      this.camera.updateProjectionMatrix();
+    }
+
+    if (this.keyLight.shadow.mapSize.width !== profile.keyShadowSize) {
+      this.keyLight.shadow.map?.dispose();
+      this.keyLight.shadow.map = null;
+      this.keyLight.shadow.mapSize.set(profile.keyShadowSize, profile.keyShadowSize);
+    }
+    const frustumHalf = profile.shadowFrustumHalf;
+    if (this.keyLight.shadow.camera.right !== frustumHalf) {
+      this.keyLight.shadow.camera.left = -frustumHalf;
+      this.keyLight.shadow.camera.right = frustumHalf;
+      this.keyLight.shadow.camera.top = frustumHalf;
+      this.keyLight.shadow.camera.bottom = -frustumHalf;
+      this.keyLight.shadow.camera.updateProjectionMatrix();
+    }
+
+    if (profile.torchShadowEnabled && !this.isSoftwareGl) {
+      const tSize = Math.max(256, profile.torchShadowSize);
+      if (this.torchShadowLight.shadow.mapSize.width !== tSize) {
+        this.torchShadowLight.shadow.map?.dispose();
+        this.torchShadowLight.shadow.map = null;
+        this.torchShadowLight.shadow.mapSize.set(tSize, tSize);
+      }
+    } else {
+      this.torchShadowLight.castShadow = false;
+      this.torchShadowLight.intensity = 0;
+    }
+
+    if (this.sabhaBounceLight) {
+      this.sabhaBounceLight.visible = profile.tier !== 'LOW';
+    }
+    if (this.palaceBounceLight) {
+      this.palaceBounceLight.visible = profile.tier !== 'LOW';
+    }
+
+    this.textures?.setAnisotropy(Math.min(this.maxAnisotropy, profile.anisotropyCap));
+
+    if (!this.isSoftwareGl) {
+      this.rebuildUnderwaterComposer(width, height, profile);
+    }
+
+    const pScale = profile.particleScale;
+    if (this.starPoints) {
+      this.starPoints.geometry.setDrawRange(0, Math.max(1, Math.round(this.starCountMax * pScale)));
+    }
+    if (this.fireflyPoints) {
+      this.fireflyPoints.geometry.setDrawRange(0, Math.max(1, Math.round(this.ffCountMax * pScale)));
+    }
+    if (this.volcanicBombMesh) {
+      this.volcanicBombMesh.count = Math.max(1, Math.round(this.volcanicBombCountMax * pScale));
+    }
+    if (this.volcanicSmokeMesh) {
+      this.volcanicSmokeMesh.count = Math.max(1, Math.round(this.volcanicSmokeCountMax * pScale));
+    }
+    if (this.riverFishMesh) {
+      this.riverFishMesh.count = Math.max(1, Math.round(this.riverFishCountMax * pScale));
+    }
+    if (this.stepwellKoiMesh) {
+      this.stepwellKoiMesh.count = Math.max(1, Math.round(this.stepwellKoiCountMax * pScale));
+    }
+
+    this.updateAtmosphericMood();
+  }
+
+  public setQualityMode(mode: QualityMode): void {
+    const changedTier = this.qualityManager.setMode(mode);
+    if (changedTier !== null) {
+      this.applyQualityProfile(this.qualityManager.getProfile());
+    }
+    this.emitHud();
   }
 
   private yieldToMainThread(): Promise<void> {
@@ -1099,10 +1257,14 @@ export class RamayanaWorldEngine {
       this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
       pmrem.dispose();
 
+      const initProfile = this.qualityManager.getProfile();
       let lastHudTs = 0;
       const loadedTextures = await createProceduralTexturesAsync(this.renderer, this.isSoftwareGl, {
         signal,
         frameBudgetMs: this.isSoftwareGl ? 10 : 6,
+        textureSize: initProfile.textureSize,
+        maxAnisotropy: initProfile.anisotropyCap,
+        skipNonEssentialMipmaps: initProfile.skipNonEssentialMipmaps,
         onProgress: (frac, label) => {
           if (isAborted()) return;
           this.assetProgress = 6 + frac * 46;
@@ -1140,6 +1302,7 @@ export class RamayanaWorldEngine {
       if (!(await reportStage(91, 'Prewarming projectile & entity object pools'))) return;
       this.initObjectPools();
       this.resetWorldEntities();
+      this.applyQualityProfile(this.qualityManager.getProfile());
 
       if (!(await reportStage(95, 'Compiling PBR shaders asynchronously'))) return;
       if (!this.isSoftwareGl && typeof this.renderer.compileAsync === 'function') {
@@ -1151,7 +1314,8 @@ export class RamayanaWorldEngine {
 
       this.worldReady = true;
       this.assetProgress = 100;
-      this.assetStage = 'Ayodhya Ready';
+      this.assetStage = 'Loading 100% Successful';
+      this.qualityManager.resetFrameMetrics(3.5);
       if (this.pendingPlayOnReady) {
         this.pendingPlayOnReady = false;
         this.mode = 'PLAYING';
@@ -1211,6 +1375,12 @@ export class RamayanaWorldEngine {
       const st = rig.steeds[s];
       st.headPivot.rotation.set(0, 0, 0);
       st.tailGroup.rotation.set(0, 0, 0);
+      for (let t = 0; t < st.tailChains.length; t++) {
+        const ch = st.tailChains[t];
+        ch[0].rotation.set(0, 0, 0);
+        ch[1].rotation.set(0, 0, 0);
+        ch[2].rotation.set(0, 0, 0);
+      }
     }
   }
 
@@ -1622,7 +1792,20 @@ export class RamayanaWorldEngine {
   private enforcePbrAndAnisotropy(root: THREE.Object3D): void {
     if (root.userData._pbrTuned) return;
     root.userData._pbrTuned = true;
-    const maxAniso = this.maxAnisotropy;
+    const maxAniso = Math.min(
+      this.maxAnisotropy,
+      this.qualityManager.getProfile().anisotropyCap
+    );
+    const tuneTex = (tex: THREE.Texture | null | undefined) => {
+      if (!tex) return;
+      if (tex.generateMipmaps) {
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+      } else {
+        tex.minFilter = THREE.LinearFilter;
+      }
+      tex.magFilter = THREE.LinearFilter;
+      tex.anisotropy = Math.min(tex.anisotropy || maxAniso, maxAniso);
+    };
     root.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       if (!mesh.material) return;
@@ -1631,11 +1814,11 @@ export class RamayanaWorldEngine {
         const m = mats[i] as THREE.MeshPhysicalMaterial;
         if (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) {
           m.envMapIntensity = Math.max(1.0, m.envMapIntensity || 1.0);
-          if (m.map) { m.map.generateMipmaps = true; m.map.minFilter = THREE.LinearMipmapLinearFilter; m.map.magFilter = THREE.LinearFilter; m.map.anisotropy = maxAniso; }
-          if (m.normalMap) { m.normalMap.generateMipmaps = true; m.normalMap.minFilter = THREE.LinearMipmapLinearFilter; m.normalMap.magFilter = THREE.LinearFilter; m.normalMap.anisotropy = maxAniso; }
-          if (m.roughnessMap) { m.roughnessMap.generateMipmaps = true; m.roughnessMap.minFilter = THREE.LinearMipmapLinearFilter; m.roughnessMap.magFilter = THREE.LinearFilter; m.roughnessMap.anisotropy = maxAniso; }
-          if (m.metalnessMap) { m.metalnessMap.generateMipmaps = true; m.metalnessMap.minFilter = THREE.LinearMipmapLinearFilter; m.metalnessMap.magFilter = THREE.LinearFilter; m.metalnessMap.anisotropy = maxAniso; }
-          if (m.emissiveMap) { m.emissiveMap.generateMipmaps = true; m.emissiveMap.minFilter = THREE.LinearMipmapLinearFilter; m.emissiveMap.magFilter = THREE.LinearFilter; m.emissiveMap.anisotropy = maxAniso; }
+          tuneTex(m.map);
+          tuneTex(m.normalMap);
+          tuneTex(m.roughnessMap);
+          tuneTex(m.metalnessMap);
+          tuneTex(m.emissiveMap);
         }
       }
     });
@@ -1745,7 +1928,10 @@ export class RamayanaWorldEngine {
         lctx.fill();
       });
     }
-    const maxAniso = Math.max(1, this.renderer.capabilities.getMaxAnisotropy());
+    const maxAniso = Math.min(
+      this.maxAnisotropy,
+      this.qualityManager.getProfile().anisotropyCap
+    );
     const lunarTex = new THREE.CanvasTexture(lunarCanvas);
     lunarTex.colorSpace = THREE.SRGBColorSpace;
     lunarTex.generateMipmaps = true;
@@ -2210,6 +2396,7 @@ export class RamayanaWorldEngine {
 
     // Colossal Central Monumental Statue of Lord Mahadev with Black Shivling Base at (0, 0)
     const mahadev = createMahadevStatueModel(textures, 0, 0);
+    this.shivlingWaterUniforms = mahadev.waterUniforms;
     const mahadevBaseY = groundHeightAt(0, 0);
     const mahadevLod = wrapMahadevWithLod(mahadev.group, 0, 0, this.lodCache!);
     mahadevLod.autoUpdate = false;
@@ -2946,7 +3133,7 @@ export class RamayanaWorldEngine {
       metalness: 0.2,
     });
     const koiCount = 22;
-    this.stepwellKoiMesh = new THREE.InstancedMesh(fishGeo.clone(), koiMat, koiCount);
+    this.stepwellKoiMesh = new THREE.InstancedMesh(fishGeo, koiMat, koiCount);
     this.stepwellKoiMesh.frustumCulled = false;
     this.stepwellKoiAgents = [];
     for (let i = 0; i < koiCount; i++) {
@@ -3876,6 +4063,48 @@ export class RamayanaWorldEngine {
     embers.frustumCulled = false;
     this.scene.add(embers, this.torchFlamesOuter, this.torchFlamesCore);
     this.lockStaticHierarchy(embers);
+
+    // Single-draw-call Warm Amber Emissive Glow Halos at every lamp & palace torch so night lamps stay warm when PointLights are pooled
+    const haloCount = this.torchFlameAnchors.length;
+    if (haloCount > 0) {
+      const haloPos = new Float32Array(haloCount * 3);
+      for (let i = 0; i < haloCount; i++) {
+        const a = this.torchFlameAnchors[i];
+        haloPos[i * 3] = a.x;
+        haloPos[i * 3 + 1] = a.y + 0.18;
+        haloPos[i * 3 + 2] = a.z;
+      }
+      const haloGeo = new THREE.BufferGeometry();
+      haloGeo.setAttribute('position', new THREE.BufferAttribute(haloPos, 3));
+      this.lampHaloUniforms = { uOpacity: { value: 0 } };
+      const haloMat = new THREE.ShaderMaterial({
+        uniforms: this.lampHaloUniforms,
+        vertexShader: /* glsl */ `
+          void main() {
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = clamp(180.0 / max(2.0, -mvPosition.z), 4.0, 42.0);
+            gl_Position = projectionMatrix * mvPosition;
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform float uOpacity;
+          void main() {
+            vec2 c = gl_PointCoord - vec2(0.5);
+            float d = length(c) * 2.0;
+            if (d > 1.0) discard;
+            float aura = pow(1.0 - d, 2.2);
+            gl_FragColor = vec4(1.0, 0.62, 0.2, aura * uOpacity);
+          }
+        `,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      this.lampHaloPoints = new THREE.Points(haloGeo, haloMat);
+      this.lampHaloPoints.frustumCulled = false;
+      this.lampHaloPoints.visible = false;
+      this.scene.add(this.lampHaloPoints);
+    }
   }
 
   private createWaypointBeacon(): THREE.Group {
@@ -4033,7 +4262,7 @@ export class RamayanaWorldEngine {
         yaw: tpl.homeYaw,
         speed: 0,
         gaitPhase: 0,
-        animState: createDefaultQuadrupedState(),
+        animState: createDefaultQuadrupedState(tpl.homeYaw),
       };
     });
 
@@ -4059,7 +4288,7 @@ export class RamayanaWorldEngine {
         pitch: 0,
         speed: 0,
         gaitPhase: 0,
-        steedStates: rig.steeds.map(() => createDefaultQuadrupedState()),
+        steedStates: rig.steeds.map(() => createDefaultQuadrupedState(sp.yaw)),
       });
     });
 
@@ -4380,6 +4609,7 @@ export class RamayanaWorldEngine {
       this.input.stealthTogglePressed = false;
       this.input.autoDriveTogglePressed = false;
       this.input.fireHeld = false;
+      this.qualityManager.resetFrameMetrics(2.5);
     }
     this.mode = nextMode;
     this.callbacks.onModeChange(nextMode);
@@ -5527,10 +5757,14 @@ export class RamayanaWorldEngine {
     mesh.scale.setScalar(0.5);
     this.blasts.push({ mesh, life: 0.36, maxLife: 0.36 });
 
-    // Dynamic fire-flash illumination on blast impact
-    this.combatLight.color.setHex(colorHex);
-    this.combatLight.position.set(x, y + 1.4, z);
-    this.combatLight.intensity = 10;
+    // Dynamic fire-flash illumination on blast impact (skip if far from camera)
+    const bDx = x - this.camera.position.x;
+    const bDz = z - this.camera.position.z;
+    if (bDx * bDx + bDz * bDz <= 14400) {
+      this.combatLight.color.setHex(colorHex);
+      this.combatLight.position.set(x, y + 1.4, z);
+      this.combatLight.intensity = 10;
+    }
   }
 
   private damageEnemy(enemy: EnemyEntity, amount: number): void {
@@ -5706,46 +5940,58 @@ export class RamayanaWorldEngine {
 
   private setStealthMode(enabled: boolean): void {
     const applyObj = (root: THREE.Object3D, shadowMesh: THREE.Mesh | undefined, active: boolean) => {
-      root.traverse((obj) => {
-        if (shadowMesh && obj === shadowMesh) return;
-        const mesh = obj as THREE.Mesh;
-        if (!mesh.isMesh || !mesh.material) return;
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        for (let i = 0; i < mats.length; i++) {
-          const mat = mats[i];
-          if (!this.stealthMaterialCache.has(mat)) {
-            const mAny = mat as THREE.MeshStandardMaterial;
-            this.stealthMaterialCache.set(mat, {
-              opacity: mat.opacity,
-              transparent: mat.transparent,
-              depthWrite: mat.depthWrite,
-              emissiveHex: mAny.emissive ? mAny.emissive.getHex() : 0,
-              emissiveIntensity:
-                typeof mAny.emissiveIntensity === 'number' ? mAny.emissiveIntensity : 0,
-            });
+      let cachedMats = this.stealthRootMatsCache.get(root);
+      if (!cachedMats) {
+        cachedMats = [];
+        root.traverse((obj) => {
+          if (shadowMesh && obj === shadowMesh) return;
+          const mesh = obj as THREE.Mesh;
+          if (!mesh.isMesh || !mesh.material) return;
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (let i = 0; i < mats.length; i++) {
+            const mat = mats[i];
+            if (!cachedMats!.includes(mat)) {
+              cachedMats!.push(mat);
+            }
           }
-          const orig = this.stealthMaterialCache.get(mat)!;
+        });
+        this.stealthRootMatsCache.set(root, cachedMats);
+      }
+
+      for (let i = 0; i < cachedMats.length; i++) {
+        const mat = cachedMats[i];
+        if (!this.stealthMaterialCache.has(mat)) {
           const mAny = mat as THREE.MeshStandardMaterial;
-          if (active) {
-            mat.transparent = true;
-            mat.opacity = 0.48;
-            mat.depthWrite = false;
-            if (mAny.emissive) {
-              mAny.emissive.setHex(0x4f78ff);
-              mAny.emissiveIntensity = 0.34;
-            }
-          } else {
-            mat.transparent = orig.transparent;
-            mat.opacity = orig.opacity;
-            mat.depthWrite = orig.depthWrite;
-            if (mAny.emissive) {
-              mAny.emissive.setHex(orig.emissiveHex);
-              mAny.emissiveIntensity = orig.emissiveIntensity;
-            }
-          }
-          mat.needsUpdate = true;
+          this.stealthMaterialCache.set(mat, {
+            opacity: mat.opacity,
+            transparent: mat.transparent,
+            depthWrite: mat.depthWrite,
+            emissiveHex: mAny.emissive ? mAny.emissive.getHex() : 0,
+            emissiveIntensity:
+              typeof mAny.emissiveIntensity === 'number' ? mAny.emissiveIntensity : 0,
+          });
         }
-      });
+        const orig = this.stealthMaterialCache.get(mat)!;
+        const mAny = mat as THREE.MeshStandardMaterial;
+        if (active) {
+          mat.transparent = true;
+          mat.opacity = 0.48;
+          mat.depthWrite = false;
+          if (mAny.emissive) {
+            mAny.emissive.setHex(0x4f78ff);
+            mAny.emissiveIntensity = 0.34;
+          }
+        } else {
+          mat.transparent = orig.transparent;
+          mat.opacity = orig.opacity;
+          mat.depthWrite = orig.depthWrite;
+          if (mAny.emissive) {
+            mAny.emissive.setHex(orig.emissiveHex);
+            mAny.emissiveIntensity = orig.emissiveIntensity;
+          }
+        }
+        mat.needsUpdate = true;
+      }
     };
 
     this.stealthActive = enabled;
@@ -5974,11 +6220,13 @@ export class RamayanaWorldEngine {
     elapsed: number,
     seed: number,
     state?: QuadrupedAnimState,
-    dt = 0.016
+    dt = 0.016,
+    entityYaw = 0
   ): void {
+    const safeDt = Math.min(0.05, Math.max(0.001, dt));
     const clampedTarget = THREE.MathUtils.clamp(speedNorm, 0, 1);
     const amp = state
-      ? (state.speedBlend = THREE.MathUtils.damp(state.speedBlend, clampedTarget, 8.5, dt))
+      ? (state.speedBlend = THREE.MathUtils.damp(state.speedBlend, clampedTarget, 8.5, safeDt))
       : clampedTarget;
     const moving = amp > 0.015;
 
@@ -5987,30 +6235,87 @@ export class RamayanaWorldEngine {
       Math.sin(elapsed * 1.65 + seed) * 0.045 +
       (moving ? Math.sin(gaitPhase) * 0.085 * amp : 0);
     const tHeadY = moving ? Math.cos(gaitPhase * 0.5 + seed) * 0.04 * amp : 0;
-    const tTailX =
-      -0.04 - 0.16 * amp + (moving ? Math.cos(gaitPhase * 2.0) * 0.05 * amp : 0);
-    const tTailZ = Math.sin(elapsed * 2.8 + seed) * (0.11 + 0.08 * amp);
+
+    // 2nd-order physics spring-damper for articulated horse tail hair strands (gravity + gallop + wind + centrifugal yaw whip)
+    let yawRate = 0;
+    if (state) {
+      const rawYawRate = shortestAngleDiff(state.prevYaw, entityYaw) / safeDt;
+      state.prevYaw = entityYaw;
+      state.yawRate = THREE.MathUtils.damp(state.yawRate, THREE.MathUtils.clamp(rawYawRate, -5.0, 5.0), 10.0, safeDt);
+      yawRate = state.yawRate;
+    }
+
+    const windGust =
+      Math.sin(elapsed * 2.1 + seed) * 0.055 +
+      Math.cos(elapsed * 4.3 + seed * 1.3) * 0.025 * (0.4 + amp);
+    const gallopImpulse = moving ? Math.cos(gaitPhase * 2.0) * 0.095 * amp : 0;
+    // Negative X rotates tail backwards along -Z behind horse's rump; gravity restores towards 0
+    const targetTailX = THREE.MathUtils.clamp(
+      -0.06 - 0.34 * amp + gallopImpulse + windGust,
+      -0.78,
+      0.04
+    );
+    const lateralWind =
+      Math.sin(elapsed * 2.5 + seed * 0.8) * (0.065 + 0.05 * amp) +
+      Math.cos(elapsed * 4.9 + seed) * 0.028 * amp;
+    const centrifugalWhip = THREE.MathUtils.clamp(-yawRate * 0.14 * (0.35 + amp), -0.45, 0.45);
+    const targetTailZ = lateralWind + centrifugalWhip;
+
+    let tailXAngle = targetTailX;
+    let tailZAngle = targetTailZ;
 
     if (state) {
-      state.headX = THREE.MathUtils.damp(state.headX, tHeadX, 11, dt);
-      state.headY = THREE.MathUtils.damp(state.headY, tHeadY, 11, dt);
-      state.tailX = THREE.MathUtils.damp(state.tailX, tTailX, 11, dt);
-      state.tailZ = THREE.MathUtils.damp(state.tailZ, tTailZ, 11, dt);
+      state.headX = THREE.MathUtils.damp(state.headX, tHeadX, 11, safeDt);
+      state.headY = THREE.MathUtils.damp(state.headY, tHeadY, 11, safeDt);
+
+      // Spring-damper integration (k = 68, c = 11.5)
+      const accX = -68.0 * (state.tailX - targetTailX) - 11.5 * state.tailVelX;
+      const accZ = -58.0 * (state.tailZ - targetTailZ) - 10.2 * state.tailVelZ;
+      state.tailVelX += accX * safeDt;
+      state.tailVelZ += accZ * safeDt;
+      state.tailX = THREE.MathUtils.clamp(state.tailX + state.tailVelX * safeDt, -0.92, 0.06);
+      state.tailZ = THREE.MathUtils.clamp(state.tailZ + state.tailVelZ * safeDt, -0.62, 0.62);
+      tailXAngle = state.tailX;
+      tailZAngle = state.tailZ;
+
       hr.headPivot.rotation.x = state.headX;
       hr.headPivot.rotation.y = state.headY;
-      hr.tailGroup.rotation.x = state.tailX;
-      hr.tailGroup.rotation.z = state.tailZ;
     } else {
       hr.headPivot.rotation.x = tHeadX;
       hr.headPivot.rotation.y = tHeadY;
-      hr.tailGroup.rotation.x = tTailX;
-      hr.tailGroup.rotation.z = tTailZ;
     }
 
-    for (let p = 0; p < hr.tailPlumes.length; p++) {
-      hr.tailPlumes[p].rotation.z =
-        (p - 2) * 0.075 + Math.sin(elapsed * 3.2 + seed + p * 0.5) * 0.06;
+    hr.tailGroup.rotation.x = tailXAngle;
+    hr.tailGroup.rotation.z = tailZAngle;
+
+    // Cascade traveling wind & gallop whip wave down all 5x3 articulated horse tail hair chains
+    const chains = hr.tailChains;
+    const chainVelImpulse = state ? state.tailVelX * 0.032 : 0;
+    const chainLatVelImpulse = state ? state.tailVelZ * 0.045 : 0;
+    for (let p = 0; p < chains.length; p++) {
+      const spread = p - 2;
+      const [seg0, seg1, seg2] = chains[p];
+      const phaseSeed = seed + p * 0.65;
+      const wave0 = Math.sin(elapsed * (3.2 + amp * 5.2) + phaseSeed) * (0.045 + amp * 0.08);
+      const wave1 = Math.sin(elapsed * (3.2 + amp * 5.2) - 0.85 + phaseSeed) * (0.065 + amp * 0.12);
+      const wave2 = Math.sin(elapsed * (3.2 + amp * 5.2) - 1.7 + phaseSeed) * (0.085 + amp * 0.16);
+      const swishZ1 = Math.sin(elapsed * (2.9 + amp * 3.8) - 0.6 + phaseSeed) * (0.04 + amp * 0.075);
+      const swishZ2 = Math.sin(elapsed * (2.9 + amp * 3.8) - 1.3 + phaseSeed) * (0.065 + amp * 0.11);
+
+      seg0.rotation.x = THREE.MathUtils.clamp(
+        -0.32 - Math.abs(spread) * 0.04 - amp * 0.24 + wave0 + chainVelImpulse,
+        -1.15,
+        0.04
+      );
+      seg0.rotation.z = spread * 0.075 + tailZAngle * 0.18;
+
+      seg1.rotation.x = THREE.MathUtils.clamp(0.14 - amp * 0.18 + wave1 - chainVelImpulse * 0.8, -0.58, 0.42);
+      seg1.rotation.z = swishZ1 + chainLatVelImpulse * 0.7;
+
+      seg2.rotation.x = THREE.MathUtils.clamp(0.12 - amp * 0.16 + wave2 - chainVelImpulse * 1.1, -0.68, 0.46);
+      seg2.rotation.z = swishZ2 + chainLatVelImpulse;
     }
+
     for (let ei = 0; ei < hr.ears.length; ei++) {
       hr.ears[ei].rotation.x = 0.25 + Math.sin(elapsed * 3.4 + seed + ei) * 0.08;
     }
@@ -6400,25 +6705,34 @@ export class RamayanaWorldEngine {
       this.fireflyUniforms.uTime.value = elapsed;
     }
 
+    if (this.shivlingWaterUniforms) {
+      const shivDistSq = this.playerX * this.playerX + this.playerZ * this.playerZ;
+      if (shivDistSq <= 19600) {
+        this.shivlingWaterUniforms.uTime.value = elapsed;
+      }
+    }
+
     // Animate Mountable Sacred Elephants & Royal Ashvas (visibility culled after camera lookAt)
     const pxIdle = this.playerX;
     const pzIdle = this.playerZ;
+    const profDistScale = this.qualityManager.getProfile().distanceCullScale;
+    const profDistScaleSq = profDistScale * profDistScale;
     for (let i = 0; i < this.animals.length; i++) {
       const a = this.animals[i];
       const dx = a.x - pxIdle;
       const dz = a.z - pzIdle;
       const dSq = dx * dx + dz * dz;
       const isMounted = i === this.mountedAnimalIndex;
-      if (!isMounted && dSq > 19600) continue;
+      if (!isMounted && dSq > 19600 * profDistScaleSq) continue;
       a.animState.kinematicAccumDt += dt;
-      if (!isMounted && dSq > 2500 && ((i + this.simFrameCounter) & 3) !== 0) continue;
+      if (!isMounted && dSq > 2500 * profDistScaleSq && ((i + this.simFrameCounter) & 3) !== 0) continue;
       const animDt = Math.min(0.12, a.animState.kinematicAccumDt);
       a.animState.kinematicAccumDt = 0;
 
       const moving = Math.abs(a.speed) > 0.35;
       if (a.horseRig) {
         const spdNorm = THREE.MathUtils.clamp(Math.abs(a.speed) / 16, 0, 1);
-        this.animateRoyalHorseRig(a.horseRig, a.gaitPhase, spdNorm, elapsed, i * 1.7, a.animState, animDt);
+        this.animateRoyalHorseRig(a.horseRig, a.gaitPhase, spdNorm, elapsed, i * 1.7, a.animState, animDt, a.yaw);
       } else if (a.elephantRig) {
         const er = a.elephantRig;
         a.animState.speedBlend = THREE.MathUtils.damp(a.animState.speedBlend, moving ? 1 : 0, 7.5, animDt);
@@ -6441,11 +6755,11 @@ export class RamayanaWorldEngine {
       if (i === this.mountedChariotIndex) continue;
       const ch = this.chariots[i];
       const dSq = (ch.x - pxIdle) * (ch.x - pxIdle) + (ch.z - pzIdle) * (ch.z - pzIdle);
-      if (dSq > 8100) continue;
+      if (dSq > 8100 * profDistScaleSq) continue;
       for (let sIdx = 0; sIdx < ch.rig.steeds.length; sIdx++) {
         const st = ch.steedStates[sIdx];
         st.kinematicAccumDt += dt;
-        if (dSq > 2500 && ((i + this.simFrameCounter) & 3) !== 0) continue;
+        if (dSq > 2500 * profDistScaleSq && ((i + this.simFrameCounter) & 3) !== 0) continue;
         const sDt = Math.min(0.12, st.kinematicAccumDt);
         st.kinematicAccumDt = 0;
         this.animateRoyalHorseRig(
@@ -6455,7 +6769,8 @@ export class RamayanaWorldEngine {
           elapsed,
           i * 3.1 + sIdx * 1.4,
           st,
-          sDt
+          sDt,
+          ch.yaw
         );
       }
     }
@@ -6766,7 +7081,8 @@ export class RamayanaWorldEngine {
           elapsed,
           (this.mountedChariotIndex ?? 0) * 3.1 + sIdx * 1.4,
           ch.steedStates[sIdx],
-          dt
+          dt,
+          ch.yaw
         );
       }
 
@@ -7294,9 +7610,13 @@ export class RamayanaWorldEngine {
       p.mesh.position.set(p.x, p.y, p.z);
       if (p.spinPivot) {
         p.spinPivot.rotation.y += dt * 26;
-        this.combatLight.color.setHex(0xff6b1c);
-        this.combatLight.position.set(p.x, p.y + 0.4, p.z);
-        this.combatLight.intensity = 6.5;
+        const cDx = p.x - camX;
+        const cDz = p.z - camZ;
+        if (cDx * cDx + cDz * cDz <= 14400) {
+          this.combatLight.color.setHex(0xff6b1c);
+          this.combatLight.position.set(p.x, p.y + 0.4, p.z);
+          this.combatLight.intensity = 6.5;
+        }
       }
 
       if (p.life <= 0) {
@@ -8320,12 +8640,17 @@ export class RamayanaWorldEngine {
       }
     }
 
-    this.combatLight.intensity = THREE.MathUtils.damp(
-      this.combatLight.intensity,
-      0,
-      9.0,
-      dt
-    );
+    if (this.combatLight.intensity > 0.005) {
+      this.combatLight.intensity = THREE.MathUtils.damp(
+        this.combatLight.intensity,
+        0,
+        9.0,
+        dt
+      );
+      if (this.combatLight.intensity <= 0.005) {
+        this.combatLight.intensity = 0;
+      }
+    }
     this.updateDynamicHeroLighting(this.camYaw);
     this.updateNightLampsPool(elapsed);
 
@@ -8418,8 +8743,8 @@ export class RamayanaWorldEngine {
     this.camera.lookAt(this.camSmoothLook);
 
     // 10b. Post-Camera Occlusion Culling, Entity Detail LOD & Transform Sync
-    const fog = this.scene.fog as THREE.FogExp2 | null;
-    this.occlusionManager.prepareCullingBasis(this.camera, fog ? fog.density : 0.0044);
+    const fog = this.scene.fog as THREE.Fog | null;
+    this.occlusionManager.prepareCullingBasis(this.camera, fog ? fog.far : 280, true);
 
     for (let i = 0; i < this.enemies.length; i++) {
       const e = this.enemies[i];
@@ -8427,7 +8752,12 @@ export class RamayanaWorldEngine {
       const dSq =
         (e.x - this.playerX) * (e.x - this.playerX) +
         (e.z - this.playerZ) * (e.z - this.playerZ);
-      const tier = computeEntityLodTier(dSq);
+      const tier = computeEntityLodTier(
+        dSq,
+        1600 * profDistScaleSq,
+        6724 * profDistScaleSq,
+        15625 * profDistScaleSq
+      );
       const vis =
         tier !== 'CULLED' &&
         this.occlusionManager.isSphereVisible(
@@ -8435,7 +8765,7 @@ export class RamayanaWorldEngine {
           e.y + 1.05,
           e.z,
           e.isCommander ? 1.85 : 1.45,
-          15625,
+          15625 * profDistScaleSq,
           144
         );
       e.rig.root.visible = vis;
@@ -8455,8 +8785,13 @@ export class RamayanaWorldEngine {
         (c.x - this.playerX) * (c.x - this.playerX) +
         (c.z - this.playerZ) * (c.z - this.playerZ);
       const isCouncil = this.ascensionActive && c.courtSeat !== null;
-      const maxRange = isCouncil ? 15625 : 11025;
-      const tier = computeEntityLodTier(dSq, 1600, 6724, maxRange);
+      const maxRange = (isCouncil ? 15625 : 11025) * profDistScaleSq;
+      const tier = computeEntityLodTier(
+        dSq,
+        1600 * profDistScaleSq,
+        6724 * profDistScaleSq,
+        maxRange
+      );
       const vis =
         tier !== 'CULLED' &&
         this.occlusionManager.isSphereVisible(
@@ -8489,7 +8824,13 @@ export class RamayanaWorldEngine {
       const dSq =
         (a.x - this.playerX) * (a.x - this.playerX) +
         (a.z - this.playerZ) * (a.z - this.playerZ);
-      const tier = computeEntityLodTier(dSq, 2500, 8100, 19600);
+      const maxAnRange = 19600 * profDistScaleSq;
+      const tier = computeEntityLodTier(
+        dSq,
+        2500 * profDistScaleSq,
+        8100 * profDistScaleSq,
+        maxAnRange
+      );
       const isEle = a.kind === 'ELEPHANT';
       const vis =
         tier !== 'CULLED' &&
@@ -8498,7 +8839,7 @@ export class RamayanaWorldEngine {
           a.y + (isEle ? 1.8 : 1.15),
           a.z,
           isEle ? 2.9 : 1.9,
-          19600,
+          maxAnRange,
           196
         );
       obj.visible = vis;
@@ -8518,7 +8859,13 @@ export class RamayanaWorldEngine {
       const dSq =
         (ch.x - this.playerX) * (ch.x - this.playerX) +
         (ch.z - this.playerZ) * (ch.z - this.playerZ);
-      const tier = computeEntityLodTier(dSq, 2500, 8100, 19600);
+      const maxChRange = 19600 * profDistScaleSq;
+      const tier = computeEntityLodTier(
+        dSq,
+        2500 * profDistScaleSq,
+        8100 * profDistScaleSq,
+        maxChRange
+      );
       const vis =
         tier !== 'CULLED' &&
         this.occlusionManager.isSphereVisible(
@@ -8526,7 +8873,7 @@ export class RamayanaWorldEngine {
           ch.y + 1.4,
           ch.z,
           3.8,
-          19600,
+          maxChRange,
           256
         );
       ch.rig.root.visible = vis;
@@ -8680,11 +9027,13 @@ export class RamayanaWorldEngine {
 
   private stepVolcanicAtmosphere(dt: number): void {
     const camDistToVolcano = this.camera.position.x - DEMON_ZONE_MIN_X;
+    this.volcanoGlowLight.visible = camDistToVolcano >= -420;
     if (camDistToVolcano < -750 || (this.volcanicBombMesh && this.volcanicSmokeMesh && !this.volcanicBombMesh.visible && !this.volcanicSmokeMesh.visible)) {
       return;
     }
     if (this.volcanicBombMesh && this.volcanicBombMesh.visible && this.volcanoCraters.length > 0) {
-      for (let i = 0; i < this.volcanicBombs.length; i++) {
+      const activeBombs = Math.min(this.volcanicBombMesh.count, this.volcanicBombs.length);
+      for (let i = 0; i < activeBombs; i++) {
         const b = this.volcanicBombs[i];
         b.vy -= 14.5 * dt;
         b.x += b.vx * dt;
@@ -8712,7 +9061,8 @@ export class RamayanaWorldEngine {
     }
 
     if (this.volcanicSmokeMesh && this.volcanicSmokeMesh.visible) {
-      for (let i = 0; i < this.volcanicSmokePuffs.length; i++) {
+      const activeSmoke = Math.min(this.volcanicSmokeMesh.count, this.volcanicSmokePuffs.length);
+      for (let i = 0; i < activeSmoke; i++) {
         const s = this.volcanicSmokePuffs[i];
         s.age += dt;
         if (s.age >= s.life) s.age = 0;
@@ -8856,9 +9206,10 @@ export class RamayanaWorldEngine {
         s.tailPivot.rotation.y = Math.sin(elapsed * 6.2 + s.phase) * 0.35;
       }
 
-      // 6. 240 Dense Schooling Fish in the 20-ft River
+      // 6. Scaled Schooling Fish in the 20-ft River
       if (this.riverFishMesh && this.riverFishAgents.length > 0) {
-        for (let i = 0; i < this.riverFishAgents.length; i++) {
+        const activeFish = Math.min(this.riverFishMesh.count, this.riverFishAgents.length);
+        for (let i = 0; i < activeFish; i++) {
           const f = this.riverFishAgents[i];
           f.z += f.speed * dt;
           if (f.z > 175) f.z = -175;
@@ -8887,7 +9238,8 @@ export class RamayanaWorldEngine {
     // 7. Surya-Kund Stepwell Koi Minnows & Small Pond Terrapins
     if (nearStepwellZone) {
       if (this.stepwellKoiMesh && this.stepwellKoiAgents.length > 0) {
-        for (let i = 0; i < this.stepwellKoiAgents.length; i++) {
+        const activeKoi = Math.min(this.stepwellKoiMesh.count, this.stepwellKoiAgents.length);
+        for (let i = 0; i < activeKoi; i++) {
           const k = this.stepwellKoiAgents[i];
           k.angle += k.speed * dt;
           const kx = STEPWELL_POS.x + Math.cos(k.angle) * k.radius;
@@ -8928,14 +9280,20 @@ export class RamayanaWorldEngine {
   }
 
   private updateNightLampsPool(elapsed: number): void {
-    // At night, designated Street Lamps & Torches illuminate the dark streets/palace halls via 8 pooled warm PointLights
+    // At night, designated Street Lamps & Torches illuminate the dark streets/palace halls via tier-scaled pooled warm PointLights + emissive halos
     const nightGlow = THREE.MathUtils.smoothstep(this.nightFactor, 0.12, 0.72);
+    const profile = this.qualityManager.getProfile();
     if (this.lampBulbMat) {
-      this.lampBulbMat.emissiveIntensity = THREE.MathUtils.lerp(0.35, 3.2, nightGlow);
+      this.lampBulbMat.emissiveIntensity = THREE.MathUtils.lerp(0.35, 3.6, nightGlow);
     }
-    const maxLamps = this.nightLampLights.length;
-    if (nightGlow <= 0.01 || this.torchFlameAnchors.length === 0 || maxLamps === 0) {
-      for (let i = 0; i < maxLamps; i++) {
+    if (this.lampHaloUniforms && this.lampHaloPoints) {
+      this.lampHaloUniforms.uOpacity.value = nightGlow * 0.58;
+      this.lampHaloPoints.visible = nightGlow > 0.02;
+    }
+
+    const activeCap = Math.min(this.nightLampLights.length, profile.maxActiveNightLamps);
+    if (nightGlow <= 0.01 || this.torchFlameAnchors.length === 0 || activeCap === 0) {
+      for (let i = 0; i < this.nightLampLights.length; i++) {
         this.nightLampLights[i].intensity = 0;
       }
       this.torchShadowLight.intensity = 0;
@@ -8955,7 +9313,7 @@ export class RamayanaWorldEngine {
       const distSq = dx * dx + dz * dz;
       if (distSq >= maxRangeSq) continue;
 
-      if (bestCount < maxLamps) {
+      if (bestCount < activeCap) {
         let pos = bestCount;
         while (pos > 0 && _topLampDistSq[pos - 1] > distSq) {
           _topLampDistSq[pos] = _topLampDistSq[pos - 1];
@@ -8965,8 +9323,8 @@ export class RamayanaWorldEngine {
         _topLampDistSq[pos] = distSq;
         _topLampIndices[pos] = i;
         bestCount++;
-      } else if (distSq < _topLampDistSq[maxLamps - 1]) {
-        let pos = maxLamps - 1;
+      } else if (distSq < _topLampDistSq[activeCap - 1]) {
+        let pos = activeCap - 1;
         while (pos > 0 && _topLampDistSq[pos - 1] > distSq) {
           _topLampDistSq[pos] = _topLampDistSq[pos - 1];
           _topLampIndices[pos] = _topLampIndices[pos - 1];
@@ -8977,9 +9335,9 @@ export class RamayanaWorldEngine {
       }
     }
 
-    for (let i = 0; i < maxLamps; i++) {
+    for (let i = 0; i < this.nightLampLights.length; i++) {
       const light = this.nightLampLights[i];
-      if (i >= bestCount) {
+      if (i >= bestCount || i >= activeCap) {
         light.intensity = 0;
         continue;
       }
@@ -8992,10 +9350,15 @@ export class RamayanaWorldEngine {
       light.position.set(anchor.x, anchor.y + 0.35, anchor.z);
       light.intensity = 11.5 * nightGlow * flicker * distFade;
       if (i === 0) {
-        this.torchShadowLight.position.set(anchor.x, anchor.y + 0.45, anchor.z);
-        this.torchShadowLight.target.position.set(anchor.x, anchor.y - 4.0, anchor.z + 0.25);
-        this.torchShadowLight.intensity = 16.0 * nightGlow * flicker * distFade;
-        this.torchShadowLight.castShadow = !this.isSoftwareGl;
+        if (profile.torchShadowEnabled && !this.isSoftwareGl) {
+          this.torchShadowLight.position.set(anchor.x, anchor.y + 0.45, anchor.z);
+          this.torchShadowLight.target.position.set(anchor.x, anchor.y - 4.0, anchor.z + 0.25);
+          this.torchShadowLight.intensity = 16.0 * nightGlow * flicker * distFade;
+          this.torchShadowLight.castShadow = true;
+        } else {
+          this.torchShadowLight.intensity = 0;
+          this.torchShadowLight.castShadow = false;
+        }
       }
     }
     if (bestCount === 0) {
@@ -9010,7 +9373,7 @@ export class RamayanaWorldEngine {
     this.cameraSubmerged = THREE.MathUtils.smoothstep(subDepth, -0.05, 0.22);
     this.cameraSubDepthFactor = THREE.MathUtils.clamp(subDepth / 6.0, 0, 1);
 
-    if (this.underwaterPass) {
+    if (this.underwaterPass && this.cameraSubmerged > 0.002) {
       this.underwaterPass.uniforms.uSubmerged.value = this.cameraSubmerged;
       this.underwaterPass.uniforms.uDepthFactor.value = this.cameraSubDepthFactor;
       this.underwaterPass.uniforms.uTime.value = elapsed;
@@ -9027,13 +9390,14 @@ export class RamayanaWorldEngine {
     }
 
     if (this.cameraSubmerged > 0.01) {
-      const fog = this.scene.fog as THREE.FogExp2 | null;
+      const fog = this.scene.fog as THREE.Fog | null;
       const bg = this.scene.background as THREE.Color | null;
       _tmpUnderCol.copy(_colUnderNight).lerp(_colUnderDay, this.daylightFactor);
       if (bg) bg.lerp(_tmpUnderCol, this.cameraSubmerged);
       if (fog) {
         fog.color.lerp(_tmpUnderCol, this.cameraSubmerged);
-        fog.density = THREE.MathUtils.lerp(fog.density, 0.072, this.cameraSubmerged);
+        fog.near = THREE.MathUtils.lerp(fog.near, 1.5, this.cameraSubmerged);
+        fog.far = THREE.MathUtils.lerp(fog.far, 28.0, this.cameraSubmerged);
       }
     }
   }
@@ -9115,14 +9479,16 @@ export class RamayanaWorldEngine {
     const bg = this.scene.background as THREE.Color;
     if (bg) bg.copy(_tmpMist);
 
-    const fog = this.scene.fog as THREE.FogExp2 | null;
+    const fog = this.scene.fog as THREE.Fog | null;
     if (fog) {
       fog.color.copy(_tmpMist);
-      fog.density = THREE.MathUtils.lerp(
-        THREE.MathUtils.lerp(0.0044, 0.0032, this.nightFactor),
-        0.0112,
+      const baseFar = THREE.MathUtils.lerp(
+        THREE.MathUtils.lerp(340, 410, this.nightFactor),
+        195,
         ashT
-      );
+      ) * this.qualityManager.getProfile().fogFarScale;
+      fog.near = THREE.MathUtils.lerp(44, 24, ashT) * this.qualityManager.getProfile().fogFarScale;
+      fog.far = baseFar;
     }
 
     // Strictly scale daytime IBL at night while keeping moon/star/lamp/bounce GI physical
@@ -9318,10 +9684,42 @@ export class RamayanaWorldEngine {
       promptHint = `${nearMount.label} nearby — Press E or tap Mount`;
     }
 
+    const hpVal = Math.round(this.hp);
+    const pranaVal = Math.round(this.prana);
+    const chakraCd = Number(this.chakraCooldown.toFixed(1));
+    const ascElapsed = Number(this.ascensionElapsed.toFixed(1));
+    const roundedProgress = Math.round(this.assetProgress);
+    const qMode = this.qualityManager.getMode();
+    const qTier = this.qualityManager.getTier();
+    const fpsVal = this.qualityManager.getFps();
+    const pX = Math.round(this.playerX * 10);
+    const pZ = Math.round(this.playerZ * 10);
+    const pYaw = Math.round(this.camYaw * 50);
+
+    const hudKey = `${hpVal}|${pranaVal}|${this.karma}|${this.wantedLevel}|${mountKind}|${nearMount?.label ?? ''}|${nearThrone ? 1 : 0}|${this.seatedOnThrone ? 1 : 0}|${this.autoDriveActive ? 1 : 0}|${mountSpeedKmh}|${this.stealthActive ? 1 : 0}|${this.stealthSpotted ? 1 : 0}|${chakraCd}|${district.label}|${pX}|${pZ}|${pYaw}|${this.missionIdx}|${this.missionProgress}|${this.completedMissions}|${demonVillageDistanceM}|${this.ascensionActive ? 1 : 0}|${ascElapsed}|${councilSeated}|${this.worldReady ? 1 : 0}|${roundedProgress}|${this.assetStage}|${this.webglError ?? ''}|${qMode}|${qTier}|${fpsVal}`;
+    if (hudKey === this.lastHudKey) {
+      return;
+    }
+    this.lastHudKey = hudKey;
+
+    this.hudBlipsSnapshot.length = blips.length;
+    for (let i = 0; i < blips.length; i++) {
+      const b = blips[i];
+      const existing = this.hudBlipsSnapshot[i];
+      if (existing) {
+        existing.id = b.id;
+        existing.kind = b.kind;
+        existing.x = b.x;
+        existing.z = b.z;
+      } else {
+        this.hudBlipsSnapshot[i] = { id: b.id, kind: b.kind, x: b.x, z: b.z };
+      }
+    }
+
     this.callbacks.onHudUpdate({
-      hp: Math.round(this.hp),
+      hp: hpVal,
       maxHp: this.maxHp,
-      prana: Math.round(this.prana),
+      prana: pranaVal,
       maxPrana: this.maxPrana,
       karma: this.karma,
       wantedLevel: this.wantedLevel,
@@ -9335,7 +9733,7 @@ export class RamayanaWorldEngine {
       chariotSpeedKmh: mountSpeedKmh,
       stealthActive: this.stealthActive,
       stealthSpotted: this.stealthSpotted,
-      chakraCooldown: Number(this.chakraCooldown.toFixed(1)),
+      chakraCooldown: chakraCd,
       chakraMaxCooldown: this.chakraMaxCooldown,
       districtName: district.label,
       playerX: this.playerX,
@@ -9350,15 +9748,18 @@ export class RamayanaWorldEngine {
       totalMissions: MISSIONS.length,
       demonVillageDistanceM,
       ascensionActive: this.ascensionActive,
-      ascensionElapsed: Number(this.ascensionElapsed.toFixed(1)),
+      ascensionElapsed: ascElapsed,
       courtSeatedCount: councilSeated,
       courtTotalCount: councilTotal,
       promptHint,
-      blips,
+      blips: this.hudBlipsSnapshot.slice(),
       assetsReady: this.worldReady,
-      assetProgress: Math.round(this.assetProgress),
+      assetProgress: roundedProgress,
       assetStage: this.assetStage,
       webglError: this.webglError,
+      qualityMode: qMode,
+      qualityTier: qTier,
+      fps: fpsVal,
     });
   }
 
@@ -9386,8 +9787,28 @@ export class RamayanaWorldEngine {
   private startLoop(): void {
     const tick = () => {
       if (this.disposed) return;
-      const dt = Math.min(0.05, this.clock.getDelta());
+
+      if (this.tabPaused) {
+        if (this.isSoftwareGl) {
+          this.frameId = window.setTimeout(tick, 250);
+        } else {
+          this.frameId = requestAnimationFrame(tick);
+        }
+        return;
+      }
+
+      const rawDt = this.clock.getDelta();
+      const dt = Math.min(0.05, rawDt);
       const elapsed = this.clock.elapsedTime;
+
+      const autoTier = this.qualityManager.recordFrame(
+        rawDt,
+        this.worldReady && this.mode === 'PLAYING'
+      );
+      if (autoTier !== null) {
+        this.applyQualityProfile(this.qualityManager.getProfile());
+        this.emitHud();
+      }
 
       if (!this.worldReady) {
         // Gentle scenic sky preview while assets stream in asynchronously across frames
@@ -9409,18 +9830,27 @@ export class RamayanaWorldEngine {
         return;
       }
 
+      const profile = this.qualityManager.getProfile();
+      if (profile.tier === 'LOW' && (this.simFrameCounter & 1) === 0) {
+        this.renderer.shadowMap.needsUpdate = true;
+      }
+
       if (this.mode === 'PLAYING') {
         this.stepSimulation(dt, elapsed);
         this.hudEmitAccum += dt;
-        if (this.hudEmitAccum >= 0.08) {
+        if (this.hudEmitAccum >= 0.16) {
           this.hudEmitAccum = 0;
           this.emitHud();
         }
       } else if (this.mode === 'TITLE') {
         // Gentle scenic orbit around Lord Ram at Ayodhya Plaza with ambient breeze hair physics & background day-night/volcanic eruptions
+        this.simFrameCounter++;
         this.stepVolcanicAtmosphere(dt);
         this.updateAtmosphericMood();
         this.updateNightLampsPool(elapsed);
+        if (this.shivlingWaterUniforms) {
+          this.shivlingWaterUniforms.uTime.value = elapsed;
+        }
         const orbitYaw = elapsed * 0.16;
         this.playerHorizSpeed = 0;
         this.playerTurnRate = 0;
@@ -9439,10 +9869,10 @@ export class RamayanaWorldEngine {
       // Incremental micro-budgeted background preloading of standby rigs (zero frame drops)
       this.poolManager.stepPrewarm(this.isSoftwareGl ? 0.6 : 1.5);
 
-      // Run 3-stage Frustum + Fog-Extinction + Solid AABB Occlusion Culling right before draw
-      const fog = this.scene.fog as THREE.FogExp2 | null;
+      // Run 3-stage Frustum + Fog-Cutoff + Solid AABB Occlusion Culling right before draw
+      const fog = this.scene.fog as THREE.Fog | null;
       this.camera.updateMatrixWorld();
-      this.occlusionManager.update(this.camera, fog ? fog.density : 0.0044);
+      this.occlusionManager.update(this.camera, fog ? fog.far : 280, true);
 
       if (this.composer && this.cameraSubmerged > 0.004) {
         this.composer.render();
@@ -9468,15 +9898,15 @@ export class RamayanaWorldEngine {
     if (this.disposed) return;
     const width = this.container.clientWidth || window.innerWidth;
     const height = this.container.clientHeight || window.innerHeight;
-    const nativePixelRatio = this.isSoftwareGl
-      ? 1
-      : Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    const profile = this.qualityManager.getProfile();
+    const effectivePr = this.getEffectivePixelRatio(profile);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    this.renderer.setPixelRatio(nativePixelRatio);
+    this.renderer.setPixelRatio(effectivePr);
     this.renderer.setSize(width, height);
-    this.composer?.setPixelRatio(nativePixelRatio);
-    this.composer?.setSize(width, height);
+    if (!this.isSoftwareGl && this.composer) {
+      this.rebuildUnderwaterComposer(width, height, profile);
+    }
   };
 
   public dispose(): void {
@@ -9485,12 +9915,16 @@ export class RamayanaWorldEngine {
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
     window.removeEventListener('resize', this.handleResize);
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     this.occlusionManager.clear();
     this.poolManager.dispose();
     this.lodCache?.dispose();
     this.lodCache = null;
+    this.stealthRootMatsCache.clear();
     this.stealthMaterialCache.clear();
     this.composer?.dispose();
+    this.composerRenderTarget?.dispose();
+    this.composerRenderTarget = null;
     this.textures?.dispose();
     this.textures = null;
     this.scene.traverse((obj) => {

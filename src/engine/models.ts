@@ -74,6 +74,7 @@ export interface RoyalHorseRig {
   headPivot: THREE.Group;
   tailGroup: THREE.Group;
   tailPlumes: THREE.Mesh[];
+  tailChains: Array<[THREE.Group, THREE.Group, THREE.Group]>;
   ears: THREE.Mesh[];
   leftBitAnchor: THREE.Object3D;
   rightBitAnchor: THREE.Object3D;
@@ -3262,6 +3263,7 @@ export function createRoyalHorseUnit(
   const legs: THREE.Group[] = [];
   const knees: THREE.Group[] = [];
   const tailPlumes: THREE.Mesh[] = [];
+  const tailChains: Array<[THREE.Group, THREE.Group, THREE.Group]> = [];
   const ears: THREE.Mesh[] = [];
 
   const hoofMat = new THREE.MeshPhysicalMaterial({ color: 0x1b1a1e, roughness: 0.44, metalness: 0.14, ior: 1.52, clearcoat: 0.35 });
@@ -3492,19 +3494,53 @@ export function createRoyalHorseUnit(
   goldCrupper.position.set(0, -0.01, -0.01);
   tailGroup.add(goldCrupper);
 
+  // Shared geometries for articulated 3-link physics-driven 5-strand horse tail
+  const tailSeg0Geo = new THREE.CylinderGeometry(0.068, 0.056, 0.24, 8);
+  tailSeg0Geo.translate(0, -0.11, 0);
+  const tailSeg1Geo = new THREE.CylinderGeometry(0.054, 0.036, 0.26, 8);
+  tailSeg1Geo.translate(0, -0.12, 0);
+  const tailSeg2Geo = new THREE.ConeGeometry(0.036, 0.28, 7);
+  tailSeg2Geo.rotateX(Math.PI);
+  tailSeg2Geo.translate(0, -0.13, 0);
+
   for (let p = 0; p < 5; p++) {
-    const plumeLen = 0.62 + (p % 2) * 0.12;
-    const plumeGeo = new THREE.ConeGeometry(0.084 - p * 0.007, plumeLen, 8);
-    // Flip apex downward and translate so root top (wide end) anchors right inside tailDock
-    plumeGeo.rotateX(Math.PI);
-    plumeGeo.translate(0, -plumeLen * 0.36, 0);
-    const plume = new THREE.Mesh(plumeGeo, maneMat);
-    plume.position.set((p - 2) * 0.024, -0.03, -0.06);
-    plume.rotation.x = -0.34 - p * 0.035;
-    plume.rotation.z = (p - 2) * 0.075;
-    plume.castShadow = true;
-    tailGroup.add(plume);
-    tailPlumes.push(plume);
+    const spread = p - 2;
+    const scaleBias = 1.0 - Math.abs(spread) * 0.08;
+
+    const seg0Pivot = new THREE.Group();
+    seg0Pivot.position.set(spread * 0.022, -0.025, -0.055);
+    seg0Pivot.rotation.set(-0.32 - Math.abs(spread) * 0.04, 0, spread * 0.075);
+    tailGroup.add(seg0Pivot);
+
+    const mesh0 = new THREE.Mesh(tailSeg0Geo, maneMat);
+    mesh0.scale.set(scaleBias, 1.0, scaleBias);
+    mesh0.castShadow = true;
+    seg0Pivot.add(mesh0);
+    tailPlumes.push(mesh0);
+
+    const seg1Pivot = new THREE.Group();
+    seg1Pivot.position.set(0, -0.21, 0);
+    seg1Pivot.rotation.x = 0.14;
+    seg0Pivot.add(seg1Pivot);
+
+    const mesh1 = new THREE.Mesh(tailSeg1Geo, maneMat);
+    mesh1.scale.set(scaleBias, 1.0, scaleBias);
+    mesh1.castShadow = true;
+    seg1Pivot.add(mesh1);
+    tailPlumes.push(mesh1);
+
+    const seg2Pivot = new THREE.Group();
+    seg2Pivot.position.set(0, -0.23, 0);
+    seg2Pivot.rotation.x = 0.12;
+    seg1Pivot.add(seg2Pivot);
+
+    const mesh2 = new THREE.Mesh(tailSeg2Geo, maneMat);
+    mesh2.scale.set(scaleBias, 0.95 + (p % 2) * 0.2, scaleBias);
+    mesh2.castShadow = true;
+    seg2Pivot.add(mesh2);
+    tailPlumes.push(mesh2);
+
+    tailChains.push([seg0Pivot, seg1Pivot, seg2Pivot]);
   }
 
   // 4 Articulated Legs with Upper Thigh/Shoulder, Knee Joint, Fetlock, Golden Anklet & Dark Hoof
@@ -3578,6 +3614,7 @@ export function createRoyalHorseUnit(
     headPivot,
     tailGroup,
     tailPlumes,
+    tailChains,
     ears,
     leftBitAnchor,
     rightBitAnchor,
@@ -4178,12 +4215,14 @@ export function createMahadevStatueModel(
   textures: ProceduralTextures,
   x = 0,
   z = 0
-): { group: THREE.Group; radius: number; height: number } {
+): { group: THREE.Group; radius: number; height: number; waterUniforms: { uTime: { value: number } } } {
   const group = new THREE.Group();
   const baseY = Math.max(RIVER_SURFACE_Y + 0.35, groundHeightAt(x, z));
   group.position.set(x, baseY, z);
 
-  // Clean Stone, Basalt, Bronze & Water Materials (STRICTLY ZERO garlands or floral decorations)
+  const waterUniforms = { uTime: { value: 0 } };
+
+  // Clean Stone, Basalt, Bronze & Photorealistic Continuous Fluid-Simulation Water Materials
   const sandstoneMat = new THREE.MeshPhysicalMaterial({
     map: textures.sandstone,
     normalMap: textures.sandstoneNormal,
@@ -4205,6 +4244,76 @@ export function createMahadevStatueModel(
     clearcoat: 0.72,
     clearcoatRoughness: 0.18,
   });
+
+  // Photorealistic GLSL Wet-Film & Dripping Rivulet Basalt Material for the Shivling & Yoni-Peetham
+  const wetLingamBasaltMat = basaltMat.clone();
+  wetLingamBasaltMat.roughness = 0.14;
+  wetLingamBasaltMat.clearcoat = 1.0;
+  wetLingamBasaltMat.clearcoatRoughness = 0.05;
+  wetLingamBasaltMat.customProgramCacheKey = () => 'shivling-wet-fluid-v1';
+  wetLingamBasaltMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uFluidTime = waterUniforms.uTime;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        varying vec3 vFluidObjPos;
+        varying vec3 vFluidObjNorm;`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vFluidObjPos = position;
+        vFluidObjNorm = normal;`
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform float uFluidTime;
+        varying vec3 vFluidObjPos;
+        varying vec3 vFluidObjNorm;
+        float shivHash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+        float shivNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(shivHash(i), shivHash(i + vec2(1.0, 0.0)), f.x),
+            mix(shivHash(i + vec2(0.0, 1.0)), shivHash(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }`
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+        float sAng = atan(vFluidObjPos.z, vFluidObjPos.x);
+        float flowY = vFluidObjPos.y + uFluidTime * 1.45;
+        float meander = sin(vFluidObjPos.y * 2.4 + uFluidTime * 0.9 + sAng * 2.0) * 0.22;
+        float rivuletWave = sin((sAng + meander) * 14.0 + shivNoise(vec2(sAng * 3.0, flowY * 0.7)) * 2.2);
+        float rivuletMask = smoothstep(0.28, 0.92, rivuletWave);
+        float dropBead = smoothstep(0.68, 0.98, sin(vFluidObjPos.y * 7.5 + uFluidTime * 3.6 + sAng * 5.0));
+        float sheetRipple = shivNoise(vec2(sAng * 6.0, vFluidObjPos.y * 4.5 + uFluidTime * 2.1));
+        float wetMask = clamp(0.42 + rivuletMask * 0.45 + dropBead * 0.35 + sheetRipple * 0.25, 0.0, 1.0);
+        roughnessFactor = mix(roughnessFactor, 0.025, wetMask);`
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        float sAngE = atan(vFluidObjPos.z, vFluidObjPos.x);
+        float meanderE = sin(vFluidObjPos.y * 2.4 + uFluidTime * 0.9 + sAngE * 2.0) * 0.22;
+        float rivE = smoothstep(0.45, 0.96, sin((sAngE + meanderE) * 14.0));
+        float beadE = smoothstep(0.74, 0.995, sin(vFluidObjPos.y * 7.5 + uFluidTime * 3.6 + sAngE * 5.0));
+        float causticE = shivNoise(vec2(sAngE * 8.0, vFluidObjPos.y * 5.5 + uFluidTime * 2.4));
+        float streakGlow = (rivE * (0.28 + 0.72 * causticE) + beadE * 0.85) * (0.35 + 0.65 * (1.0 - abs(vFluidObjNorm.y)));
+        diffuseColor.rgb *= mix(1.0, 0.68, clamp(rivE * 0.7 + 0.25, 0.0, 0.85));
+        totalEmissiveRadiance += vec3(0.32, 0.74, 0.98) * (streakGlow * 0.24);`
+      );
+  };
+
   const vibhutiWhiteMat = new THREE.MeshPhysicalMaterial({
     color: 0xf7f5ef,
     emissive: 0xf2eee2,
@@ -4260,20 +4369,117 @@ export function createMahadevStatueModel(
     ior: 1.52,
     clearcoat: 0.9,
   });
+
+  // Animated Continuous Pouring & Rippling Abhishekam Water Stream Shader
   const waterStreamMat = new THREE.MeshPhysicalMaterial({
-    color: 0x76d7fa,
-    emissive: 0x1f8ac4,
-    emissiveIntensity: 0.35,
-    roughness: 0.06,
+    color: 0x8ae0ff,
+    emissive: 0x2292cc,
+    emissiveIntensity: 0.42,
+    roughness: 0.04,
     metalness: 0.08,
     ior: 1.333,
-    reflectivity: 0.94,
+    reflectivity: 0.96,
     specularIntensity: 1.0,
     transparent: true,
-    opacity: 0.82,
+    opacity: 0.84,
     clearcoat: 1.0,
-    clearcoatRoughness: 0.04,
+    clearcoatRoughness: 0.03,
   });
+  waterStreamMat.customProgramCacheKey = () => 'shivling-abhishekam-stream-v1';
+  waterStreamMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uFluidTime = waterUniforms.uTime;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform float uFluidTime;
+        varying vec2 vStreamUv;
+        varying vec3 vStreamObjNorm;`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vStreamUv = uv;
+        vStreamObjNorm = normal;
+        float fluidWobble = sin(position.y * 8.5 + uFluidTime * 9.5 + position.x * 6.0) * 0.008;
+        transformed += normal * fluidWobble;`
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform float uFluidTime;
+        varying vec2 vStreamUv;
+        varying vec3 vStreamObjNorm;`
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        float isPool = step(0.75, abs(vStreamObjNorm.y));
+        float dropStreak = sin(vStreamUv.y * 28.0 + uFluidTime * 11.5 + sin(vStreamUv.x * 18.0 + uFluidTime * 2.5));
+        float helicalFoam = cos(vStreamUv.x * 22.0 - vStreamUv.y * 16.0 - uFluidTime * 9.0);
+        float flowBand = smoothstep(-0.2, 0.92, dropStreak * 0.65 + helicalFoam * 0.35);
+        float poolRad = length(vStreamUv - vec2(0.5)) * 24.0;
+        float poolRing = 0.5 + 0.5 * sin(poolRad - uFluidTime * 7.2);
+        float waterHighlight = mix(flowBand, pow(poolRing, 2.5), isPool);
+        totalEmissiveRadiance += vec3(0.45, 0.86, 1.0) * (waterHighlight * 0.38);
+        diffuseColor.a = clamp(opacity * mix(0.72 + 0.28 * flowBand, 0.78 + 0.22 * poolRing, isPool), 0.38, 0.94);`
+      );
+  };
+
+  // Translucent Waterfall Veil Wrapping Shivling Dome & Shaft with Dripping Beads
+  const waterVeilMat = new THREE.MeshPhysicalMaterial({
+    color: 0xa2ebff,
+    emissive: 0x35a8e0,
+    emissiveIntensity: 0.36,
+    roughness: 0.03,
+    metalness: 0.05,
+    ior: 1.333,
+    transparent: true,
+    opacity: 0.42,
+    depthWrite: false,
+    side: THREE.FrontSide,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.02,
+  });
+  waterVeilMat.customProgramCacheKey = () => 'shivling-water-veil-v1';
+  waterVeilMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uFluidTime = waterUniforms.uTime;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform float uFluidTime;
+        varying vec3 vVeilPos;`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vVeilPos = position;
+        float vAng = atan(position.z, position.x);
+        float wave = sin(position.y * 7.0 + uFluidTime * 6.5 + vAng * 6.0) * 0.012;
+        transformed += normal * wave;`
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform float uFluidTime;
+        varying vec3 vVeilPos;`
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        float angV = atan(vVeilPos.z, vVeilPos.x);
+        float sway = sin(vVeilPos.y * 2.8 + uFluidTime * 1.1 + angV * 2.0) * 0.24;
+        float riv = smoothstep(0.15, 0.92, sin((angV + sway) * 14.0));
+        float drip = smoothstep(0.62, 0.98, sin(vVeilPos.y * 9.0 + uFluidTime * 4.4 + angV * 4.0));
+        float streamIntensity = clamp(riv * 0.65 + drip * 0.85, 0.0, 1.0);
+        diffuseColor.a = streamIntensity * 0.56;
+        if (diffuseColor.a < 0.04) discard;
+        totalEmissiveRadiance += vec3(0.45, 0.86, 1.0) * (streamIntensity * 0.34);`
+      );
+  };
 
   // 1. Stepped Carved Stone Sanctuary Apron (y = 0 .. 1.15m, clean geometry with zero petals/flowers)
   const dais1 = new THREE.Mesh(
@@ -4294,10 +4500,10 @@ export function createMahadevStatueModel(
   dais2.receiveShadow = true;
   group.add(dais2);
 
-  // 2. Prominent Black Basalt Yoni-Peetham & Extended Pranali Spout + Towering Black Basalt Shivling
+  // 2. Prominent Black Basalt Yoni-Peetham & Extended Pranali Spout + Towering Wet Black Basalt Shivling
   const peethLower = new THREE.Mesh(
     new THREE.CylinderGeometry(2.15, 2.48, 0.72, 28),
-    basaltMat
+    wetLingamBasaltMat
   );
   peethLower.position.y = 1.51;
   peethLower.castShadow = true;
@@ -4306,17 +4512,25 @@ export function createMahadevStatueModel(
 
   const peethRim = new THREE.Mesh(
     new THREE.TorusGeometry(2.18, 0.24, 12, 32),
-    basaltMat
+    wetLingamBasaltMat
   );
   peethRim.rotation.x = Math.PI / 2;
   peethRim.position.y = 1.98;
   peethRim.castShadow = true;
   group.add(peethRim);
 
+  // Rippling sacred water film collected inside the Yoni-Peetham channel
+  const peethWaterPool = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.96, 1.96, 0.04, 28),
+    waterStreamMat
+  );
+  peethWaterPool.position.y = 1.96;
+  group.add(peethWaterPool);
+
   // Extended Pranali Channel Spout projecting to +X into a Stone Water Basin
   const pranaliChannel = new THREE.Mesh(
     new THREE.BoxGeometry(2.35, 0.34, 0.78),
-    basaltMat
+    wetLingamBasaltMat
   );
   pranaliChannel.position.set(2.45, 1.9, 0);
   pranaliChannel.castShadow = true;
@@ -4328,7 +4542,7 @@ export function createMahadevStatueModel(
 
   const lingamShaft = new THREE.Mesh(
     new THREE.CylinderGeometry(1.12, 1.24, 3.15, 32),
-    basaltMat
+    wetLingamBasaltMat
   );
   lingamShaft.position.y = 1.57;
   lingamShaft.castShadow = true;
@@ -4337,12 +4551,36 @@ export function createMahadevStatueModel(
 
   const lingamDome = new THREE.Mesh(
     new THREE.SphereGeometry(1.12, 32, 20, 0, Math.PI * 2, 0, Math.PI * 0.55),
-    basaltMat
+    wetLingamBasaltMat
   );
   lingamDome.position.y = 3.12;
   lingamDome.castShadow = true;
   lingamDome.receiveShadow = true;
   shivlingGroup.add(lingamDome);
+
+  // Continuous Flowing & Dripping Abhishekam Water Veil Over Shivling Dome & Shaft
+  const waterVeilShaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.145, 1.265, 3.16, 32, 8, true),
+    waterVeilMat
+  );
+  waterVeilShaft.position.y = 1.57;
+  shivlingGroup.add(waterVeilShaft);
+
+  const waterVeilDome = new THREE.Mesh(
+    new THREE.SphereGeometry(1.145, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.55),
+    waterVeilMat
+  );
+  waterVeilDome.position.y = 3.12;
+  shivlingGroup.add(waterVeilDome);
+
+  // Crown Splash Halo where the Jalpatra stream strikes the Shivling apex
+  const domeSplashCrown = new THREE.Mesh(
+    new THREE.TorusGeometry(0.24, 0.055, 8, 20),
+    waterStreamMat
+  );
+  domeSplashCrown.rotation.x = Math.PI / 2;
+  domeSplashCrown.position.set(0, 4.24, 0.1);
+  shivlingGroup.add(domeSplashCrown);
 
   // Clean Sacred White Tripundra Markings on Front of Black Basalt Shivling
   [-0.28, 0, 0.28].forEach((ty) => {
@@ -4713,6 +4951,7 @@ export function createMahadevStatueModel(
     group,
     radius: 5.5,
     height: 9.8,
+    waterUniforms,
   };
 }
 

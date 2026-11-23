@@ -9,6 +9,7 @@ interface GameHUDProps {
   hud: WorldHudSnapshot;
   muted: boolean;
   sprintActive: boolean;
+  showPerfStats: boolean;
   onToggleMute: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
@@ -30,6 +31,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   hud,
   muted,
   sprintActive,
+  showPerfStats,
   onToggleMute,
   onZoomIn,
   onZoomOut,
@@ -65,14 +67,19 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
 
   return (
     <>
-      {/* Top-Left: Minimal 80px Radar Only (Mission overlay box removed) */}
-      <div className="fixed top-3 left-3 z-20 pointer-events-none">
+      {/* Top-Left: Minimal 80px Radar + Optional Compact FPS/Quality Readout */}
+      <div className="fixed top-3 left-3 z-20 flex items-start gap-2 pointer-events-none">
         <MinimapRadar
           playerX={hud.playerX}
           playerZ={hud.playerZ}
           playerYaw={hud.playerYaw}
           blips={hud.blips}
         />
+        {showPerfStats && (
+          <div className="rounded border border-amber-200/20 bg-[#0D1016]/70 px-2 py-1 font-mono-tabular text-[10px] text-amber-200">
+            {hud.fps} FPS · {hud.qualityTier}
+          </div>
+        )}
       </div>
 
       {/* Left Side: Minimal Compact Prana & Karma Bars */}

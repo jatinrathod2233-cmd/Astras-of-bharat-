@@ -36,6 +36,9 @@ export type NpcRole =
 
 export type MountKind = 'NONE' | 'RATHA' | 'HORSE' | 'ELEPHANT';
 
+export type QualityTier = 'HIGH' | 'MEDIUM' | 'LOW';
+export type QualityMode = 'AUTO' | QualityTier;
+
 export interface WorldHudSnapshot {
   hp: number;
   maxHp: number;
@@ -75,6 +78,9 @@ export interface WorldHudSnapshot {
   assetsReady: boolean;
   assetProgress: number;
   assetStage: string;
+  qualityMode: QualityMode;
+  qualityTier: QualityTier;
+  fps: number;
 }
 
 export type DemonVariant =
