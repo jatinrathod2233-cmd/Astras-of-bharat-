@@ -37,6 +37,7 @@ export interface ProceduralTextures {
   redCarpetRoughness: THREE.CanvasTexture;
   contactShadow: THREE.CanvasTexture;
   setAnisotropy: (cap: number) => void;
+  reuploadAll: () => void;
   dispose: () => void;
 }
 
@@ -1021,6 +1022,11 @@ export async function createProceduralTexturesAsync(
         ctx.created[i].needsUpdate = true;
       }
     },
+    reuploadAll: () => {
+      for (let i = 0; i < ctx.created.length; i++) {
+        ctx.created[i].needsUpdate = true;
+      }
+    },
     dispose: () => {
       ctx.created.forEach((t) => t.dispose());
     },
@@ -1062,6 +1068,11 @@ export function createProceduralTextures(
       const clamped = Math.max(1, Math.min(renderer.capabilities.getMaxAnisotropy() || 1, cap));
       for (let i = 0; i < ctx.created.length; i++) {
         ctx.created[i].anisotropy = clamped;
+        ctx.created[i].needsUpdate = true;
+      }
+    },
+    reuploadAll: () => {
+      for (let i = 0; i < ctx.created.length; i++) {
         ctx.created[i].needsUpdate = true;
       }
     },

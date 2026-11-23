@@ -149,7 +149,7 @@ export function buildQualityProfile(
       particleScale: isHighEndDesktop ? 1.25 : 1.0,
       cameraFar: isMobile ? 850 : 1050,
       fogFarScale: isMobile ? 1.0 : 1.15,
-      textureSize: isHighEndDesktop ? 2048 : 1024,
+      textureSize: 1024,
       anisotropyCap: isMobile ? 6 : 16,
       skipNonEssentialMipmaps: false,
       distanceCullScale: isMobile ? 1.0 : 1.25,
@@ -297,6 +297,25 @@ export class QualityManager {
     this.lowFpsAccum = 0;
     this.highFpsAccum = 0;
     this.cooldownTimer = Math.max(this.cooldownTimer, graceCooldownSec);
+  }
+
+  /**
+   * Emergency GPU pressure relief triggered after a WebGL context loss so restored contexts
+   * allocate lighter render targets, shadow maps, and pixel ratios instead of crash-looping.
+   */
+  public stepDownOnContextLoss(): boolean {
+    if (this.activeTier === 'HIGH') {
+      this.applyTierInternal('MEDIUM');
+      this.resetFrameMetrics(8.0);
+      return true;
+    }
+    if (this.activeTier === 'MEDIUM') {
+      this.applyTierInternal('LOW');
+      this.resetFrameMetrics(10.0);
+      return true;
+    }
+    this.resetFrameMetrics(8.0);
+    return false;
   }
 
   private applyTierInternal(tier: QualityTier): void {

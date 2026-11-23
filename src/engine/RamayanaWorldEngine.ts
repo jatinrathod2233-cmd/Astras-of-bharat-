@@ -883,6 +883,14 @@ export class RamayanaWorldEngine {
   private spawnTimer = 0;
   private hudEmitAccum = 0;
   private webglError: string | null = null;
+  private contextLost = false;
+  private contextRestoring = false;
+  private contextRecoveryTimer = 0;
+  private contextLossCount = 0;
+  private contextRebuildAttempts = 0;
+  private boundContextLostHandler: ((e: Event) => void) | null = null;
+  private boundContextRestoredHandler: (() => void) | null = null;
+  private envRenderTarget: THREE.WebGLRenderTarget | null = null;
 
   private astraVfx: AstraVfxManager | null = null;
   private astraQuest: AstraQuestSystem | null = null;
@@ -952,42 +960,11 @@ export class RamayanaWorldEngine {
 
     this.qualityManager = new QualityManager(this.isSoftwareGl);
     const initProfile = this.qualityManager.getProfile();
-    const initialPixelRatio = this.getEffectivePixelRatio(initProfile);
 
-    this.renderer = new THREE.WebGLRenderer({
-      antialias: !this.isSoftwareGl && initProfile.tier !== 'LOW',
-      powerPreference: 'high-performance',
-      alpha: false,
-      stencil: false,
-      preserveDrawingBuffer: false,
-    });
+    this.renderer = this.createRenderer(initProfile);
     this.maxAnisotropy = Math.max(1, this.renderer.capabilities.getMaxAnisotropy());
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = initProfile.toneMapping;
-    this.renderer.toneMappingExposure = 1.05;
-    this.renderer.setPixelRatio(initialPixelRatio);
-    this.renderer.setSize(
-      container.clientWidth || window.innerWidth,
-      container.clientHeight || window.innerHeight
-    );
-    this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = initProfile.shadowType;
-    this.renderer.shadowMap.autoUpdate = initProfile.tier !== 'LOW';
-    this.renderer.domElement.style.display = 'block';
-    this.renderer.domElement.style.width = '100%';
-    this.renderer.domElement.style.height = '100%';
-    this.renderer.domElement.style.imageRendering = 'auto';
     container.appendChild(this.renderer.domElement);
-
-    this.renderer.domElement.addEventListener('webglcontextlost', (e) => {
-      e.preventDefault();
-      this.webglError = 'WebGL rendering context paused. Restoring scene...';
-      this.emitHud();
-    });
-    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
-      this.webglError = null;
-      this.emitHud();
-    });
+    this.attachContextListeners(this.renderer.domElement);
 
     // Scene, linear distance fog & matched horizon sky dome
     this.scene = new THREE.Scene();
@@ -1158,6 +1135,318 @@ export class RamayanaWorldEngine {
     void this.initializeWorldAsync();
   }
 
+  private createRenderer(profile: QualityProfile): THREE.WebGLRenderer {
+    const width = this.container.clientWidth || window.innerWidth;
+    const height = this.container.clientHeight || window.innerHeight;
+    const renderer = new THREE.WebGLRenderer({
+      antialias: !this.isSoftwareGl && profile.tier !== 'LOW',
+      powerPreference: 'high-performance',
+      alpha: false,
+      stencil: false,
+      preserveDrawingBuffer: false,
+    });
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = profile.toneMapping;
+    renderer.toneMappingExposure = 1.05;
+    renderer.setPixelRatio(this.getEffectivePixelRatio(profile));
+    renderer.setSize(width, height);
+    renderer.shadowMap.enabled = !this.isSoftwareGl;
+    renderer.shadowMap.type = profile.shadowType;
+    renderer.shadowMap.autoUpdate = profile.tier !== 'LOW';
+    renderer.domElement.style.display = 'block';
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
+    renderer.domElement.style.imageRendering = 'auto';
+    return renderer;
+  }
+
+  private attachContextListeners(canvas: HTMLCanvasElement): void {
+    this.detachContextListeners(canvas);
+    this.boundContextLostHandler = (e: Event) => {
+      e.preventDefault();
+      this.handleWebglContextLost(e);
+    };
+    this.boundContextRestoredHandler = () => {
+      this.handleWebglContextRestored();
+    };
+    canvas.addEventListener('webglcontextlost', this.boundContextLostHandler, false);
+    canvas.addEventListener('webglcontextrestored', this.boundContextRestoredHandler, false);
+  }
+
+  private detachContextListeners(canvas: HTMLCanvasElement): void {
+    if (this.boundContextLostHandler) {
+      canvas.removeEventListener('webglcontextlost', this.boundContextLostHandler, false);
+    }
+    if (this.boundContextRestoredHandler) {
+      canvas.removeEventListener('webglcontextrestored', this.boundContextRestoredHandler, false);
+    }
+  }
+
+  private regenerateEnvironmentProbe(): void {
+    this.envRenderTarget?.dispose();
+    this.envRenderTarget = null;
+    this.scene.environment = null;
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    const roomEnv = new RoomEnvironment();
+    this.envRenderTarget = pmrem.fromScene(roomEnv, 0.04);
+    this.scene.environment = this.envRenderTarget.texture;
+    roomEnv.dispose();
+    pmrem.dispose();
+  }
+
+  private handleWebglContextLost(e?: Event): void {
+    e?.preventDefault?.();
+    if (this.disposed) return;
+    if (!this.contextLost) {
+      this.contextLost = true;
+      this.contextLossCount++;
+    }
+    // Keep UI free of blocking/paused error banners during automatic silent recovery
+    this.webglError = null;
+    if (!this.tabPaused) {
+      this.scheduleContextRecoveryWatchdog(220);
+    }
+  }
+
+  private handleWebglContextRestored(): void {
+    if (this.disposed) return;
+    this.contextRebuildAttempts = 0;
+    this.restoreAllGpuAssetsSilently(false);
+  }
+
+  private scheduleContextRecoveryWatchdog(initialDelayMs = 220): void {
+    if (this.disposed || this.contextRestoring) return;
+    clearTimeout(this.contextRecoveryTimer);
+    this.contextRecoveryTimer = window.setTimeout(() => {
+      if (this.disposed || this.tabPaused || !this.contextLost) return;
+      const gl = this.renderer.getContext();
+      if (gl && !gl.isContextLost()) {
+        // Context quietly became valid again without firing webglcontextrestored
+        this.restoreAllGpuAssetsSilently(false);
+        return;
+      }
+      try {
+        gl?.getExtension('WEBGL_lose_context')?.restoreContext();
+      } catch {
+        // Ignore if driver disallows programmatic restoreContext
+      }
+      // Fallback: if native context restoration did not trigger, hot-swap WebGLRenderer in place
+      clearTimeout(this.contextRecoveryTimer);
+      this.contextRecoveryTimer = window.setTimeout(() => {
+        if (this.disposed || this.tabPaused || !this.contextLost) return;
+        const postGl = this.renderer.getContext();
+        if (postGl && !postGl.isContextLost()) {
+          this.restoreAllGpuAssetsSilently(false);
+        } else {
+          this.rebuildRendererInPlace();
+        }
+      }, 720);
+    }, initialDelayMs);
+  }
+
+  private rebuildRendererInPlace(): void {
+    if (this.disposed || this.contextRestoring) return;
+    this.contextRestoring = true;
+    clearTimeout(this.contextRecoveryTimer);
+
+    // Step down quality tier once on context loss so restored buffers demand less VRAM
+    if (this.contextLossCount > 0) {
+      this.qualityManager.stepDownOnContextLoss();
+    }
+
+    const oldRenderer = this.renderer;
+    const oldCanvas = oldRenderer.domElement;
+
+    try {
+      this.composer?.dispose();
+    } catch {
+      // Ignore disposal errors on a lost context
+    }
+    this.composer = null;
+    try {
+      this.composerRenderTarget?.dispose();
+    } catch {
+      // Ignore
+    }
+    this.composerRenderTarget = null;
+    try {
+      this.envRenderTarget?.dispose();
+    } catch {
+      // Ignore
+    }
+    this.envRenderTarget = null;
+    this.scene.environment = null;
+    try {
+      this.keyLight.shadow.map?.dispose();
+    } catch {
+      // Ignore
+    }
+    this.keyLight.shadow.map = null;
+    try {
+      this.torchShadowLight.shadow.map?.dispose();
+    } catch {
+      // Ignore
+    }
+    this.torchShadowLight.shadow.map = null;
+
+    this.detachContextListeners(oldCanvas);
+    try {
+      oldRenderer.dispose();
+    } catch {
+      // Ignore
+    }
+    if (oldCanvas.parentNode === this.container) {
+      this.container.removeChild(oldCanvas);
+    }
+
+    try {
+      const nextProfile = this.qualityManager.getProfile();
+      const nextRenderer = this.createRenderer(nextProfile);
+      this.renderer = nextRenderer;
+      this.maxAnisotropy = Math.max(1, this.renderer.capabilities.getMaxAnisotropy());
+      if (this.container.firstChild) {
+        this.container.insertBefore(this.renderer.domElement, this.container.firstChild);
+      } else {
+        this.container.appendChild(this.renderer.domElement);
+      }
+      this.attachContextListeners(this.renderer.domElement);
+      this.contextRebuildAttempts = 0;
+      this.contextRestoring = false;
+      this.restoreAllGpuAssetsSilently(true);
+    } catch {
+      this.contextRestoring = false;
+      this.contextRebuildAttempts++;
+      if (this.contextRebuildAttempts <= 4) {
+        this.contextRecoveryTimer = window.setTimeout(() => {
+          if (!this.disposed && !this.tabPaused) {
+            this.rebuildRendererInPlace();
+          }
+        }, 650);
+      } else {
+        this.webglError = 'WebGL graphics recovery failed. Reload to resume.';
+        this.emitHud();
+      }
+    }
+  }
+
+  private restoreAllGpuAssetsSilently(alreadySteppedDown = false): void {
+    if (this.disposed || this.contextRestoring) return;
+    this.contextRestoring = true;
+    clearTimeout(this.contextRecoveryTimer);
+
+    const gl = this.renderer.getContext();
+    if (!gl || gl.isContextLost()) {
+      this.contextRestoring = false;
+      this.scheduleContextRecoveryWatchdog(250);
+      return;
+    }
+
+    try {
+      if (!alreadySteppedDown && this.contextLossCount > 0) {
+        this.qualityManager.stepDownOnContextLoss();
+      }
+
+      if (!this.isSoftwareGl) {
+        RectAreaLightUniformsLib.init();
+      }
+
+      this.regenerateEnvironmentProbe();
+      this.textures?.reuploadAll();
+      this.astraVfx?.reuploadGpuResources();
+
+      this.keyLight.shadow.map?.dispose();
+      this.keyLight.shadow.map = null;
+      this.keyLight.shadow.needsUpdate = true;
+      this.torchShadowLight.shadow.map?.dispose();
+      this.torchShadowLight.shadow.map = null;
+      this.torchShadowLight.shadow.needsUpdate = true;
+
+      const markTex = (tex: unknown): void => {
+        if (tex && (tex as THREE.Texture).isTexture) {
+          (tex as THREE.Texture).needsUpdate = true;
+        }
+      };
+
+      const refreshMat = (mat: THREE.Material): void => {
+        mat.needsUpdate = true;
+        if ((mat as THREE.ShaderMaterial).isShaderMaterial) {
+          const uniforms = (mat as THREE.ShaderMaterial).uniforms;
+          if (uniforms) {
+            for (const key in uniforms) {
+              const entry = uniforms[key];
+              if (entry && entry.value) {
+                markTex(entry.value);
+              }
+            }
+          }
+          return;
+        }
+        const m = mat as unknown as Record<string, unknown>;
+        markTex(m.map);
+        markTex(m.normalMap);
+        markTex(m.roughnessMap);
+        markTex(m.metalnessMap);
+        markTex(m.emissiveMap);
+        markTex(m.aoMap);
+        markTex(m.alphaMap);
+        markTex(m.bumpMap);
+        markTex(m.displacementMap);
+        markTex(m.lightMap);
+        markTex(m.envMap);
+        markTex(m.sheenColorMap);
+        markTex(m.sheenRoughnessMap);
+      };
+
+      markTex(this.scene.background);
+      this.scene.traverse((obj) => {
+        if ((obj as THREE.InstancedMesh).isInstancedMesh) {
+          const inst = obj as THREE.InstancedMesh;
+          inst.instanceMatrix.needsUpdate = true;
+          if (inst.instanceColor) {
+            inst.instanceColor.needsUpdate = true;
+          }
+        }
+        const matRef = (obj as THREE.Mesh | THREE.Points | THREE.Sprite).material;
+        if (Array.isArray(matRef)) {
+          for (const mat of matRef) {
+            if (mat) refreshMat(mat);
+          }
+        } else if (matRef) {
+          refreshMat(matRef);
+        }
+      });
+
+      if (this.underwaterSoftwareQuad) {
+        const swMat = this.underwaterSoftwareQuad.material;
+        if (Array.isArray(swMat)) {
+          swMat.forEach(refreshMat);
+        } else if (swMat) {
+          refreshMat(swMat);
+        }
+      }
+
+      this.applyQualityProfile(this.qualityManager.getProfile());
+      this.renderer.shadowMap.needsUpdate = true;
+
+      if (this.worldReady && !this.isSoftwareGl) {
+        this.renderer.compile(this.scene, this.camera);
+      }
+
+      this.clock.getDelta();
+      this.qualityManager.resetFrameMetrics(4.5);
+      this.contextLost = false;
+      this.contextRestoring = false;
+      this.contextRebuildAttempts = 0;
+      this.webglError = null;
+      this.emitHud();
+    } catch {
+      this.contextRestoring = false;
+      // If compilation or re-upload touched a mid-crash context, rebuild a clean WebGLRenderer
+      this.contextLost = true;
+      this.rebuildRendererInPlace();
+    }
+  }
+
   private getEffectivePixelRatio(profile: QualityProfile): number {
     if (this.isSoftwareGl) return 1;
     if (profile.pixelRatioCap < 1) return profile.pixelRatioCap;
@@ -1171,6 +1460,11 @@ export class RamayanaWorldEngine {
     if (!hidden) {
       this.clock.getDelta();
       this.qualityManager.resetFrameMetrics(2.5);
+      const gl = this.renderer.getContext();
+      if (this.contextLost || !gl || gl.isContextLost()) {
+        this.handleWebglContextLost();
+        this.scheduleContextRecoveryWatchdog(60);
+      }
     }
   };
 
@@ -1326,9 +1620,7 @@ export class RamayanaWorldEngine {
 
     try {
       if (!(await reportStage(4, 'Preparing solar environment illumination'))) return;
-      const pmrem = new THREE.PMREMGenerator(this.renderer);
-      this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-      pmrem.dispose();
+      this.regenerateEnvironmentProbe();
 
       const initProfile = this.qualityManager.getProfile();
       let lastHudTs = 0;
@@ -1454,10 +1746,14 @@ export class RamayanaWorldEngine {
       this.applyQualityProfile(this.qualityManager.getProfile());
 
       if (!(await reportStage(95, 'Compiling PBR shaders asynchronously'))) return;
-      if (!this.isSoftwareGl && typeof this.renderer.compileAsync === 'function') {
-        await this.renderer.compileAsync(this.scene, this.camera);
-      } else if (!this.isSoftwareGl) {
-        this.renderer.compile(this.scene, this.camera);
+      try {
+        if (!this.isSoftwareGl && typeof this.renderer.compileAsync === 'function') {
+          await this.renderer.compileAsync(this.scene, this.camera);
+        } else if (!this.isSoftwareGl) {
+          this.renderer.compile(this.scene, this.camera);
+        }
+      } catch {
+        // Recover cleanly if a transient WebGL context pause interrupts initial shader pre-compilation
       }
       if (isAborted()) return;
 
@@ -10773,7 +11069,7 @@ export class RamayanaWorldEngine {
 
   private afterDraw(cb: () => void): void {
     const gl = this.renderer.getContext() as WebGL2RenderingContext;
-    if (!gl || typeof gl.fenceSync !== 'function') {
+    if (this.contextLost || !gl || gl.isContextLost() || typeof gl.fenceSync !== 'function') {
       this.frameId = window.setTimeout(cb, 80);
       return;
     }
@@ -10781,6 +11077,17 @@ export class RamayanaWorldEngine {
     gl.flush();
     const poll = () => {
       if (this.disposed) return;
+      if (this.contextLost || gl.isContextLost()) {
+        if (sync) {
+          try {
+            gl.deleteSync(sync);
+          } catch {
+            // Ignore cleanup failure on lost context
+          }
+        }
+        this.frameId = window.setTimeout(cb, 80);
+        return;
+      }
       const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
       if (state === gl.UNSIGNALED) {
         this.frameId = window.setTimeout(poll, 5);
@@ -10796,9 +11103,15 @@ export class RamayanaWorldEngine {
     const tick = () => {
       if (this.disposed) return;
 
-      if (this.tabPaused) {
-        if (this.isSoftwareGl) {
-          this.frameId = window.setTimeout(tick, 250);
+      const gl = this.renderer.getContext();
+      if (!this.contextLost && (!gl || gl.isContextLost())) {
+        this.handleWebglContextLost();
+      }
+
+      if (this.tabPaused || this.contextLost) {
+        this.clock.getDelta();
+        if (this.isSoftwareGl || this.contextLost) {
+          this.frameId = window.setTimeout(tick, 140);
         } else {
           this.frameId = requestAnimationFrame(tick);
         }
@@ -10829,6 +11142,12 @@ export class RamayanaWorldEngine {
         );
         this.camera.position.copy(_v2);
         this.camera.lookAt(this.playerX, this.playerY + 1.65, this.playerZ);
+        const readyGl = this.renderer.getContext();
+        if (!readyGl || readyGl.isContextLost()) {
+          this.handleWebglContextLost();
+          this.frameId = window.setTimeout(tick, 140);
+          return;
+        }
         this.renderer.render(this.scene, this.camera);
         if (this.isSoftwareGl) {
           this.afterDraw(tick);
@@ -10882,6 +11201,13 @@ export class RamayanaWorldEngine {
       this.camera.updateMatrixWorld();
       this.occlusionManager.update(this.camera, fog ? fog.far : 280, true);
 
+      const activeGl = this.renderer.getContext();
+      if (!activeGl || activeGl.isContextLost()) {
+        this.handleWebglContextLost();
+        this.frameId = window.setTimeout(tick, 140);
+        return;
+      }
+
       if (this.composer && this.cameraSubmerged > 0.004) {
         this.composer.render();
       } else {
@@ -10910,6 +11236,7 @@ export class RamayanaWorldEngine {
     const effectivePr = this.getEffectivePixelRatio(profile);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    if (this.contextLost) return;
     this.renderer.setPixelRatio(effectivePr);
     this.renderer.setSize(width, height);
     if (!this.isSoftwareGl && this.composer) {
@@ -10922,8 +11249,10 @@ export class RamayanaWorldEngine {
     this.loadAbort.abort();
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
+    clearTimeout(this.contextRecoveryTimer);
     window.removeEventListener('resize', this.handleResize);
     document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    this.detachContextListeners(this.renderer.domElement);
     this.occlusionManager.clear();
     this.astraVfx?.dispose();
     this.poolManager.dispose();
@@ -10935,6 +11264,9 @@ export class RamayanaWorldEngine {
     this.composer?.dispose();
     this.composerRenderTarget?.dispose();
     this.composerRenderTarget = null;
+    this.envRenderTarget?.dispose();
+    this.envRenderTarget = null;
+    this.scene.environment = null;
     this.textures?.dispose();
     this.textures = null;
     this.scene.traverse((obj) => {

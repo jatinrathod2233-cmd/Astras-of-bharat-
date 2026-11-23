@@ -429,6 +429,7 @@ export class AstraVfxManager {
 
   // Storm Cyclone Canopy for Brahmastra summon (caster or enemy)
   private cycloneCanopy: THREE.Mesh;
+  private cycloneMat: THREE.ShaderMaterial;
   private cycloneUniforms: {
     uTime: { value: number };
     uIntensity: { value: number };
@@ -504,7 +505,7 @@ export class AstraVfxManager {
       uIntensity: { value: 0 },
       uBoltFlash: { value: 0 },
     };
-    const cycloneMat = new THREE.ShaderMaterial({
+    this.cycloneMat = new THREE.ShaderMaterial({
       uniforms: this.cycloneUniforms,
       transparent: true,
       depthWrite: false,
@@ -570,7 +571,7 @@ export class AstraVfxManager {
         }
       `,
     });
-    this.cycloneCanopy = new THREE.Mesh(new THREE.PlaneGeometry(360, 360), cycloneMat);
+    this.cycloneCanopy = new THREE.Mesh(new THREE.PlaneGeometry(360, 360), this.cycloneMat);
     this.cycloneCanopy.rotation.x = Math.PI / 2;
     this.cycloneCanopy.position.set(0, 74, 0);
     this.cycloneCanopy.visible = false;
@@ -1526,11 +1527,32 @@ export class AstraVfxManager {
     }
   }
 
+  public reuploadGpuResources(): void {
+    this.emberTex.needsUpdate = true;
+    this.smokeTex.needsUpdate = true;
+    this.mistTex.needsUpdate = true;
+    this.lotusTex.needsUpdate = true;
+    this.craterTex.needsUpdate = true;
+    this.cycloneMat.needsUpdate = true;
+    this.objectiveBeamMat.needsUpdate = true;
+    this.objectiveRingMat.needsUpdate = true;
+    this.handLotusRig.group.traverse((obj) => {
+      const m = (obj as THREE.Mesh).material;
+      if (Array.isArray(m)) {
+        for (const mat of m) mat.needsUpdate = true;
+      } else if (m) {
+        m.needsUpdate = true;
+      }
+    });
+  }
+
   public dispose(): void {
     this.emberTex.dispose();
     this.smokeTex.dispose();
     this.mistTex.dispose();
     this.lotusTex.dispose();
     this.craterTex.dispose();
+    this.cycloneMat.dispose();
+    this.cycloneCanopy.geometry.dispose();
   }
 }
