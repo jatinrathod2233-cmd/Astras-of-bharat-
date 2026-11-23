@@ -1,6 +1,8 @@
-import React from 'react';
-import { CheckCircle2, Play, RotateCcw } from 'lucide-react';
+import React, { useState } from 'react';
+import { BookOpen, CheckCircle2, Lock, Play, RotateCcw, Settings } from 'lucide-react';
+import { ASTRA_CONFIG } from '../engine/astraConfig';
 import { PlayMode, QualityMode, WorldHudSnapshot } from '../types/world';
+import { AstraIconBadge } from './AstraIcons';
 
 interface OverlayModalsProps {
   mode: PlayMode;
@@ -12,6 +14,8 @@ interface OverlayModalsProps {
   onRestart: () => void;
   onChangeQualityMode: (mode: QualityMode) => void;
   onTogglePerfStats: () => void;
+  onDismissStoryIntro: () => void;
+  onDismissUnlockPopup: () => void;
 }
 
 const QUALITY_OPTIONS: ReadonlyArray<{ mode: QualityMode; label: string }> = [
@@ -31,8 +35,99 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
   onRestart,
   onChangeQualityMode,
   onTogglePerfStats,
+  onDismissStoryIntro,
+  onDismissUnlockPopup,
 }) => {
-  if (mode === 'PLAYING') return null;
+  const [pauseTab, setPauseTab] = useState<'SETTINGS' | 'JOURNAL'>('SETTINGS');
+
+  if (mode === 'PLAYING') {
+    if (hud.showStoryIntro) {
+      return (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#0D1016]/80 p-5">
+          <div className="w-full max-w-[460px] rounded-xl border border-amber-300/45 bg-[#0D1016]/95 p-6 space-y-4">
+            <div className="space-y-1">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-300">
+                Sage Vashistha’s Counsel
+              </p>
+              <h2 className="font-display text-2xl font-semibold text-[#F7F1E3]">
+                The Five Divine Astras
+              </h2>
+            </div>
+
+            <p className="text-sm leading-relaxed text-[#DFD7C8]">
+              “O Prince Ram, the Rakshasa legions gather strength across the Sarayu
+              and volcanic badlands. Four elemental Astras lie sealed in ancient
+              shrines—Fire, Water, Wind, and Serpent. Gather all four to unlock the
+              supreme trial of the Brahmastra at Ayodhya’s central sanctum.”
+            </p>
+
+            <div className="rounded-md border border-amber-200/15 bg-[#131720] px-3.5 py-2.5 text-xs text-[#C9C1B2] space-y-1">
+              <p>
+                <span className="text-amber-300 font-semibold">Touch:</span> Hold{' '}
+                <span className="text-[#F7F1E3]">દિવ્યાસ્ત્ર</span> to pick an Astra, tap{' '}
+                <span className="text-[#F7F1E3]">Shoot (X)</span> to unleash.
+              </p>
+              <p>
+                <span className="text-amber-300 font-semibold">Keyboard:</span> Hold{' '}
+                <span className="text-[#F7F1E3]">Q</span> (or press 1–5) to equip,{' '}
+                <span className="text-[#F7F1E3]">X</span> to shoot,{' '}
+                <span className="text-[#F7F1E3]">R</span> for Chakra.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={onDismissStoryIntro}
+              className="w-full rounded-md bg-[#D99B26] px-5 py-2.5 text-sm font-semibold text-[#101319] hover:bg-[#E8AE3B] cursor-pointer"
+            >
+              Begin Sacred Quest
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    if (hud.astraUnlockPopup) {
+      const popup = hud.astraUnlockPopup;
+      const cfg = ASTRA_CONFIG[popup.id];
+      return (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#0D1016]/75 p-5">
+          <div
+            style={{ borderColor: `${cfg.cssAccent}88` }}
+            className="w-full max-w-[400px] rounded-xl border-2 bg-[#0D1016]/95 p-6 text-center space-y-4"
+          >
+            <div className="flex justify-center">
+              <AstraIconBadge id={popup.id} size={58} unlocked active />
+            </div>
+
+            <div className="space-y-1">
+              <p
+                style={{ color: cfg.cssAccent }}
+                className="text-[11px] font-semibold uppercase tracking-wider"
+              >
+                Divine Astra Earned · {cfg.sanskritTitle}
+              </p>
+              <h2 className="font-display text-2xl font-bold text-[#F7F1E3]">
+                {popup.name}
+              </h2>
+            </div>
+
+            <p className="text-xs leading-relaxed text-[#DFD7C8]">{popup.oneLineStory}</p>
+
+            <button
+              type="button"
+              onClick={onDismissUnlockPopup}
+              className="w-full rounded-md bg-[#D99B26] px-5 py-2.5 text-sm font-semibold text-[#101319] hover:bg-[#E8AE3B] cursor-pointer"
+            >
+              Wield {popup.name}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return null;
+  }
 
   if (mode === 'TITLE') {
     const pct = hud.assetsReady
@@ -97,70 +192,167 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
 
   if (mode === 'PAUSED') {
     return (
-      <div className="fixed inset-0 z-30 flex items-center justify-center bg-[#0D1016]/75 p-6">
-        <div className="w-full max-w-[420px] rounded-xl border border-amber-300/35 bg-[#0D1016]/95 p-7 space-y-5">
-          <div className="space-y-1">
-            <p className="text-xs text-amber-300">{hud.districtName}</p>
-            <h2 className="font-display text-2xl font-semibold text-[#F7F1E3]">
-              Game Paused
-            </h2>
-          </div>
-
-          <div className="space-y-2 rounded-md border border-amber-200/15 bg-[#131720] p-4 text-xs text-[#C9C1B2]">
-            <p className="font-mono-tabular">
-              Karma: {hud.karma} · Progress: {hud.completedMissions}/
-              {hud.totalMissions}
-            </p>
-          </div>
-
-          {/* Graphics Quality Selector */}
-          <div className="space-y-2.5 rounded-md border border-amber-200/15 bg-[#131720] p-4">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-medium text-[#EFE9DC]">Graphics Quality</span>
-              <span className="font-mono-tabular text-amber-300">
-                {hud.qualityMode === 'AUTO'
-                  ? `Auto (${hud.qualityTier})`
-                  : hud.qualityTier}
-                {' · '}
-                {hud.fps} FPS
-              </span>
+      <div className="fixed inset-0 z-30 flex items-center justify-center bg-[#0D1016]/75 p-4 sm:p-6">
+        <div className="w-full max-w-[480px] max-h-[90vh] overflow-y-auto rounded-xl border border-amber-300/35 bg-[#0D1016]/95 p-6 space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-0.5">
+              <p className="text-xs text-amber-300">{hud.districtName}</p>
+              <h2 className="font-display text-2xl font-semibold text-[#F7F1E3]">
+                Game Paused
+              </h2>
             </div>
 
-            <div className="grid grid-cols-4 gap-1.5">
-              {QUALITY_OPTIONS.map((opt) => {
-                const selected = hud.qualityMode === opt.mode;
-                return (
-                  <button
-                    key={opt.mode}
-                    type="button"
-                    onClick={() => onChangeQualityMode(opt.mode)}
-                    className={`rounded px-2 py-1.5 text-xs font-medium transition-colors cursor-pointer border ${
-                      selected
-                        ? 'border-amber-300 bg-[#D99B26] text-[#101319] font-semibold'
-                        : 'border-amber-200/20 bg-[#181D28] text-[#DFD7C8] hover:border-amber-300/50'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="flex items-center justify-between pt-1">
-              <span className="text-xs text-[#C9C1B2]">Show FPS &amp; Tier HUD</span>
+            <div className="flex rounded-md border border-amber-200/20 bg-[#131720] p-0.5">
               <button
                 type="button"
-                onClick={onTogglePerfStats}
-                className={`rounded border px-2.5 py-1 text-[11px] font-medium cursor-pointer transition-colors ${
-                  showPerfStats
-                    ? 'border-amber-300/70 bg-amber-400/20 text-amber-200'
-                    : 'border-amber-200/20 bg-[#181D28] text-[#C9C1B2] hover:border-amber-300/50'
+                onClick={() => setPauseTab('SETTINGS')}
+                className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors ${
+                  pauseTab === 'SETTINGS'
+                    ? 'bg-[#D99B26] text-[#101319] font-semibold'
+                    : 'text-[#C9C1B2] hover:text-[#F7F1E3]'
                 }`}
               >
-                {showPerfStats ? 'On' : 'Off'}
+                <Settings className="h-3 w-3" aria-hidden="true" />
+                <span>Settings</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPauseTab('JOURNAL')}
+                className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors ${
+                  pauseTab === 'JOURNAL'
+                    ? 'bg-[#D99B26] text-[#101319] font-semibold'
+                    : 'text-[#C9C1B2] hover:text-[#F7F1E3]'
+                }`}
+              >
+                <BookOpen className="h-3 w-3" aria-hidden="true" />
+                <span>Journal ({hud.astraQuest.unlockedCount}/5)</span>
               </button>
             </div>
           </div>
+
+          {pauseTab === 'SETTINGS' ? (
+            <>
+              <div className="space-y-1.5 rounded-md border border-amber-200/15 bg-[#131720] p-3.5 text-xs text-[#C9C1B2]">
+                <p className="font-mono-tabular">
+                  Karma: {hud.karma} · Astras: {hud.astraQuest.unlockedCount}/5 ·
+                  Missions: {hud.completedMissions}/{hud.totalMissions}
+                </p>
+                <p className="text-[11px] text-[#9B9384]">
+                  Q (Hold): Divyastra Wheel · X: Shoot Astra · R: Chakra · F: Bow · E:
+                  Interact · C: Stealth · V: Auto-Drive
+                </p>
+              </div>
+
+              {/* Graphics Quality Selector */}
+              <div className="space-y-2.5 rounded-md border border-amber-200/15 bg-[#131720] p-4">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-[#EFE9DC]">Graphics Quality</span>
+                  <span className="font-mono-tabular text-amber-300">
+                    {hud.qualityMode === 'AUTO'
+                      ? `Auto (${hud.qualityTier})`
+                      : hud.qualityTier}
+                    {' · '}
+                    {hud.fps} FPS
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-4 gap-1.5">
+                  {QUALITY_OPTIONS.map((opt) => {
+                    const selected = hud.qualityMode === opt.mode;
+                    return (
+                      <button
+                        key={opt.mode}
+                        type="button"
+                        onClick={() => onChangeQualityMode(opt.mode)}
+                        className={`rounded px-2 py-1.5 text-xs font-medium transition-colors cursor-pointer border ${
+                          selected
+                            ? 'border-amber-300 bg-[#D99B26] text-[#101319] font-semibold'
+                            : 'border-amber-200/20 bg-[#181D28] text-[#DFD7C8] hover:border-amber-300/50'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <span className="text-xs text-[#C9C1B2]">Show FPS &amp; Tier HUD</span>
+                  <button
+                    type="button"
+                    onClick={onTogglePerfStats}
+                    className={`rounded border px-2.5 py-1 text-[11px] font-medium cursor-pointer transition-colors ${
+                      showPerfStats
+                        ? 'border-amber-300/70 bg-amber-400/20 text-amber-200'
+                        : 'border-amber-200/20 bg-[#181D28] text-[#C9C1B2] hover:border-amber-300/50'
+                    }`}
+                  >
+                    {showPerfStats ? 'On' : 'Off'}
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="space-y-2.5 max-h-[50vh] overflow-y-auto pr-1">
+              {hud.astraQuest.astras.map((entry) => {
+                const cfg = ASTRA_CONFIG[entry.id];
+                return (
+                  <div
+                    key={entry.id}
+                    className="rounded-md border border-amber-200/15 bg-[#131720] p-3 space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <AstraIconBadge
+                          id={entry.id}
+                          size={30}
+                          unlocked={entry.unlocked}
+                          active={entry.unlocked}
+                        />
+                        <div>
+                          <p
+                            style={{ color: entry.unlocked ? cfg.cssAccent : '#C9C1B2' }}
+                            className="text-xs font-semibold"
+                          >
+                            {entry.name}
+                          </p>
+                          <p className="text-[10px] text-[#9B9384]">{entry.title}</p>
+                        </div>
+                      </div>
+                      <span
+                        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold ${
+                          entry.unlocked
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/35'
+                            : 'bg-slate-800/80 text-slate-300 border border-slate-600/40'
+                        }`}
+                      >
+                        {entry.unlocked ? (
+                          <>
+                            <CheckCircle2 className="h-2.5 w-2.5" aria-hidden="true" />
+                            <span>Collected</span>
+                          </>
+                        ) : (
+                          <>
+                            <Lock className="h-2.5 w-2.5" aria-hidden="true" />
+                            <span>Locked</span>
+                          </>
+                        )}
+                      </span>
+                    </div>
+
+                    <p className="text-[11px] leading-relaxed text-[#DFD7C8]">
+                      {entry.story}
+                    </p>
+                    {!entry.unlocked && (
+                      <p className="text-[10.5px] leading-snug text-amber-200/85 border-t border-amber-200/10 pt-1">
+                        Hint: {entry.hint}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           <div className="flex flex-col gap-2.5">
             <button

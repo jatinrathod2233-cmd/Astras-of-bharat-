@@ -1,8 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  clampWheelCenter,
+  getHoveredAstraFromPoint,
+} from './components/DivyastraRadialWheel';
 import { GameHUD } from './components/GameHUD';
 import { OverlayModals } from './components/OverlayModals';
+import {
+  ASTRA_CONFIG,
+  ASTRA_MAX_ENERGY,
+  ASTRA_ORDER,
+} from './engine/astraConfig';
 import { RamayanaWorldEngine } from './engine/RamayanaWorldEngine';
-import { PlayMode, QualityMode, WorldHudSnapshot } from './types/world';
+import { AstraId, PlayMode, QualityMode, WorldHudSnapshot } from './types/world';
 import { soundEngine } from './utils/audio';
 
 const INITIAL_HUD: WorldHudSnapshot = {
@@ -47,6 +56,43 @@ const INITIAL_HUD: WorldHudSnapshot = {
   qualityMode: 'AUTO',
   qualityTier: 'HIGH',
   fps: 60,
+  selectedAstra: null,
+  astraEnergy: ASTRA_MAX_ENERGY,
+  maxAstraEnergy: ASTRA_MAX_ENERGY,
+  astraCooldowns: {
+    AGNEYASTRA: 0,
+    VARUNASTRA: 0,
+    VAYAVYASTRA: 0,
+    NAGASTRA: 0,
+    BRAHMASTRA: 0,
+  },
+  brahmastraAimReady: false,
+  brahmastraSummoning: false,
+  brahmaFlashAlpha: 0,
+  brahmaFadeAlpha: 0,
+  astraQuest: {
+    astras: ASTRA_ORDER.map((id) => ({
+      id,
+      name: ASTRA_CONFIG[id].name,
+      title: ASTRA_CONFIG[id].sanskritTitle,
+      unlocked: false,
+      story: ASTRA_CONFIG[id].journalStory,
+      hint: ASTRA_CONFIG[id].journalHint,
+    })),
+    unlockedCount: 0,
+    activeAstraId: null,
+    objectiveTitle: 'Seek Agneyastra',
+    objectiveDetail: 'Light the 4 fire bowls at the Ruined Fire Temple near the volcanoes.',
+    objectiveDistanceM: 2562,
+    challengeSubProgress: null,
+    challengeTimerSec: null,
+    underwaterBreath: null,
+    brahmaTrialStage: 0,
+    allCompleted: false,
+  },
+  astraUnlockPopup: null,
+  enemySummonWarning: null,
+  showStoryIntro: false,
 };
 
 const SHOW_FPS_STORAGE_KEY = 'astras_show_fps_v1';
@@ -66,6 +112,20 @@ export default function App() {
       return false;
     }
   });
+
+  // Desktop Q-Wheel state
+  const [desktopWheelOpen, setDesktopWheelOpen] = useState(false);
+  const [desktopWheelCenter, setDesktopWheelCenter] = useState<{ x: number; y: number }>({
+    x: 420,
+    y: 320,
+  });
+  const [desktopHoveredAstra, setDesktopHoveredAstra] = useState<AstraId | null>(null);
+  const desktopWheelOpenRef = useRef(false);
+  const desktopWheelCenterRef = useRef<{ x: number; y: number }>({ x: 420, y: 320 });
+  const desktopHoveredRef = useRef<AstraId | null>(null);
+  const lastMouseRef = useRef<{ x: number; y: number } | null>(null);
+  const hudRef = useRef<WorldHudSnapshot>(INITIAL_HUD);
+  hudRef.current = hud;
 
   // Separate refs for keyboard vs virtual joystick so they blend cleanly
   const modeRef = useRef<PlayMode>('TITLE');
@@ -103,6 +163,10 @@ export default function App() {
     lookPointerRef.current = { id: null, lastX: 0, lastY: 0 };
     activePointersRef.current.clear();
     pinchDistRef.current = null;
+    desktopWheelOpenRef.current = false;
+    desktopHoveredRef.current = null;
+    setDesktopWheelOpen(false);
+    setDesktopHoveredAstra(null);
     setTouchSprint(false);
     engineRef.current?.clearInputs();
   }, []);
@@ -226,8 +290,38 @@ export default function App() {
         engine.input.jumpPressed = true;
       } else if (e.code === 'KeyF') {
         engine.input.fireHeld = true;
-      } else if (e.code === 'KeyQ') {
+      } else if (e.code === 'KeyR') {
         engine.input.astraPressed = true;
+      } else if (e.code === 'KeyX') {
+        engine.input.shootAstraPressed = true;
+      } else if (e.code === 'KeyQ' && !e.repeat) {
+        const snapshot = hudRef.current;
+        if (snapshot.astraQuest.unlockedCount > 0) {
+          const anchor = lastMouseRef.current ?? {
+            x: window.innerWidth * 0.5,
+            y: window.innerHeight * 0.5,
+          };
+          const clamped = clampWheelCenter(anchor.x, anchor.y);
+          desktopWheelCenterRef.current = clamped;
+          desktopWheelOpenRef.current = true;
+          desktopHoveredRef.current = snapshot.selectedAstra;
+          setDesktopWheelCenter(clamped);
+          setDesktopHoveredAstra(snapshot.selectedAstra);
+          setDesktopWheelOpen(true);
+        }
+      } else if (
+        e.code === 'Digit1' ||
+        e.code === 'Digit2' ||
+        e.code === 'Digit3' ||
+        e.code === 'Digit4' ||
+        e.code === 'Digit5'
+      ) {
+        const idx = Number(e.code.replace('Digit', '')) - 1;
+        const candidateId = ASTRA_ORDER[idx];
+        const entry = hudRef.current.astraQuest.astras.find((a) => a.id === candidateId);
+        if (entry?.unlocked) {
+          engine.selectAstra(candidateId);
+        }
       } else if (e.code === 'KeyE') {
         engine.input.interactPressed = true;
       } else if (e.code === 'KeyV') {
@@ -242,14 +336,44 @@ export default function App() {
       recomputeKeyVector();
       if (e.code === 'KeyF' && engineRef.current) {
         engineRef.current.input.fireHeld = false;
+      } else if (e.code === 'KeyQ' && desktopWheelOpenRef.current) {
+        const picked = desktopHoveredRef.current;
+        desktopWheelOpenRef.current = false;
+        desktopHoveredRef.current = null;
+        setDesktopWheelOpen(false);
+        setDesktopHoveredAstra(null);
+        if (picked && engineRef.current) {
+          engineRef.current.selectAstra(picked);
+        }
+      }
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      lastMouseRef.current = { x: e.clientX, y: e.clientY };
+      if (!desktopWheelOpenRef.current) return;
+      const next = getHoveredAstraFromPoint(
+        desktopWheelCenterRef.current.x,
+        desktopWheelCenterRef.current.y,
+        e.clientX,
+        e.clientY,
+        hudRef.current.astraQuest.astras
+      );
+      if (next !== desktopHoveredRef.current) {
+        desktopHoveredRef.current = next;
+        setDesktopHoveredAstra(next);
+        if (next) {
+          soundEngine.playWheelTick();
+        }
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('mousemove', onMouseMove);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('mousemove', onMouseMove);
     };
   }, [syncCombinedMovement, touchSprint]);
 
@@ -371,6 +495,18 @@ export default function App() {
   const handleAstra = useCallback(() => {
     if (engineRef.current) engineRef.current.input.astraPressed = true;
   }, []);
+  const handleSelectAstra = useCallback((id: AstraId) => {
+    engineRef.current?.selectAstra(id);
+  }, []);
+  const handleShootAstra = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.shootAstraPressed = true;
+  }, []);
+  const handleDismissStoryIntro = useCallback(() => {
+    engineRef.current?.dismissStoryIntro();
+  }, []);
+  const handleDismissUnlockPopup = useCallback(() => {
+    engineRef.current?.dismissUnlockPopup();
+  }, []);
   const handleJump = useCallback(() => {
     if (engineRef.current) engineRef.current.input.jumpPressed = true;
   }, []);
@@ -444,6 +580,9 @@ export default function App() {
           muted={muted}
           sprintActive={touchSprint}
           showPerfStats={showPerfStats}
+          desktopWheelOpen={desktopWheelOpen}
+          desktopWheelCenter={desktopWheelCenter}
+          desktopHoveredAstra={desktopHoveredAstra}
           onToggleMute={handleToggleMute}
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
@@ -452,6 +591,8 @@ export default function App() {
           onFireStart={handleFireStart}
           onFireEnd={handleFireEnd}
           onAstra={handleAstra}
+          onSelectAstra={handleSelectAstra}
+          onShootAstra={handleShootAstra}
           onJump={handleJump}
           onToggleSprint={handleToggleSprint}
           onInteract={handleInteract}
@@ -460,7 +601,7 @@ export default function App() {
         />
       )}
 
-      {/* Title / Pause / Defeat / Victory Overlay */}
+      {/* Title / Pause / Story / Unlock / Defeat / Victory Overlay */}
       <OverlayModals
         mode={mode}
         hud={hud}
@@ -471,6 +612,8 @@ export default function App() {
         onRestart={handleRestart}
         onChangeQualityMode={handleChangeQualityMode}
         onTogglePerfStats={handleTogglePerfStats}
+        onDismissStoryIntro={handleDismissStoryIntro}
+        onDismissUnlockPopup={handleDismissUnlockPopup}
       />
     </div>
   );

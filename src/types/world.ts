@@ -20,9 +20,55 @@ export interface MissionDef {
 
 export interface RadarBlip {
   id: string;
-  kind: 'RATHA' | 'ENEMY' | 'COMMANDER' | 'WAYPOINT' | 'TEMPLE';
+  kind: 'RATHA' | 'ENEMY' | 'COMMANDER' | 'WAYPOINT' | 'TEMPLE' | 'ASTRA_OBJECTIVE';
   x: number;
   z: number;
+}
+
+export type AstraId =
+  | 'AGNEYASTRA'
+  | 'VARUNASTRA'
+  | 'VAYAVYASTRA'
+  | 'NAGASTRA'
+  | 'BRAHMASTRA';
+
+export type BrahmaTrialStage = 0 | 1 | 2 | 3 | 4;
+
+export interface AstraStatusEntry {
+  id: AstraId;
+  name: string;
+  title: string;
+  unlocked: boolean;
+  story: string;
+  hint: string;
+}
+
+export interface AstraUnlockPopup {
+  id: AstraId;
+  name: string;
+  oneLineStory: string;
+}
+
+export interface EnemySummonWarning {
+  active: boolean;
+  bossName: string;
+  remainingSec: number;
+  totalSec: number;
+  interrupted: boolean;
+}
+
+export interface AstraQuestHudState {
+  astras: AstraStatusEntry[];
+  unlockedCount: number;
+  activeAstraId: AstraId | null;
+  objectiveTitle: string;
+  objectiveDetail: string;
+  objectiveDistanceM: number;
+  challengeSubProgress: string | null;
+  challengeTimerSec: number | null;
+  underwaterBreath: number | null; // 0..100 when diving for Varunastra
+  brahmaTrialStage: BrahmaTrialStage; // 0 when not in trial, 1..4 inside trial
+  allCompleted: boolean;
 }
 
 export type NpcRole =
@@ -81,6 +127,19 @@ export interface WorldHudSnapshot {
   qualityMode: QualityMode;
   qualityTier: QualityTier;
   fps: number;
+  // Divine Astras Quest HUD fields
+  selectedAstra: AstraId | null;
+  astraEnergy: number;
+  maxAstraEnergy: number;
+  astraCooldowns: Record<AstraId, number>;
+  brahmastraAimReady: boolean;
+  brahmastraSummoning: boolean;
+  brahmaFlashAlpha: number;
+  brahmaFadeAlpha: number;
+  astraQuest: AstraQuestHudState;
+  astraUnlockPopup: AstraUnlockPopup | null;
+  enemySummonWarning: EnemySummonWarning | null;
+  showStoryIntro: boolean;
 }
 
 export type DemonVariant =
@@ -99,7 +158,9 @@ export interface InputState {
   sprint: boolean;
   jumpPressed: boolean;
   fireHeld: boolean;
-  astraPressed: boolean;
+  astraPressed: boolean; // Sudarshan Chakra trigger
+  shootAstraPressed: boolean; // Non-cancellable Divyastra bow shoot trigger
+  selectedAstra: AstraId | null;
   interactPressed: boolean;
   stealthTogglePressed: boolean;
   autoDriveTogglePressed: boolean;

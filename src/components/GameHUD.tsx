@@ -1,6 +1,23 @@
 import React from 'react';
-import { Eye, EyeOff, Flame, Gauge, Pause, Sparkles, Star, Volume2, VolumeX, ZoomIn, ZoomOut } from 'lucide-react';
-import { WorldHudSnapshot } from '../types/world';
+import {
+  AlertTriangle,
+  Eye,
+  EyeOff,
+  Flame,
+  Gauge,
+  Pause,
+  Sparkles,
+  Star,
+  Volume2,
+  VolumeX,
+  Waves,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
+import { ASTRA_CONFIG } from '../engine/astraConfig';
+import { AstraId, WorldHudSnapshot } from '../types/world';
+import { AstraIconBadge } from './AstraIcons';
+import { DivyastraRadialWheel } from './DivyastraRadialWheel';
 import { MinimapRadar } from './MinimapRadar';
 import { TouchActionPad } from './TouchActionPad';
 import { TouchJoystick } from './TouchJoystick';
@@ -10,6 +27,9 @@ interface GameHUDProps {
   muted: boolean;
   sprintActive: boolean;
   showPerfStats: boolean;
+  desktopWheelOpen: boolean;
+  desktopWheelCenter: { x: number; y: number };
+  desktopHoveredAstra: AstraId | null;
   onToggleMute: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
@@ -18,6 +38,8 @@ interface GameHUDProps {
   onFireStart: () => void;
   onFireEnd: () => void;
   onAstra: () => void;
+  onSelectAstra: (id: AstraId) => void;
+  onShootAstra: () => void;
   onJump: () => void;
   onToggleSprint: () => void;
   onInteract: () => void;
@@ -32,6 +54,9 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   muted,
   sprintActive,
   showPerfStats,
+  desktopWheelOpen,
+  desktopWheelCenter,
+  desktopHoveredAstra,
   onToggleMute,
   onZoomIn,
   onZoomOut,
@@ -40,6 +65,8 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   onFireStart,
   onFireEnd,
   onAstra,
+  onSelectAstra,
+  onShootAstra,
   onJump,
   onToggleSprint,
   onInteract,
@@ -48,6 +75,10 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
 }) => {
   const hpPct = Math.max(0, Math.min(100, (hud.hp / hud.maxHp) * 100));
   const pranaPct = Math.max(0, Math.min(100, (hud.prana / hud.maxPrana) * 100));
+  const astraEnergyPct = Math.max(
+    0,
+    Math.min(100, (hud.astraEnergy / Math.max(1, hud.maxAstraEnergy)) * 100)
+  );
 
   // Karma progresses across 500-point Dharma tiers so the bar always reflects growth
   const karmaTierSize = 500;
@@ -65,8 +96,49 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
     Math.min(100, (hud.chariotSpeedKmh / 262) * 100)
   );
 
+  const activeAstraCfg = hud.selectedAstra ? ASTRA_CONFIG[hud.selectedAstra] : null;
+  const quest = hud.astraQuest;
+  const breathPct =
+    quest.underwaterBreath !== null
+      ? Math.max(0, Math.min(100, quest.underwaterBreath))
+      : null;
+
+  const enemyWarn = hud.enemySummonWarning;
+  const enemyWarnPct =
+    enemyWarn && enemyWarn.active
+      ? Math.max(0, Math.min(100, (enemyWarn.remainingSec / Math.max(0.1, enemyWarn.totalSec)) * 100))
+      : 0;
+
   return (
     <>
+      {/* Brahmastra Ritual Black-Fade & Lightning Flash Screen Overlays */}
+      {hud.brahmaFadeAlpha > 0.01 && (
+        <div
+          aria-hidden="true"
+          style={{ opacity: Math.min(1, hud.brahmaFadeAlpha) }}
+          className="pointer-events-none fixed inset-0 z-30 bg-black"
+        />
+      )}
+      {hud.brahmaFlashAlpha > 0.01 && (
+        <div
+          aria-hidden="true"
+          style={{ opacity: Math.min(1, hud.brahmaFlashAlpha) }}
+          className="pointer-events-none fixed inset-0 z-30 bg-[#FFF5CC]"
+        />
+      )}
+
+      {/* Desktop Hold-Q Radial Wheel */}
+      <DivyastraRadialWheel
+        open={desktopWheelOpen}
+        centerX={desktopWheelCenter.x}
+        centerY={desktopWheelCenter.y}
+        hoveredAstra={desktopHoveredAstra}
+        selectedAstra={hud.selectedAstra}
+        astras={quest.astras}
+        astraEnergy={hud.astraEnergy}
+        cooldowns={hud.astraCooldowns}
+      />
+
       {/* Top-Left: Minimal 80px Radar + Optional Compact FPS/Quality Readout */}
       <div className="fixed top-3 left-3 z-20 flex items-start gap-2 pointer-events-none">
         <MinimapRadar
@@ -82,10 +154,89 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         )}
       </div>
 
-      {/* Left Side: Minimal Compact Prana & Karma Bars */}
+      {/* Top-Center: Compact Divine Astras Objective & 5-Icon Collection Bar */}
+      <div className="fixed top-3 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-1.5 pointer-events-none max-w-[44vw] sm:max-w-[340px]">
+        <div className="w-full rounded-md border border-amber-300/25 bg-[#0D1016]/70 px-2.5 py-1.5 text-center space-y-1">
+          <div className="flex items-center justify-center gap-2 text-[10px] font-semibold text-amber-200">
+            <span className="truncate">{quest.objectiveTitle}</span>
+            {quest.objectiveDistanceM > 0 && (
+              <span className="font-mono-tabular text-[#F7F1E3] shrink-0">
+                {quest.objectiveDistanceM}m
+              </span>
+            )}
+          </div>
+          {quest.objectiveDetail && (
+            <p className="text-[9px] leading-snug text-[#C9C1B2] line-clamp-2">
+              {quest.objectiveDetail}
+            </p>
+          )}
+          {(quest.challengeSubProgress || quest.challengeTimerSec !== null) && (
+            <div className="flex items-center justify-center gap-2 pt-0.5 font-mono-tabular text-[9px] text-amber-300">
+              {quest.challengeSubProgress && <span>{quest.challengeSubProgress}</span>}
+              {quest.challengeTimerSec !== null && (
+                <span className={quest.challengeTimerSec <= 10 ? 'text-rose-300 font-bold' : ''}>
+                  {Math.ceil(quest.challengeTimerSec)}s
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 5-Icon Astra Collection Bar (click any unlocked icon to quick-equip) */}
+        <div className="pointer-events-auto flex items-center gap-1.5 rounded-full border border-amber-200/20 bg-[#0D1016]/70 px-2 py-1">
+          {quest.astras.map((a) => (
+            <button
+              key={a.id}
+              type="button"
+              disabled={!a.unlocked}
+              onClick={() => {
+                if (a.unlocked) onSelectAstra(a.id);
+              }}
+              aria-label={a.unlocked ? `Equip ${a.name}` : `${a.name} locked`}
+              className={a.unlocked ? 'cursor-pointer' : 'cursor-default'}
+            >
+              <AstraIconBadge
+                id={a.id}
+                size={24}
+                unlocked={a.unlocked}
+                active={hud.selectedAstra === a.id}
+              />
+            </button>
+          ))}
+        </div>
+
+        {/* Enemy Brahmastra 5-Second Interrupt Warning Bar */}
+        {enemyWarn && enemyWarn.active && (
+          <div
+            role="alert"
+            className="w-full rounded-md border border-rose-400/80 bg-[#2A0B12]/90 px-2.5 py-1.5 space-y-1"
+          >
+            <div className="flex items-center justify-between gap-2 text-[9px] font-bold text-rose-200">
+              <span className="inline-flex items-center gap-1">
+                <AlertTriangle className="h-3 w-3 text-rose-300 shrink-0" aria-hidden="true" />
+                <span>{enemyWarn.bossName}: Brahmastra!</span>
+              </span>
+              <span className="font-mono-tabular text-amber-200">
+                {enemyWarn.remainingSec.toFixed(1)}s
+              </span>
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded-sm bg-[#1A080C]">
+              <div
+                className="h-full bg-rose-400 transition-all duration-75"
+                style={{ width: `${enemyWarnPct}%` }}
+              />
+            </div>
+            <p className="text-[8.5px] font-medium text-amber-200 text-center">
+              Deal damage now to interrupt!
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Left Side: Minimal Compact Prana, Karma & Astra Energy Bars */}
       <div
-        aria-label="Prana and Karma status bars"
-        className="fixed left-3 top-[100px] z-20 w-[108px] rounded-md border border-amber-200/15 bg-[#0D1016]/55 px-2 py-1.5 space-y-1 pointer-events-none"
+        aria-label="Prana, Karma and Astra status bars"
+        className="fixed left-3 top-[100px] z-20 w-[112px] rounded-md border border-amber-200/15 bg-[#0D1016]/55 px-2 py-1.5 space-y-1 pointer-events-none"
       >
         {/* Prana Compact Bar */}
         <div className="space-y-0.5">
@@ -120,6 +271,30 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
             />
           </div>
         </div>
+
+        {/* Astra Energy Bar (shown when at least one Astra is unlocked) */}
+        {quest.unlockedCount > 0 && (
+          <div className="space-y-0.5">
+            <div className="flex items-center justify-between font-mono-tabular text-[9px] text-[#EFE9DC]">
+              <span
+                style={{ color: activeAstraCfg ? activeAstraCfg.cssAccent : '#FBBF24' }}
+                className="font-medium truncate max-w-[68px]"
+              >
+                {activeAstraCfg ? activeAstraCfg.name.replace('astra', '') : 'Astra'}
+              </span>
+              <span>{Math.round(hud.astraEnergy)}</span>
+            </div>
+            <div className="h-1 w-full overflow-hidden rounded-sm bg-[#1A202C]/90">
+              <div
+                className="h-full transition-all duration-150"
+                style={{
+                  width: `${astraEnergyPct}%`,
+                  backgroundColor: activeAstraCfg ? activeAstraCfg.cssAccent : '#FBBF24',
+                }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* Sabha Council Occupancy Counter (visible only during Throne Ascension) */}
         {hud.ascensionActive && (
@@ -294,6 +469,29 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         </div>
       </div>
 
+      {/* Underwater Breath Bar for Varunastra Sunken Shrine Dive */}
+      {breathPct !== null && (
+        <div className="pointer-events-none fixed bottom-12 left-1/2 -translate-x-1/2 z-20 w-[180px] rounded-md border border-sky-300/45 bg-[#0B1420]/85 px-2.5 py-1.5 space-y-1">
+          <div className="flex items-center justify-between font-mono-tabular text-[9px] font-semibold text-sky-200">
+            <span className="inline-flex items-center gap-1">
+              <Waves className="h-3 w-3 text-sky-300" aria-hidden="true" />
+              <span>Breath</span>
+            </span>
+            <span className={breathPct <= 25 ? 'text-rose-300' : 'text-sky-200'}>
+              {Math.round(breathPct)}%
+            </span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-sm bg-[#162233]">
+            <div
+              className={`h-full transition-all duration-100 ${
+                breathPct <= 25 ? 'bg-rose-400' : 'bg-sky-400'
+              }`}
+              style={{ width: `${breathPct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Minimal Contextual Prompt */}
       {hud.promptHint && (
         <div className="pointer-events-none fixed bottom-3 left-1/2 -translate-x-1/2 z-10 hidden md:block">
@@ -322,9 +520,17 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         stealthActive={hud.stealthActive}
         stealthSpotted={hud.stealthSpotted}
         autoDriveActive={hud.autoDriveActive}
+        selectedAstra={hud.selectedAstra}
+        astras={quest.astras}
+        astraEnergy={hud.astraEnergy}
+        astraCooldowns={hud.astraCooldowns}
+        brahmastraAimReady={hud.brahmastraAimReady}
+        brahmastraSummoning={hud.brahmastraSummoning}
         onFireStart={onFireStart}
         onFireEnd={onFireEnd}
         onAstra={onAstra}
+        onSelectAstra={onSelectAstra}
+        onShootAstra={onShootAstra}
         onJump={onJump}
         onToggleSprint={onToggleSprint}
         onInteract={onInteract}

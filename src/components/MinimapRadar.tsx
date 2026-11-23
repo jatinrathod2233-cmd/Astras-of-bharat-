@@ -90,6 +90,21 @@ export const MinimapRadar: React.FC<MinimapRadarProps> = React.memo(
           ctx.beginPath();
           ctx.arc(px, py, 1.6, 0, Math.PI * 2);
           ctx.fill();
+        } else if (b.kind === 'ASTRA_OBJECTIVE') {
+          ctx.strokeStyle = '#FFE082';
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.arc(px, py, 5.2, 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.fillStyle = '#FFBF3F';
+          ctx.beginPath();
+          ctx.moveTo(px, py - 3.6);
+          ctx.lineTo(px + 3.2, py);
+          ctx.lineTo(px, py + 3.6);
+          ctx.lineTo(px - 3.2, py);
+          ctx.closePath();
+          ctx.fill();
         } else if (b.kind === 'RATHA') {
           ctx.fillStyle = '#E8AE3B';
           ctx.fillRect(px - 2, py - 2, 4, 4);
