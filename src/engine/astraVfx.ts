@@ -586,6 +586,9 @@ export interface TornadoZone {
   liftHeight: number;
   dps: number;
   tickAccum: number;
+  zoneShotId?: string;
+  syncAccum: number;
+  optimisticDmg: Map<string, number>;
 }
 
 export interface AgniMandalaZone {
@@ -604,6 +607,9 @@ export interface AgniMandalaZone {
   radius: number;
   pullRadius: number;
   dps: number;
+  zoneShotId?: string;
+  syncAccum: number;
+  optimisticDmg: Map<string, number>;
 }
 
 interface LightningBoltEffect {
@@ -1542,7 +1548,8 @@ export class AstraVfxManager {
     durationSec: number,
     dps: number,
     particleScale: number,
-    tier: QualityTier
+    tier: QualityTier,
+    zoneShotId?: string
   ): void {
     const grp = this.poolManager.acquire<THREE.Group>('astra_agni_mandala');
     grp.position.set(x, y, z);
@@ -1575,6 +1582,9 @@ export class AstraVfxManager {
       radius,
       pullRadius: radius * 1.28,
       dps,
+      zoneShotId,
+      syncAccum: 0,
+      optimisticDmg: new Map(),
     });
     this.spawnFireScorch(x, y, z, radius * 0.92, particleScale, tier);
     this.updateAgniHeatLight(x, y + 1.2, z, 0, 22, tier);
@@ -1604,7 +1614,8 @@ export class AstraVfxManager {
     liftHeight: number,
     dps: number,
     durationSec: number,
-    particleScale: number
+    particleScale: number,
+    zoneShotId?: string
   ): void {
     const grp = this.poolManager.acquire<THREE.Group>('astra_tornado');
     grp.position.set(x, y, z);
@@ -1621,6 +1632,9 @@ export class AstraVfxManager {
       liftHeight,
       dps,
       tickAccum: 0,
+      zoneShotId,
+      syncAccum: 0,
+      optimisticDmg: new Map(),
     });
     this.spawnSpriteBurst(x, y + 1.0, z, 18, 'WIND', 3.0, 9.0, 1.05, 1.2, particleScale);
   }

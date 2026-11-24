@@ -31,6 +31,7 @@ import {
   ProjectileSyncClient,
 } from './ProjectileSyncClient';
 import {
+  HazardZoneTickResponse,
   intersectSegmentCapsule,
   PROJECTILE_PHYSICS_REGISTRY,
   ProjectileArchetypeId,
@@ -45,7 +46,11 @@ import {
   installEnemyAshDissolution,
 } from './astraVfx';
 import { DynamicAssetScaler } from './DynamicAssetScaler';
-import { HardwareEnvelope, probeHardwareEnvelope } from './HardwareProfiler';
+import {
+  HardwareEnvelope,
+  probeHardwareEnvelope,
+  runLaunchHardwareBenchmark,
+} from './HardwareProfiler';
 import { ObjectPoolManager, swapRemoveAt } from './ObjectPoolManager';
 import { OcclusionCullingManager } from './OcclusionCullingManager';
 import { QualityManager, QualityProfile } from './QualityManager';
@@ -599,6 +604,8 @@ interface ProjectileEntity {
   astraId: AstraId | null;
   isSplitSerpent?: boolean;
   homingTargetId?: string | null;
+  piercedEnemyIds?: Set<string>;
+  strikeCount?: number;
   poolKey: string;
   serverRejected?: boolean;
 }
@@ -964,6 +971,7 @@ export class RamayanaWorldEngine {
     spinAngle: 0,
   };
   private readonly _projCasterScratch: Vec3Like = { x: 0, y: 0, z: 0 };
+  private readonly _projCasterVelScratch: Vec3Like = { x: 0, y: 0, z: 0 };
   private readonly _projTargetScratch: Vec3Like = { x: 0, y: 0, z: 0 };
 
   // Input buffer updated externally
@@ -1494,11 +1502,14 @@ export class RamayanaWorldEngine {
     const emergencyScale = this.dynamicScaler
       ? this.dynamicScaler.getPixelScaleOverride()
       : 1.0;
+    const drsScale = this.qualityManager
+      ? this.qualityManager.getDynamicResolutionScale()
+      : 1.0;
     const basePr =
       profile.pixelRatioCap < 1
         ? profile.pixelRatioCap
         : Math.min(Math.max(1, window.devicePixelRatio || 1), profile.pixelRatioCap);
-    return Math.max(0.65, basePr * emergencyScale);
+    return Math.max(0.5, basePr * emergencyScale * drsScale);
   }
 
   private handleVisibilityChange = (): void => {
@@ -1655,11 +1666,42 @@ export class RamayanaWorldEngine {
     this.updateAtmosphericMood();
   }
 
+  private applyDynamicResolutionOnly(profile: QualityProfile): void {
+    if (this.isSoftwareGl || this.contextLost) return;
+    const width = this.container.clientWidth || window.innerWidth;
+    const height = this.container.clientHeight || window.innerHeight;
+    const pr = this.getEffectivePixelRatio(profile);
+    this.renderer.setPixelRatio(pr);
+    this.renderer.setSize(width, height);
+    if (this.composer) {
+      const w = Math.max(64, Math.floor(width * profile.underwaterScale));
+      const h = Math.max(64, Math.floor(height * profile.underwaterScale));
+      this.composer.setPixelRatio(pr);
+      this.composer.setSize(w, h);
+    }
+  }
+
   public setQualityMode(mode: QualityMode): void {
     const changedTier = this.qualityManager.setMode(mode);
     if (changedTier !== null) {
       this.applyQualityProfile(this.qualityManager.getProfile());
+    } else {
+      this.applyDynamicResolutionOnly(this.qualityManager.getProfile());
     }
+    this.emitHud();
+  }
+
+  public async rerunHardwareBenchmark(): Promise<void> {
+    if (this.disposed || this.contextLost) return;
+    const report = await runLaunchHardwareBenchmark(
+      this.renderer,
+      this.hardwareEnvelope
+    );
+    if (this.disposed) return;
+    this.qualityManager.applyBenchmarkLock(report);
+    const lockedProfile = this.qualityManager.getProfile();
+    this.dynamicScaler.syncWithProfile(lockedProfile, true);
+    this.applyQualityProfile(lockedProfile);
     this.emitHud();
   }
 
@@ -1688,7 +1730,23 @@ export class RamayanaWorldEngine {
     };
 
     try {
-      if (!(await reportStage(4, 'Preparing solar environment illumination'))) return;
+      if (!(await reportStage(2, 'Profiling CPU, RAM & GPU capabilities'))) return;
+      const benchReport = await runLaunchHardwareBenchmark(
+        this.renderer,
+        this.hardwareEnvelope,
+        (stageLabel) => {
+          if (!isAborted()) {
+            this.assetStage = stageLabel;
+            this.assetProgress = Math.max(this.assetProgress, 4);
+            this.emitHud();
+          }
+        }
+      );
+      if (isAborted()) return;
+      this.qualityManager.applyBenchmarkLock(benchReport);
+      this.applyQualityProfile(this.qualityManager.getProfile());
+
+      if (!(await reportStage(6, 'Preparing solar environment illumination'))) return;
       this.regenerateEnvironmentProbe();
 
       const initProfile = this.qualityManager.getProfile();
@@ -6419,6 +6477,31 @@ export class RamayanaWorldEngine {
     meshGroup.position.set(startX, startY, startZ);
     meshGroup.lookAt(startX + dirX, startY + dirY, startZ + dirZ);
 
+    // Optional lock-on target ID along Chakra's launch cone so it curves cleanly across clusters
+    let chakraLockId: string | null = null;
+    if (isChakra) {
+      let bestLockDot = 0.72;
+      for (let ei = 0; ei < this.enemies.length; ei++) {
+        const e = this.enemies[ei];
+        if (!e.alive) continue;
+        const edx = e.x - startX;
+        const edz = e.z - startZ;
+        const edist = Math.hypot(edx, edz);
+        if (edist > 36 || edist < 1.2) continue;
+        const dot = (edx / edist) * dirX + (edz / edist) * dirZ;
+        if (dot > bestLockDot) {
+          bestLockDot = dot;
+          chakraLockId = e.id;
+        }
+      }
+    }
+
+    const velFrac = profile.inheritCasterVelFraction;
+    const initVx = dirX * profile.speed + this._projCasterVelScratch.x * velFrac;
+    const initVy =
+      dirY * profile.speed + this._projCasterVelScratch.y * velFrac * 0.4;
+    const initVz = dirZ * profile.speed + this._projCasterVelScratch.z * velFrac;
+
     const entity: ProjectileEntity = {
       mesh: meshGroup,
       spinPivot,
@@ -6427,15 +6510,18 @@ export class RamayanaWorldEngine {
       x: startX,
       y: startY,
       z: startZ,
-      vx: dirX * profile.speed,
-      vy: dirY * profile.speed,
-      vz: dirZ * profile.speed,
+      vx: initVx,
+      vy: initVy,
+      vz: initVz,
       elapsedFlightSec: 0,
       spinAngle: 0,
       isChakra,
       stealthAmbush: isStealthAmbush,
       life: profile.maxLifeSec,
       astraId,
+      homingTargetId: chakraLockId,
+      piercedEnemyIds: isChakra ? new Set<string>() : undefined,
+      strikeCount: 0,
       poolKey,
     };
     this.projectiles.push(entity);
@@ -6454,11 +6540,12 @@ export class RamayanaWorldEngine {
       isStealthAmbush,
       nearby,
       null,
-      null,
+      chakraLockId,
       () => {
         // Server rejected cooldown/spawn sanity — disarm projectile immediately
         entity.serverRejected = true;
-      }
+      },
+      this._projCasterVelScratch
     );
   }
 
@@ -6585,7 +6672,8 @@ export class RamayanaWorldEngine {
         3.0,
         14,
         profile.particleScale,
-        profile.tier
+        profile.tier,
+        p.clientShotId
       );
       soundEngine.playAstraImpact('AGNEYASTRA');
       this.cameraShakeAmount = Math.max(this.cameraShakeAmount, cfg.cameraShake);
@@ -6656,7 +6744,8 @@ export class RamayanaWorldEngine {
         cfg.liftHeight,
         cfg.dotDamagePerSec,
         cfg.effectDurationSec,
-        profile.particleScale
+        profile.particleScale,
+        p.clientShotId
       );
       soundEngine.playAstraImpact('VAYAVYASTRA');
       this.cameraShakeAmount = Math.max(this.cameraShakeAmount, cfg.cameraShake);
@@ -6859,16 +6948,29 @@ export class RamayanaWorldEngine {
     optimistic: OptimisticDamageRecord[]
   ): void {
     if (!res.accepted) {
-      // Server rejected trajectory/impact claim — roll back unconfirmed optimistic HP/karma
+      // Server rejected trajectory/impact claim — roll back unconfirmed optimistic HP/karma & interrupted kills
       for (let i = 0; i < optimistic.length; i++) {
         const rec = optimistic[i];
         this.karma = Math.max(0, this.karma - rec.karmaAwarded);
         for (let ei = 0; ei < this.enemies.length; ei++) {
           const e = this.enemies[ei];
-          if (e.id === rec.enemyId && e.alive) {
+          if (e.id !== rec.enemyId) continue;
+          if (!e.alive && rec.wasKilledByShot && e.dissolving) {
+            e.alive = true;
+            e.dissolving = false;
+            e.dissolveTimer = 0;
+            e.hp = Math.min(e.maxHp, rec.damage);
+            const u = e.rig.root.userData._dissolveUniforms as
+              | EnemyDissolveUniforms
+              | undefined;
+            if (u) {
+              u.uDissolve.value = 0;
+              u.uHeatGlow.value = 0;
+            }
+          } else if (e.alive) {
             e.hp = Math.min(e.maxHp, e.hp + rec.damage);
-            break;
           }
+          break;
         }
       }
       return;
@@ -6896,6 +6998,40 @@ export class RamayanaWorldEngine {
                 : res.archetype === 'NAGASTRA_SERPENT'
                 ? 'NAGASTRA'
                 : res.archetype;
+            this.damageEnemy(e, delta, src);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  private reconcileZoneTick(
+    res: HazardZoneTickResponse,
+    optimisticByEnemy: Map<string, number>
+  ): void {
+    if (!res.accepted) {
+      for (const [enemyId, dmg] of optimisticByEnemy.entries()) {
+        for (let ei = 0; ei < this.enemies.length; ei++) {
+          const e = this.enemies[ei];
+          if (e.id === enemyId && e.alive) {
+            e.hp = Math.min(e.maxHp, e.hp + dmg);
+            break;
+          }
+        }
+      }
+      return;
+    }
+
+    const src: AstraId = res.zoneKind === 'AGNI_MANDALA' ? 'AGNEYASTRA' : 'VAYAVYASTRA';
+    for (let i = 0; i < res.authorizedTicks.length; i++) {
+      const auth = res.authorizedTicks[i];
+      const localDmg = optimisticByEnemy.get(auth.enemyId) ?? 0;
+      const delta = auth.damage - localDmg;
+      if (delta > 1.5) {
+        for (let ei = 0; ei < this.enemies.length; ei++) {
+          const e = this.enemies[ei];
+          if (e.id === auth.enemyId && e.alive) {
             this.damageEnemy(e, delta, src);
             break;
           }
@@ -8587,9 +8723,21 @@ export class RamayanaWorldEngine {
       }
     }
 
-    // Track horizontal velocity & turn rate for physics-based hair & cape simulation
+    // Track horizontal velocity & turn rate for physics-based hair & cape simulation + ballistic momentum inheritance
     const safeDt = Math.max(0.001, dt);
-    this.playerHorizSpeed = Math.hypot(this.playerX - prevX, this.playerZ - prevZ) / safeDt;
+    const velX = (this.playerX - prevX) / safeDt;
+    const velZ = (this.playerZ - prevZ) / safeDt;
+    const velMag = Math.hypot(velX, velZ);
+    if (velMag > 65 && velMag > 1e-5) {
+      const clampScale = 65 / velMag;
+      this._projCasterVelScratch.x = velX * clampScale;
+      this._projCasterVelScratch.z = velZ * clampScale;
+    } else {
+      this._projCasterVelScratch.x = velX;
+      this._projCasterVelScratch.z = velZ;
+    }
+    this._projCasterVelScratch.y = THREE.MathUtils.clamp(this.playerVelY, -25, 25);
+    this.playerHorizSpeed = velMag;
     let yawDelta = this.playerYaw - prevYaw;
     while (yawDelta > Math.PI) yawDelta -= Math.PI * 2;
     while (yawDelta < -Math.PI) yawDelta += Math.PI * 2;
@@ -8812,19 +8960,24 @@ export class RamayanaWorldEngine {
       }
       p.life -= dt;
 
-      // Resolve homing target coordinates for Nagastra split serpents without allocating
+      // Resolve homing target coordinates for Nagastra split serpents & lock-on Chakra without allocating
       let tgtPos: Vec3Like | null = null;
-      if (p.isSplitSerpent) {
+      if (p.isSplitSerpent || (p.isChakra && p.homingTargetId)) {
         let tgt: EnemyEntity | null = null;
         if (p.homingTargetId) {
           for (let ei = 0; ei < this.enemies.length; ei++) {
-            if (this.enemies[ei].alive && this.enemies[ei].id === p.homingTargetId) {
-              tgt = this.enemies[ei];
+            const candidate = this.enemies[ei];
+            if (
+              candidate.alive &&
+              candidate.id === p.homingTargetId &&
+              !(p.piercedEnemyIds && p.piercedEnemyIds.has(candidate.id))
+            ) {
+              tgt = candidate;
               break;
             }
           }
         }
-        if (!tgt) {
+        if (!tgt && p.isSplitSerpent) {
           let bestSq = 400;
           for (let ei = 0; ei < this.enemies.length; ei++) {
             const c = this.enemies[ei];
@@ -8849,7 +9002,7 @@ export class RamayanaWorldEngine {
       const ay = p.y;
       const az = p.z;
 
-      // Step shared deterministic per-weapon kinematics (gravity drop, drag, Chakra curve/return, serpent weave)
+      // Step shared deterministic per-weapon kinematics (ballistic arrow, Chakra boomerang, elemental waves/drills)
       const ks = this._projKinScratch;
       ks.archetype = p.archetype;
       ks.x = ax;
@@ -8875,6 +9028,35 @@ export class RamayanaWorldEngine {
 
       const profile = PROJECTILE_PHYSICS_REGISTRY[p.archetype];
 
+      // Check boomerang return catch for Sudarshan Chakra after outbound arc
+      if (
+        p.isChakra &&
+        p.elapsedFlightSec >= profile.returnAfterSec &&
+        Math.hypot(bx - this.playerX, bz - this.playerZ) <= profile.returnCatchRadius
+      ) {
+        this.projectileSync.validateImpact(
+          p.clientShotId,
+          p.archetype,
+          p.elapsedFlightSec,
+          'CASTER_RETURN',
+          { x: bx, y: by, z: bz },
+          null,
+          this._projCasterScratch,
+          [],
+          p.homingTargetId ?? null,
+          [],
+          (res, rec) => this.reconcileServerImpact(res, rec),
+          {
+            casterVel: this._projCasterVelScratch,
+            strikeIndex: p.strikeCount ?? 0,
+            isFinalImpact: true,
+          }
+        );
+        this.poolManager.release(p.poolKey, p.mesh);
+        swapRemoveAt(this.projectiles, i);
+        continue;
+      }
+
       let bestT = 2.0;
       let hitEnemy: EnemyEntity | null = null;
       let hitEnvironment = false;
@@ -8888,6 +9070,7 @@ export class RamayanaWorldEngine {
       for (let eIdx = 0; eIdx < this.enemies.length; eIdx++) {
         const e = this.enemies[eIdx];
         if (!e.alive) continue;
+        if (p.piercedEnemyIds && p.piercedEnemyIds.has(e.id)) continue;
         const scale = (e.isCommander ? 1.38 : 1.06) * e.customScale;
         const capR = 0.68 * scale + profile.hitRadius;
         const minY = e.y + 0.1;
@@ -9001,22 +9184,28 @@ export class RamayanaWorldEngine {
           this.enemies
         );
 
+        let keepPiercingFlight = false;
+        const strikeIndex = p.strikeCount ?? 0;
+
         if (p.astraId) {
           this.resolveAstraImpact(p, hitX, hitY, hitZ, hitEnemy, optimisticHits);
         } else if (hitEnemy) {
           if (p.isChakra) {
             this.spawnBlast(hitX, hitY, hitZ, 0xff5a12);
+            const aoeSq = profile.aoeRadius * profile.aoeRadius;
             for (let eIdx = 0; eIdx < this.enemies.length; eIdx++) {
               const other = this.enemies[eIdx];
               if (!other.alive) continue;
+              if (p.piercedEnemyIds && p.piercedEnemyIds.has(other.id)) continue;
               const odx = other.x - hitX;
               const odz = other.z - hitZ;
-              if (odx * odx + odz * odz < 100.0) {
+              if (odx * odx + odz * odz <= aoeSq) {
                 const dmg = Math.round(
                   (other === hitEnemy ? profile.directDamage : profile.splashDamage) *
                     dmgMult
                 );
                 const killed = this.damageEnemy(other, dmg, 'CHAKRA');
+                p.piercedEnemyIds?.add(other.id);
                 optimisticHits.push({
                   enemyId: other.id,
                   damage: dmg,
@@ -9025,6 +9214,9 @@ export class RamayanaWorldEngine {
                 });
               }
             }
+            p.piercedEnemyIds?.add(hitEnemy.id);
+            p.strikeCount = strikeIndex + 1;
+            keepPiercingFlight = p.strikeCount < profile.maxImpactHits;
           } else {
             const dmg = Math.round(profile.directDamage * dmgMult);
             const killed = this.damageEnemy(hitEnemy, dmg, 'STANDARD');
@@ -9042,14 +9234,17 @@ export class RamayanaWorldEngine {
           this.astraQuest?.onPlayerArrowHitPoint(hitX, hitY, hitZ, null);
           if (p.isChakra) {
             this.spawnBlast(hitX, hitY, hitZ, 0xff5a12);
+            const aoeSq = profile.aoeRadius * profile.aoeRadius;
             for (let eIdx = 0; eIdx < this.enemies.length; eIdx++) {
               const other = this.enemies[eIdx];
               if (!other.alive) continue;
+              if (p.piercedEnemyIds && p.piercedEnemyIds.has(other.id)) continue;
               const odx = other.x - hitX;
               const odz = other.z - hitZ;
-              if (odx * odx + odz * odz < 100.0) {
+              if (odx * odx + odz * odz <= aoeSq) {
                 const dmg = Math.round(profile.splashDamage * dmgMult);
                 const killed = this.damageEnemy(other, dmg, 'CHAKRA');
+                p.piercedEnemyIds?.add(other.id);
                 optimisticHits.push({
                   enemyId: other.id,
                   damage: dmg,
@@ -9063,6 +9258,7 @@ export class RamayanaWorldEngine {
           }
         }
 
+        const isFinalImpact = !keepPiercingFlight;
         this.projectileSync.validateImpact(
           p.clientShotId,
           p.archetype,
@@ -9074,12 +9270,25 @@ export class RamayanaWorldEngine {
           nearbySnap,
           p.homingTargetId ?? null,
           optimisticHits,
-          (res, rec) => this.reconcileServerImpact(res, rec)
+          (res, rec) => this.reconcileServerImpact(res, rec),
+          {
+            casterVel: this._projCasterVelScratch,
+            strikeIndex,
+            isFinalImpact,
+          }
         );
 
-        this.poolManager.release(p.poolKey, p.mesh);
-        swapRemoveAt(this.projectiles, i);
-        continue;
+        if (keepPiercingFlight) {
+          // Advance Chakra slightly past struck capsule so next frame doesn't re-collide cleanly
+          p.x = bx;
+          p.y = by;
+          p.z = bz;
+          p.mesh.position.set(p.x, p.y, p.z);
+        } else {
+          this.poolManager.release(p.poolKey, p.mesh);
+          swapRemoveAt(this.projectiles, i);
+          continue;
+        }
       }
 
       p.x = bx;
@@ -9179,13 +9388,15 @@ export class RamayanaWorldEngine {
             p.z,
             0xff5a12
           );
+          const aoeSq = profile.aoeRadius * profile.aoeRadius;
           for (let eIdx = 0; eIdx < this.enemies.length; eIdx++) {
             const other = this.enemies[eIdx];
             if (!other.alive) continue;
+            if (p.piercedEnemyIds && p.piercedEnemyIds.has(other.id)) continue;
             const odx = other.x - p.x;
             const odz = other.z - p.z;
-            if (odx * odx + odz * odz < 100.0) {
-              const dmg = p.stealthAmbush ? 170 : profile.splashDamage;
+            if (odx * odx + odz * odz <= aoeSq) {
+              const dmg = p.stealthAmbush ? 144 : profile.splashDamage;
               const killed = this.damageEnemy(other, dmg, 'CHAKRA');
               optimisticHits.push({
                 enemyId: other.id,
@@ -9208,7 +9419,12 @@ export class RamayanaWorldEngine {
           nearbySnap,
           p.homingTargetId ?? null,
           optimisticHits,
-          (res, rec) => this.reconcileServerImpact(res, rec)
+          (res, rec) => this.reconcileServerImpact(res, rec),
+          {
+            casterVel: this._projCasterVelScratch,
+            strikeIndex: p.strikeCount ?? 0,
+            isFinalImpact: true,
+          }
         );
 
         this.poolManager.release(p.poolKey, p.mesh);
@@ -9362,7 +9578,9 @@ export class RamayanaWorldEngine {
             }
             e.burnTimer = Math.max(e.burnTimer, 0.4);
             e.burnDps = Math.max(e.burnDps, am.dps);
-            this.damageEnemy(e, am.dps * dt, 'AGNEYASTRA');
+            const agniTickDmg = am.dps * dt;
+            this.damageEnemy(e, agniTickDmg, 'AGNEYASTRA');
+            am.optimisticDmg.set(e.id, (am.optimisticDmg.get(e.id) ?? 0) + agniTickDmg);
             if (!e.alive) break;
           }
         }
@@ -9432,7 +9650,9 @@ export class RamayanaWorldEngine {
             const targetLift = tn.liftHeight * (1 - (tDist / tn.radius) * 0.35);
             e.liftOffset = THREE.MathUtils.damp(e.liftOffset, targetLift, 4.5, dt);
             e.yaw += dt * 7.5;
-            this.damageEnemy(e, tn.dps * dt);
+            const vayuTickDmg = tn.dps * dt;
+            this.damageEnemy(e, vayuTickDmg, 'VAYAVYASTRA');
+            tn.optimisticDmg.set(e.id, (tn.optimisticDmg.get(e.id) ?? 0) + vayuTickDmg);
             if (!e.alive) break;
           }
         }
@@ -9983,6 +10203,50 @@ export class RamayanaWorldEngine {
       this.astraQuest.update(dt, elapsed);
     }
     if (this.astraVfx) {
+      // Flush throttled server validation ticks for persistent elemental hazard zones
+      if (this.projectileSync.isServerEnabled()) {
+        for (let mi = 0; mi < this.astraVfx.agniMandalas.length; mi++) {
+          const am = this.astraVfx.agniMandalas[mi];
+          if (!am.zoneShotId) continue;
+          am.syncAccum += dt;
+          if ((am.syncAccum >= 0.45 || am.life - dt <= 0) && am.optimisticDmg.size > 0) {
+            const batchDt = am.syncAccum;
+            am.syncAccum = 0;
+            const snapshot = new Map(am.optimisticDmg);
+            am.optimisticDmg.clear();
+            const nearby = this.projectileSync.buildNearbySnapshots(am.x, am.z, this.enemies, 32);
+            this.projectileSync.validateZoneTick(
+              am.zoneShotId,
+              'AGNI_MANDALA',
+              batchDt,
+              nearby,
+              snapshot,
+              (res, opt) => this.reconcileZoneTick(res, opt)
+            );
+          }
+        }
+        for (let ti = 0; ti < this.astraVfx.tornados.length; ti++) {
+          const tn = this.astraVfx.tornados[ti];
+          if (!tn.zoneShotId) continue;
+          tn.syncAccum += dt;
+          if ((tn.syncAccum >= 0.45 || tn.life - dt <= 0) && tn.optimisticDmg.size > 0) {
+            const batchDt = tn.syncAccum;
+            tn.syncAccum = 0;
+            const snapshot = new Map(tn.optimisticDmg);
+            tn.optimisticDmg.clear();
+            const nearby = this.projectileSync.buildNearbySnapshots(tn.x, tn.z, this.enemies, 32);
+            this.projectileSync.validateZoneTick(
+              tn.zoneShotId,
+              'VAYU_TORNADO',
+              batchDt,
+              nearby,
+              snapshot,
+              (res, opt) => this.reconcileZoneTick(res, opt)
+            );
+          }
+        }
+      }
+
       const pScale = this.qualityManager.getProfile().particleScale;
       this.astraVfx.update(dt, elapsed, pScale, (id: string) => {
         for (let ei = 0; ei < this.enemies.length; ei++) {
@@ -11531,6 +11795,9 @@ export class RamayanaWorldEngine {
     const qMode = this.qualityManager.getMode();
     const qTier = this.qualityManager.getTier();
     const fpsVal = this.qualityManager.getFps();
+    const targetFpsVal = this.qualityManager.getTargetFps();
+    const resScaleVal = this.qualityManager.getDynamicResolutionScale();
+    const benchSummary = this.qualityManager.getBenchmarkSummary();
     const pX = Math.round(this.playerX * 10);
     const pZ = Math.round(this.playerZ * 10);
     const pYaw = Math.round(this.camYaw * 50);
@@ -11558,7 +11825,9 @@ export class RamayanaWorldEngine {
     const fAlpha = Number(this.brahmaFlashAlpha.toFixed(2));
     const dAlpha = Number(this.brahmaFadeAlpha.toFixed(2));
 
-    const hudKey = `${hpVal}|${pranaVal}|${this.karma}|${this.wantedLevel}|${mountKind}|${nearMount?.label ?? ''}|${nearThrone ? 1 : 0}|${this.seatedOnThrone ? 1 : 0}|${this.autoDriveActive ? 1 : 0}|${mountSpeedKmh}|${this.stealthActive ? 1 : 0}|${this.stealthSpotted ? 1 : 0}|${chakraCd}|${district.label}|${pX}|${pZ}|${pYaw}|${this.missionIdx}|${this.missionProgress}|${this.completedMissions}|${demonVillageDistanceM}|${this.ascensionActive ? 1 : 0}|${ascElapsed}|${councilSeated}|${this.worldReady ? 1 : 0}|${roundedProgress}|${this.assetStage}|${this.webglError ?? ''}|${qMode}|${qTier}|${fpsVal}|${selAstra ?? ''}|${aEnergy}|${cdKey}|${this.brahmaSummonPhase}|${fAlpha}|${dAlpha}|${questHud.unlockedCount}|${questHud.challengeSubProgress ?? ''}|${questHud.challengeTimerSec ?? ''}|${questHud.underwaterBreath ?? ''}|${questHud.brahmaTrialStage}|${enemySummonWarning?.remainingSec ?? ''}|${unlockPopup?.id ?? ''}|${this.showStoryIntro ? 1 : 0}|${promptHint ?? ''}`;
+    const resPct = Math.round(resScaleVal * 100);
+    const benchKey = benchSummary ? `${benchSummary.compositeScore}:${benchSummary.lockedTier}` : '0';
+    const hudKey = `${hpVal}|${pranaVal}|${this.karma}|${this.wantedLevel}|${mountKind}|${nearMount?.label ?? ''}|${nearThrone ? 1 : 0}|${this.seatedOnThrone ? 1 : 0}|${this.autoDriveActive ? 1 : 0}|${mountSpeedKmh}|${this.stealthActive ? 1 : 0}|${this.stealthSpotted ? 1 : 0}|${chakraCd}|${district.label}|${pX}|${pZ}|${pYaw}|${this.missionIdx}|${this.missionProgress}|${this.completedMissions}|${demonVillageDistanceM}|${this.ascensionActive ? 1 : 0}|${ascElapsed}|${councilSeated}|${this.worldReady ? 1 : 0}|${roundedProgress}|${this.assetStage}|${this.webglError ?? ''}|${qMode}|${qTier}|${fpsVal}|${targetFpsVal}|${resPct}|${benchKey}|${selAstra ?? ''}|${aEnergy}|${cdKey}|${this.brahmaSummonPhase}|${fAlpha}|${dAlpha}|${questHud.unlockedCount}|${questHud.challengeSubProgress ?? ''}|${questHud.challengeTimerSec ?? ''}|${questHud.underwaterBreath ?? ''}|${questHud.brahmaTrialStage}|${enemySummonWarning?.remainingSec ?? ''}|${unlockPopup?.id ?? ''}|${this.showStoryIntro ? 1 : 0}|${promptHint ?? ''}`;
     if (hudKey === this.lastHudKey) {
       return;
     }
@@ -11622,6 +11891,9 @@ export class RamayanaWorldEngine {
       qualityMode: qMode,
       qualityTier: qTier,
       fps: fpsVal,
+      targetFps: targetFpsVal,
+      resolutionScale: resScaleVal,
+      hardwareBenchmark: benchSummary,
       selectedAstra: selAstra,
       astraEnergy: aEnergy,
       maxAstraEnergy: ASTRA_MAX_ENERGY,
@@ -11699,12 +11971,15 @@ export class RamayanaWorldEngine {
       const dt = Math.min(0.05, rawDt);
       const elapsed = this.clock.elapsedTime;
 
-      const autoTier = this.qualityManager.recordFrame(
+      const scaleAdj = this.qualityManager.recordFrame(
         rawDt,
         this.worldReady && this.mode === 'PLAYING'
       );
-      if (autoTier !== null) {
+      if (scaleAdj.tierChanged !== null) {
         this.applyQualityProfile(this.qualityManager.getProfile());
+        this.emitHud();
+      } else if (scaleAdj.resolutionChanged) {
+        this.applyDynamicResolutionOnly(this.qualityManager.getProfile());
         this.emitHud();
       }
 

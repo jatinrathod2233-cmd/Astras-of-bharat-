@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ControlCustomizerModal } from './components/ControlCustomizerModal';
 import {
   clampWheelCenter,
   getHoveredAstraFromPoint,
@@ -13,6 +14,11 @@ import {
 import { RamayanaWorldEngine } from './engine/RamayanaWorldEngine';
 import { AstraId, PlayMode, QualityMode, WorldHudSnapshot } from './types/world';
 import { soundEngine } from './utils/audio';
+import {
+  ControlLayoutMap,
+  getViewportDimensions,
+  loadControlLayout,
+} from './utils/controlLayout';
 
 const INITIAL_HUD: WorldHudSnapshot = {
   hp: 100,
@@ -56,6 +62,9 @@ const INITIAL_HUD: WorldHudSnapshot = {
   qualityMode: 'AUTO',
   qualityTier: 'HIGH',
   fps: 60,
+  targetFps: 60,
+  resolutionScale: 1,
+  hardwareBenchmark: null,
   selectedAstra: null,
   astraEnergy: ASTRA_MAX_ENERGY,
   maxAstraEnergy: ASTRA_MAX_ENERGY,
@@ -105,6 +114,16 @@ export default function App() {
   const [hud, setHud] = useState<WorldHudSnapshot>(INITIAL_HUD);
   const [muted, setMuted] = useState<boolean>(() => soundEngine.isMuted());
   const [touchSprint, setTouchSprint] = useState(false);
+  const [viewport, setViewport] = useState<{ w: number; h: number }>(() =>
+    getViewportDimensions()
+  );
+  const [controlLayout, setControlLayout] = useState<ControlLayoutMap>(() => {
+    const vp = getViewportDimensions();
+    return loadControlLayout(vp.w, vp.h);
+  });
+  const [customizingControls, setCustomizingControls] = useState(false);
+  const customizingControlsRef = useRef(false);
+  customizingControlsRef.current = customizingControls;
   const [showPerfStats, setShowPerfStats] = useState<boolean>(() => {
     try {
       return localStorage.getItem(SHOW_FPS_STORAGE_KEY) === '1';
@@ -184,7 +203,25 @@ export default function App() {
     if (mode !== 'PLAYING') {
       resetAllInputs();
     }
+    if (mode !== 'PAUSED') {
+      setCustomizingControls(false);
+    }
   }, [mode, resetAllInputs]);
+
+  // Keep custom control bounds responsive across mobile portrait/landscape rotations
+  useEffect(() => {
+    const syncViewport = () => {
+      const nextVp = getViewportDimensions();
+      setViewport(nextVp);
+      setControlLayout(loadControlLayout(nextVp.w, nextVp.h));
+    };
+    window.addEventListener('resize', syncViewport);
+    window.addEventListener('orientationchange', syncViewport);
+    return () => {
+      window.removeEventListener('resize', syncViewport);
+      window.removeEventListener('orientationchange', syncViewport);
+    };
+  }, []);
 
   useEffect(() => {
     const onBlur = () => resetAllInputs();
@@ -268,6 +305,10 @@ export default function App() {
       if (!engine) return;
 
       if (e.code === 'Escape') {
+        if (customizingControlsRef.current) {
+          setCustomizingControls(false);
+          return;
+        }
         setMode((curr) => {
           const next =
             curr === 'PLAYING'
@@ -547,6 +588,10 @@ export default function App() {
     engineRef.current?.setQualityMode(nextQuality);
   }, []);
 
+  const handleRerunBenchmark = useCallback(() => {
+    void engineRef.current?.rerunHardwareBenchmark();
+  }, []);
+
   const handleTogglePerfStats = useCallback(() => {
     setShowPerfStats((prev) => {
       const next = !prev;
@@ -583,6 +628,8 @@ export default function App() {
           desktopWheelOpen={desktopWheelOpen}
           desktopWheelCenter={desktopWheelCenter}
           desktopHoveredAstra={desktopHoveredAstra}
+          controlLayout={controlLayout}
+          viewport={viewport}
           onToggleMute={handleToggleMute}
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
@@ -611,10 +658,22 @@ export default function App() {
         onRevive={handleRevive}
         onRestart={handleRestart}
         onChangeQualityMode={handleChangeQualityMode}
+        onRerunBenchmark={handleRerunBenchmark}
         onTogglePerfStats={handleTogglePerfStats}
+        onOpenControlCustomizer={() => setCustomizingControls(true)}
         onDismissStoryIntro={handleDismissStoryIntro}
         onDismissUnlockPopup={handleDismissUnlockPopup}
       />
+
+      {/* Interactive Touch Control Layout & Size Editor */}
+      {mode === 'PAUSED' && customizingControls && (
+        <ControlCustomizerModal
+          layout={controlLayout}
+          viewport={viewport}
+          onChangeLayout={setControlLayout}
+          onClose={() => setCustomizingControls(false)}
+        />
+      )}
     </div>
   );
 }

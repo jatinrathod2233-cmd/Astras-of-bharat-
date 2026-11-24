@@ -85,6 +85,21 @@ export type MountKind = 'NONE' | 'RATHA' | 'HORSE' | 'ELEPHANT';
 export type QualityTier = 'HIGH' | 'MEDIUM' | 'LOW';
 export type QualityMode = 'AUTO' | QualityTier;
 
+export interface HardwareBenchmarkSummary {
+  completed: boolean;
+  cpuScore: number;
+  gpuScore: number;
+  ramScore: number;
+  compositeScore: number;
+  lockedTier: QualityTier;
+  targetFps: number;
+  recommendedResScale: number;
+  gpuName: string;
+  cores: number;
+  memoryGb: number | null;
+  durationMs: number;
+}
+
 export interface WorldHudSnapshot {
   hp: number;
   maxHp: number;
@@ -127,6 +142,9 @@ export interface WorldHudSnapshot {
   qualityMode: QualityMode;
   qualityTier: QualityTier;
   fps: number;
+  targetFps: number;
+  resolutionScale: number;
+  hardwareBenchmark: HardwareBenchmarkSummary | null;
   // Divine Astras Quest HUD fields
   selectedAstra: AstraId | null;
   astraEnergy: number;

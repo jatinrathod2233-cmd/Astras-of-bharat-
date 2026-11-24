@@ -1,5 +1,8 @@
 import type {
   EnemyActorSnapshot,
+  HazardZoneTickRequest,
+  HazardZoneTickResponse,
+  PersistentZoneKind,
   ProjectileArchetypeId,
   ProjectileHitKind,
   ProjectileImpactValidationRequest,
@@ -25,6 +28,11 @@ export type RegisterRejectionCallback = (
   res: ProjectileRegisterResponse
 ) => void;
 
+export type ZoneTickReconcileCallback = (
+  res: HazardZoneTickResponse,
+  optimisticDamageByEnemy: Map<string, number>
+) => void;
+
 function generateSessionId(): string {
   const rand = Math.random().toString(36).slice(2, 10);
   const time = Date.now().toString(36);
@@ -42,6 +50,10 @@ export class ProjectileSyncClient {
   private readonly inFlightRegistrations = new Map<
     string,
     Promise<ProjectileRegisterResponse | null>
+  >();
+  private readonly inFlightImpacts = new Map<
+    string,
+    Promise<ProjectileImpactValidationResponse | null>
   >();
   private readonly snapshotBuffer: EnemyActorSnapshot[] = [];
 
@@ -151,7 +163,8 @@ export class ProjectileSyncClient {
     enemies: EnemyActorSnapshot[],
     parentClientShotId: string | null = null,
     homingTargetId: string | null = null,
-    onRejected?: RegisterRejectionCallback
+    onRejected?: RegisterRejectionCallback,
+    casterVel?: Vec3Like
   ): void {
     if (!this.isServerEnabled()) return;
 
@@ -162,6 +175,9 @@ export class ProjectileSyncClient {
       origin: { x: origin.x, y: origin.y, z: origin.z },
       direction: { x: direction.x, y: direction.y, z: direction.z },
       casterPos: { x: casterPos.x, y: casterPos.y, z: casterPos.z },
+      casterVel: casterVel
+        ? { x: casterVel.x, y: casterVel.y, z: casterVel.z }
+        : undefined,
       stealthAmbush,
       clientTimestampMs: Date.now(),
       parentClientShotId,
@@ -169,17 +185,27 @@ export class ProjectileSyncClient {
       enemies: enemies.slice(),
     };
 
-    const promise = this.postJson<ProjectileRegisterResponse>(
-      '/api/projectiles/register',
-      body
-    ).then((res) => {
+    const parentPromise = parentClientShotId
+      ? this.inFlightRegistrations.get(parentClientShotId)
+      : undefined;
+
+    const promise = (async (): Promise<ProjectileRegisterResponse | null> => {
+      if (parentPromise) {
+        const parentRes = await parentPromise;
+        if (parentRes && !parentRes.accepted) return null;
+      }
+      if (this.disposed) return null;
+      const res = await this.postJson<ProjectileRegisterResponse>(
+        '/api/projectiles/register',
+        body
+      );
       this.inFlightRegistrations.delete(clientShotId);
       if (this.disposed || !res) return null;
       if (!res.accepted && onRejected) {
         onRejected(res);
       }
       return res;
-    });
+    })();
 
     this.inFlightRegistrations.set(clientShotId, promise);
   }
@@ -195,9 +221,17 @@ export class ProjectileSyncClient {
     enemies: EnemyActorSnapshot[],
     homingTargetId: string | null,
     optimisticHits: OptimisticDamageRecord[],
-    onReconcile: ReconcileImpactCallback
+    onReconcile: ReconcileImpactCallback,
+    options?: {
+      casterVel?: Vec3Like;
+      strikeIndex?: number;
+      isFinalImpact?: boolean;
+    }
   ): void {
     if (!this.isServerEnabled()) return;
+
+    const strikeIndex = options?.strikeIndex ?? 0;
+    const isFinalImpact = options?.isFinalImpact ?? true;
 
     const body: ProjectileImpactValidationRequest = {
       sessionId: this.sessionId,
@@ -212,27 +246,89 @@ export class ProjectileSyncClient {
       },
       reportedEnemyId,
       casterPos: { x: casterPos.x, y: casterPos.y, z: casterPos.z },
+      casterVel: options?.casterVel
+        ? {
+            x: options.casterVel.x,
+            y: options.casterVel.y,
+            z: options.casterVel.z,
+          }
+        : undefined,
       homingTargetId,
+      strikeIndex,
+      isFinalImpact,
       enemies: enemies.slice(),
     };
 
     const pendingReg = this.inFlightRegistrations.get(clientShotId);
-    const runValidation = async (): Promise<void> => {
+    const prevStrike = this.inFlightImpacts.get(clientShotId);
+
+    const runValidation = async (): Promise<
+      ProjectileImpactValidationResponse | null
+    > => {
       if (pendingReg) {
         const regRes = await pendingReg;
-        if (regRes && !regRes.accepted) return;
+        if (regRes && !regRes.accepted) return null;
       }
-      if (this.disposed) return;
+      if (prevStrike) {
+        await prevStrike;
+      }
+      if (this.disposed) return null;
 
       const res = await this.postJson<ProjectileImpactValidationResponse>(
         '/api/projectiles/validate-impact',
         body
       );
-      if (this.disposed || !res) return;
+      if (isFinalImpact) {
+        // Keep brief reference until any immediately queued zone ticks resolve
+        setTimeout(() => {
+          if (this.inFlightImpacts.get(clientShotId) === runPromise) {
+            this.inFlightImpacts.delete(clientShotId);
+          }
+        }, 4000);
+      }
+      if (this.disposed || !res) return null;
       onReconcile(res, optimisticHits);
+      return res;
     };
 
-    void runValidation();
+    const runPromise = runValidation();
+    this.inFlightImpacts.set(clientShotId, runPromise);
+  }
+
+  public validateZoneTick(
+    zoneShotId: string,
+    zoneKind: Exclude<PersistentZoneKind, 'NONE'>,
+    dtSec: number,
+    enemies: EnemyActorSnapshot[],
+    optimisticDamageByEnemy: Map<string, number>,
+    onReconcile: ZoneTickReconcileCallback
+  ): void {
+    if (!this.isServerEnabled() || !zoneShotId) return;
+
+    const pendingImpact = this.inFlightImpacts.get(zoneShotId);
+    const payload: HazardZoneTickRequest = {
+      sessionId: this.sessionId,
+      zoneShotId,
+      zoneKind,
+      dtSec,
+      enemies: enemies.slice(),
+    };
+
+    const run = async (): Promise<void> => {
+      if (pendingImpact) {
+        const impactRes = await pendingImpact;
+        if (impactRes && !impactRes.accepted) return;
+      }
+      if (this.disposed) return;
+      const res = await this.postJson<HazardZoneTickResponse>(
+        '/api/projectiles/validate-zone-tick',
+        payload
+      );
+      if (this.disposed || !res) return;
+      onReconcile(res, optimisticDamageByEnemy);
+    };
+
+    void run();
   }
 
   private async postJson<T>(url: string, body: unknown): Promise<T | null> {
@@ -243,7 +339,11 @@ export class ProjectileSyncClient {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (response.status === 404 && !url.includes('validate-impact')) {
+      if (
+        response.status === 404 &&
+        !url.includes('validate-impact') &&
+        !url.includes('validate-zone-tick')
+      ) {
         this.consecutiveFailures += 1;
         if (this.consecutiveFailures >= 3) {
           this.serverReachable = false;
@@ -265,6 +365,7 @@ export class ProjectileSyncClient {
   public dispose(): void {
     this.disposed = true;
     this.inFlightRegistrations.clear();
+    this.inFlightImpacts.clear();
     this.snapshotBuffer.length = 0;
   }
 }

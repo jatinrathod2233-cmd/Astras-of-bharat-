@@ -1,7 +1,14 @@
 import * as THREE from 'three';
-import { QualityMode, QualityTier } from '../types/world';
 import {
+  HardwareBenchmarkSummary,
+  QualityMode,
+  QualityTier,
+} from '../types/world';
+import {
+  applyBenchmarkToEnvelope,
   HardwareEnvelope,
+  LaunchBenchmarkReport,
+  loadCachedBenchmark,
   MemoryPressureLevel,
   probeHardwareEnvelope,
   ShaderComplexityLevel,
@@ -53,6 +60,18 @@ const TIER_RANK: Record<QualityTier, number> = {
   MEDIUM: 1,
   HIGH: 2,
 };
+
+export interface FrameScaleAdjustment {
+  tierChanged: QualityTier | null;
+  resolutionChanged: boolean;
+}
+
+const MIN_DYNAMIC_RES_SCALE = 0.55;
+
+function quantizeResScale(v: number): number {
+  const clamped = Math.max(MIN_DYNAMIC_RES_SCALE, Math.min(1.0, v));
+  return Math.round(clamped * 20) / 20;
+}
 
 function clampTierToCeiling(
   tier: QualityTier,
@@ -224,6 +243,18 @@ export class QualityManager {
   private highFpsAccum = 0;
   private cooldownTimer = 4.0; // Grace period right after boot / mode switch
 
+  // Continuous closed-loop Dynamic Resolution Scaling (DRS) + Launch Benchmark Lock
+  private targetFps = 60;
+  private dynamicResScale = 1.0;
+  private resCooldownTimer = 2.0;
+  private resDownAccum = 0;
+  private resUpAccum = 0;
+  private benchmarkReport: LaunchBenchmarkReport | null = null;
+  private readonly frameResult: FrameScaleAdjustment = {
+    tierChanged: null,
+    resolutionChanged: false,
+  };
+
   constructor(envelopeOrSoftwareFlag: HardwareEnvelope | boolean) {
     if (typeof envelopeOrSoftwareFlag === 'boolean') {
       this.isSoftwareGl = envelopeOrSoftwareFlag;
@@ -231,6 +262,18 @@ export class QualityManager {
     } else {
       this.envelope = envelopeOrSoftwareFlag;
       this.isSoftwareGl = envelopeOrSoftwareFlag.isSoftwareGl;
+    }
+
+    const cachedReport = loadCachedBenchmark(this.envelope);
+    if (cachedReport) {
+      this.benchmarkReport = cachedReport;
+      applyBenchmarkToEnvelope(this.envelope, cachedReport);
+      this.targetFps = cachedReport.targetFps;
+      this.dynamicResScale = this.isSoftwareGl
+        ? 1.0
+        : quantizeResScale(cachedReport.recommendedResScale);
+    } else {
+      this.targetFps = this.isSoftwareGl ? 30 : 60;
     }
 
     this.capabilities = detectDeviceCapabilities(
@@ -287,14 +330,53 @@ export class QualityManager {
     return Math.round(this.averageFps);
   }
 
+  public getTargetFps(): number {
+    return this.targetFps;
+  }
+
+  public getDynamicResolutionScale(): number {
+    return this.dynamicResScale;
+  }
+
+  public getBenchmarkSummary(): HardwareBenchmarkSummary | null {
+    return this.benchmarkReport;
+  }
+
   public isThermalLocked(): boolean {
     return this.thermalLockTimer > 0 || this.memoryLockedUpgrades;
+  }
+
+  /**
+   * Locks the maximum sustainable rendering fidelity tier, target FPS,
+   * and starting dynamic resolution scale from the automated CPU/GPU/RAM benchmark.
+   */
+  public applyBenchmarkLock(report: LaunchBenchmarkReport): boolean {
+    this.benchmarkReport = report;
+    applyBenchmarkToEnvelope(this.envelope, report);
+    this.targetFps = report.targetFps;
+    this.dynamicResScale = this.isSoftwareGl
+      ? 1.0
+      : quantizeResScale(report.recommendedResScale);
+
+    const prevTier = this.activeTier;
+    if (this.mode === 'AUTO') {
+      this.applyTierInternal(report.lockedTier);
+    } else {
+      // Still clamp profile/VRAM bounds safely
+      this.applyTierInternal(this.activeTier);
+    }
+    this.resetFrameMetrics(3.5);
+    return prevTier !== this.activeTier;
   }
 
   public setMode(mode: QualityMode): QualityTier | null {
     this.mode = mode;
     this.thermalLockTimer = 0;
     this.memoryLockedUpgrades = false;
+    this.dynamicResScale =
+      mode === 'AUTO' && this.benchmarkReport
+        ? quantizeResScale(this.benchmarkReport.recommendedResScale)
+        : 1.0;
     try {
       localStorage.setItem(STORAGE_MODE_KEY, mode);
     } catch {
@@ -317,11 +399,14 @@ export class QualityManager {
     this.sampleCursor = 0;
     this.sampleCount = 0;
     this.sampleSum = 0;
-    this.emaDt = 1 / 60;
+    this.emaDt = 1 / Math.max(30, this.targetFps);
     this.lowFpsAccum = 0;
     this.highFpsAccum = 0;
+    this.resDownAccum = 0;
+    this.resUpAccum = 0;
     this.thermalSpikeAccum = 0;
     this.cooldownTimer = Math.max(this.cooldownTimer, graceCooldownSec);
+    this.resCooldownTimer = Math.max(this.resCooldownTimer, 1.5);
   }
 
   /**
@@ -406,11 +491,13 @@ export class QualityManager {
     this.thermalLockTimer = Math.max(this.thermalLockTimer, lockDuration);
 
     if (this.activeTier === 'HIGH') {
+      this.dynamicResScale = 0.85;
       this.applyTierInternal('MEDIUM');
       this.resetFrameMetrics(6.5);
       return 'MEDIUM';
     }
     if (this.activeTier === 'MEDIUM') {
+      this.dynamicResScale = 0.85;
       this.applyTierInternal('LOW');
       this.resetFrameMetrics(6.5);
       return 'LOW';
@@ -421,16 +508,19 @@ export class QualityManager {
   }
 
   /**
-   * Records current frame duration (in real seconds, unclamped except > 0.0005) and returns a new
-   * QualityTier if dynamic resolution/thermal/FPS scaling triggered a step up or down.
+   * Zero-GC closed-loop frame-time monitor & Dynamic Resolution Scaling controller.
+   * Dynamically scales render resolution first to lock frame rate before stepping down fidelity tiers.
    */
   public recordFrame(
     rawDtSec: number,
     allowAutoScale: boolean
-  ): QualityTier | null {
+  ): FrameScaleAdjustment {
+    this.frameResult.tierChanged = null;
+    this.frameResult.resolutionChanged = false;
+
     if (rawDtSec <= 0.0005 || rawDtSec > 0.45) {
       // Ignore tab-resume or pause spikes so one stall never triggers a downgrade
-      return null;
+      return this.frameResult;
     }
 
     if (this.sampleCount < 60) {
@@ -452,8 +542,62 @@ export class QualityManager {
     const dtDelta = Math.abs(rawDtSec - this.emaDt);
     this.emaDt += (rawDtSec - this.emaDt) * 0.08;
 
-    if (!allowAutoScale || this.mode !== 'AUTO' || this.isSoftwareGl) {
-      return null;
+    if (!allowAutoScale || this.isSoftwareGl) {
+      return this.frameResult;
+    }
+
+    if (this.resCooldownTimer > 0) {
+      this.resCooldownTimer = Math.max(0, this.resCooldownTimer - rawDtSec);
+    }
+
+    if (this.sampleCount >= 20 && this.sampleSum > 0) {
+      const avgDtSec = this.sampleSum / this.sampleCount;
+      const targetBudgetSec = 1.0 / Math.max(30, this.targetFps);
+
+      // Continuous Dynamic Resolution Scaling operates even when user manually chooses a tier
+      // to strictly prevent thermal throttling and hold locked FPS, while AUTO also steps tiers.
+      if (avgDtSec > targetBudgetSec * 1.12 || dtDelta > 0.015) {
+        this.resDownAccum += rawDtSec;
+        this.resUpAccum = Math.max(0, this.resUpAccum - rawDtSec * 2.0);
+        if (
+          this.resDownAccum >= 0.75 &&
+          this.resCooldownTimer <= 0 &&
+          this.dynamicResScale > MIN_DYNAMIC_RES_SCALE
+        ) {
+          const dropStep = avgDtSec > targetBudgetSec * 1.35 ? 0.1 : 0.05;
+          const nextRes = quantizeResScale(this.dynamicResScale - dropStep);
+          if (nextRes < this.dynamicResScale) {
+            this.dynamicResScale = nextRes;
+            this.resDownAccum = 0;
+            this.resCooldownTimer = 1.15;
+            this.frameResult.resolutionChanged = true;
+          }
+        }
+      } else if (
+        avgDtSec < targetBudgetSec * 0.86 &&
+        this.dynamicResScale < 1.0 &&
+        this.thermalLockTimer <= 0 &&
+        !this.memoryLockedUpgrades
+      ) {
+        this.resUpAccum += rawDtSec;
+        this.resDownAccum = Math.max(0, this.resDownAccum - rawDtSec * 1.5);
+        if (this.resUpAccum >= 5.0 && this.resCooldownTimer <= 0) {
+          const nextRes = quantizeResScale(this.dynamicResScale + 0.05);
+          if (nextRes > this.dynamicResScale) {
+            this.dynamicResScale = nextRes;
+            this.resUpAccum = 0;
+            this.resCooldownTimer = 2.4;
+            this.frameResult.resolutionChanged = true;
+          }
+        }
+      } else {
+        this.resDownAccum = Math.max(0, this.resDownAccum - rawDtSec * 0.5);
+        this.resUpAccum = Math.max(0, this.resUpAccum - rawDtSec * 0.5);
+      }
+    }
+
+    if (this.mode !== 'AUTO') {
+      return this.frameResult;
     }
 
     if (this.thermalLockTimer > 0) {
@@ -462,11 +606,11 @@ export class QualityManager {
 
     if (this.cooldownTimer > 0) {
       this.cooldownTimer = Math.max(0, this.cooldownTimer - rawDtSec);
-      return null;
+      return this.frameResult;
     }
 
     if (this.sampleCount < 30) {
-      return null;
+      return this.frameResult;
     }
 
     // Detect thermal throttling signature: sustained severe frame-time spikes/jitter (>32ms or >14ms jitter)
@@ -481,10 +625,12 @@ export class QualityManager {
       this.lowFpsAccum += rawDtSec;
       this.highFpsAccum = Math.max(0, this.highFpsAccum - rawDtSec * 2.0);
       if (this.lowFpsAccum >= 2.5 || this.thermalSpikeAccum >= 3.2) {
-        return this.triggerThermalStepDown();
+        this.frameResult.tierChanged = this.triggerThermalStepDown();
+        return this.frameResult;
       }
     } else if (
       this.averageFps > 58.0 &&
+      this.dynamicResScale >= 0.95 &&
       this.thermalLockTimer <= 0 &&
       !this.memoryLockedUpgrades &&
       TIER_RANK[this.activeTier] < TIER_RANK[this.envelope.maxSafeTier]
@@ -497,7 +643,8 @@ export class QualityManager {
           if (next !== this.activeTier) {
             this.applyTierInternal(next);
             this.resetFrameMetrics(8.5);
-            return next;
+            this.frameResult.tierChanged = next;
+            return this.frameResult;
           }
         }
         if (this.activeTier === 'MEDIUM') {
@@ -505,7 +652,8 @@ export class QualityManager {
           if (next !== this.activeTier) {
             this.applyTierInternal(next);
             this.resetFrameMetrics(8.5);
-            return next;
+            this.frameResult.tierChanged = next;
+            return this.frameResult;
           }
         }
         this.highFpsAccum = 0;
@@ -515,6 +663,6 @@ export class QualityManager {
       this.highFpsAccum = Math.max(0, this.highFpsAccum - rawDtSec * 0.75);
     }
 
-    return null;
+    return this.frameResult;
   }
 }

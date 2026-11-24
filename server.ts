@@ -83,6 +83,14 @@ export function createApp(): express.Express {
     }
   );
 
+  app.post(
+    '/api/projectiles/validate-zone-tick',
+    (req: Request, res: Response): void => {
+      const { status, payload } = authority.validateZoneTick(req.body);
+      res.status(status).json(payload);
+    }
+  );
+
   return app;
 }
 

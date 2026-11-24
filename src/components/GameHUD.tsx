@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { ASTRA_CONFIG } from '../engine/astraConfig';
 import { AstraId, WorldHudSnapshot } from '../types/world';
+import { ControlLayoutMap } from '../utils/controlLayout';
 import { AstraIconBadge } from './AstraIcons';
 import { DivyastraRadialWheel } from './DivyastraRadialWheel';
 import { MinimapRadar } from './MinimapRadar';
@@ -30,6 +31,8 @@ interface GameHUDProps {
   desktopWheelOpen: boolean;
   desktopWheelCenter: { x: number; y: number };
   desktopHoveredAstra: AstraId | null;
+  controlLayout: ControlLayoutMap;
+  viewport: { w: number; h: number };
   onToggleMute: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
@@ -57,6 +60,8 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   desktopWheelOpen,
   desktopWheelCenter,
   desktopHoveredAstra,
+  controlLayout,
+  viewport,
   onToggleMute,
   onZoomIn,
   onZoomOut,
@@ -149,7 +154,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         />
         {showPerfStats && (
           <div className="rounded border border-amber-200/20 bg-[#0D1016]/70 px-2 py-1 font-mono-tabular text-[10px] text-amber-200">
-            {hud.fps} FPS · {hud.qualityTier}
+            {hud.fps}/{hud.targetFps} FPS · {hud.qualityTier} · {Math.round(hud.resolutionScale * 100)}%
           </div>
         )}
       </div>
@@ -526,6 +531,8 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         astraCooldowns={hud.astraCooldowns}
         brahmastraAimReady={hud.brahmastraAimReady}
         brahmastraSummoning={hud.brahmastraSummoning}
+        controlLayout={controlLayout}
+        viewport={viewport}
         onFireStart={onFireStart}
         onFireEnd={onFireEnd}
         onAstra={onAstra}
@@ -538,8 +545,12 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         onToggleAutoDrive={onToggleAutoDrive}
       />
 
-      {/* Right-Side Virtual Movement Joystick */}
-      <TouchJoystick onChange={onJoystickMove} />
+      {/* Custom Virtual Movement Joystick */}
+      <TouchJoystick
+        onChange={onJoystickMove}
+        placement={controlLayout.JOYSTICK}
+        viewport={viewport}
+      />
     </>
   );
 });

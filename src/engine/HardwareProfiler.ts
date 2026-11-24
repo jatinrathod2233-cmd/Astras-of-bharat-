@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { QualityTier } from '../types/world';
+import { HardwareBenchmarkSummary, QualityTier } from '../types/world';
 
 export type ShaderComplexityLevel = 'FULL' | 'BALANCED' | 'FAST';
 export type TextureResolutionTier = 1024 | 512 | 256 | 128;
@@ -32,12 +32,22 @@ export interface HardwareEnvelope {
   maxFragmentUniformVectors: number;
   maxSamples: number;
   maxSafeTier: QualityTier;
+  hardwareCeilingTier?: QualityTier;
   initialTier: QualityTier;
   vramBudgetMb: number;
   recommendedTextureSize: TextureResolutionTier;
   recommendedShaderLevel: ShaderComplexityLevel;
   heapWarningRatio: number;
   heapCriticalRatio: number;
+  benchmarkReport?: LaunchBenchmarkReport;
+}
+
+export interface LaunchBenchmarkReport extends HardwareBenchmarkSummary {
+  cpuOpsPerMs: number;
+  gpuShaderMs: number;
+  ramBandwidthScore: number;
+  hardwareSignature: string;
+  timestampMs: number;
 }
 
 export interface MemoryBudgetSnapshot {
@@ -317,6 +327,7 @@ export function probeHardwareEnvelope(): HardwareEnvelope {
     maxFragmentUniformVectors,
     maxSamples,
     maxSafeTier,
+    hardwareCeilingTier: maxSafeTier,
     initialTier,
     vramBudgetMb,
     recommendedTextureSize,
@@ -427,3 +438,395 @@ export class HardwareMonitor {
     return this.snapshot;
   }
 }
+
+const BENCHMARK_STORAGE_KEY = 'astras_hw_benchmark_v2';
+
+function buildHardwareSignature(env: HardwareEnvelope): string {
+  return `${env.gpuRenderer}|c${env.cores}|m${env.memoryGb ?? 'x'}|t${env.maxTextureSize}|s${env.maxSamples}|sw${env.isSoftwareGl ? 1 : 0}`;
+}
+
+function yieldBenchmarkFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (
+      typeof requestAnimationFrame === 'function' &&
+      typeof document !== 'undefined' &&
+      !document.hidden
+    ) {
+      requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+function benchmarkCpuThroughput(cores: number): {
+  cpuScore: number;
+  opsPerMs: number;
+} {
+  // Calibrated ~6-10ms tight math/physics kernel (zero retained objects)
+  const buf = new Float32Array(2048);
+  for (let i = 0; i < buf.length; i++) {
+    buf[i] = (i + 1) * 0.0017;
+  }
+
+  const iterations = 48;
+  const start = performance.now();
+  let sink = 0;
+  for (let pass = 0; pass < iterations; pass++) {
+    for (let i = 0; i < buf.length; i++) {
+      const v = buf[i];
+      const s = Math.sin(v * 3.14159) * 0.72 + Math.cos(v * 1.618) * 0.28;
+      buf[i] = v * 0.9991 + s * 0.0009;
+      sink += buf[i];
+    }
+  }
+  const elapsedMs = Math.max(0.4, performance.now() - start);
+  // Prevent dead-code elimination
+  if (sink === 1e30) console.log(sink);
+
+  const totalOps = iterations * buf.length;
+  const opsPerMs = totalOps / elapsedMs;
+  // Normalize: ~6000 ops/ms = fast desktop/flagship mobile (~90 score), ~1800 = low-end (~30 score)
+  const singleThreadNorm = Math.min(100, Math.max(12, (opsPerMs / 9500) * 100));
+  const coreBonus = Math.min(100, Math.max(15, (cores / 8) * 90));
+  const cpuScore = Math.round(singleThreadNorm * 0.72 + coreBonus * 0.28);
+
+  return {
+    cpuScore: Math.max(10, Math.min(100, cpuScore)),
+    opsPerMs: Math.round(opsPerMs),
+  };
+}
+
+function benchmarkRamProfile(env: HardwareEnvelope): {
+  ramScore: number;
+  bandwidthScore: number;
+} {
+  // Calibrated 1MB typed-array memory sweep (cleanly GC-eligible immediately after exit)
+  const len = 262144; // 262,144 * 4 bytes = 1 MiB
+  const a = new Float32Array(len);
+  const b = new Float32Array(len);
+  const t0 = performance.now();
+  for (let i = 0; i < len; i += 4) {
+    a[i] = i * 0.25;
+    a[i + 1] = i * 0.5;
+    a[i + 2] = i * 0.75;
+    a[i + 3] = i * 1.0;
+  }
+  b.set(a);
+  let checksum = 0;
+  for (let i = 0; i < len; i += 16) {
+    checksum += b[i];
+  }
+  const elapsedMs = Math.max(0.15, performance.now() - t0);
+  if (checksum === -1e30) console.log(checksum);
+
+  // Fast LPDDR5/DDR4 completes 1MiB copy+stride in ~0.4-1.6ms; slow/throttled devices take 4-10ms+
+  const bandwidthScore = Math.round(
+    Math.min(100, Math.max(18, (2.2 / elapsedMs) * 78))
+  );
+
+  let capacityScore = 70;
+  if (env.memoryGb !== null) {
+    if (env.memoryGb <= 2) capacityScore = 24;
+    else if (env.memoryGb <= 3) capacityScore = 44;
+    else if (env.memoryGb <= 4) capacityScore = 62;
+    else if (env.memoryGb <= 6) capacityScore = 80;
+    else capacityScore = 96;
+  } else {
+    const perf =
+      typeof performance !== 'undefined'
+        ? (performance as PerformanceWithMemory)
+        : undefined;
+    if (perf?.memory && perf.memory.jsHeapSizeLimit > 0) {
+      const limitGb = perf.memory.jsHeapSizeLimit / (1024 * 1024 * 1024);
+      capacityScore = Math.min(95, Math.max(35, Math.round(limitGb * 45)));
+    } else if (env.isMobile) {
+      capacityScore = env.cores >= 8 ? 72 : 52;
+    } else {
+      capacityScore = 86;
+    }
+  }
+
+  const ramScore = Math.round(capacityScore * 0.65 + bandwidthScore * 0.35);
+  return {
+    ramScore: Math.max(10, Math.min(100, ramScore)),
+    bandwidthScore,
+  };
+}
+
+function benchmarkGpuThroughput(
+  renderer: THREE.WebGLRenderer,
+  env: HardwareEnvelope
+): { gpuScore: number; gpuShaderMs: number } {
+  if (env.isSoftwareGl) {
+    return { gpuScore: 18, gpuShaderMs: 45 };
+  }
+
+  let rt: THREE.WebGLRenderTarget | null = null;
+  let geo: THREE.PlaneGeometry | null = null;
+  let mat: THREE.ShaderMaterial | null = null;
+  const probeScene = new THREE.Scene();
+  const probeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+  try {
+    const gl = renderer.getContext();
+    if (!gl || gl.isContextLost()) {
+      return { gpuScore: 28, gpuShaderMs: 28 };
+    }
+
+    const size = env.isMobile ? 256 : 320;
+    rt = new THREE.WebGLRenderTarget(size, size, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+
+    geo = new THREE.PlaneGeometry(2, 2);
+    mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uPass: { value: 0 },
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uPass;
+        varying vec2 vUv;
+        void main() {
+          vec3 n = normalize(vec3(sin(vUv.x * 18.0 + uPass), cos(vUv.y * 18.0 - uPass), 1.4));
+          vec3 v = normalize(vec3(0.0, 0.0, 1.0));
+          vec3 acc = vec3(0.0);
+          for (int i = 0; i < 4; i++) {
+            float fi = float(i) * 1.57 + uPass;
+            vec3 l = normalize(vec3(cos(fi), sin(fi), 0.75));
+            vec3 h = normalize(l + v);
+            float ndl = max(0.0, dot(n, l));
+            float spec = pow(max(0.0, dot(n, h)), 32.0);
+            acc += vec3(0.95, 0.72, 0.35) * ndl + vec3(1.0) * spec * 0.45;
+          }
+          float fresnel = pow(1.0 - max(0.0, dot(n, v)), 3.0);
+          gl_FragColor = vec4(acc * 0.28 + vec3(0.2, 0.5, 0.9) * fresnel, 1.0);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+    });
+
+    const mesh = new THREE.Mesh(geo, mat);
+    probeScene.add(mesh);
+
+    const prevRt = renderer.getRenderTarget();
+    const pixelOut = new Uint8Array(4);
+
+    // Warm-up shader compile pass (excluded from timing)
+    renderer.setRenderTarget(rt);
+    renderer.render(probeScene, probeCamera);
+    renderer.readRenderTargetPixels(rt, 0, 0, 1, 1, pixelOut);
+
+    const passes = 5;
+    const t0 = performance.now();
+    for (let p = 0; p < passes; p++) {
+      mat.uniforms.uPass.value = p * 0.7;
+      renderer.render(probeScene, probeCamera);
+    }
+    // 1x1 readback forces pipeline sync so timed result reflects actual GPU draw execution
+    renderer.readRenderTargetPixels(rt, 0, 0, 1, 1, pixelOut);
+    const gpuShaderMs = Math.max(0.4, performance.now() - t0);
+    renderer.setRenderTarget(prevRt);
+
+    // Score GPU execution latency: <= 4.5ms => ~95, 10ms => ~68, >= 22ms => ~30
+    const drawScore = Math.min(100, Math.max(16, (6.2 / gpuShaderMs) * 72));
+    const gpuCapFloor =
+      env.gpuClass === 'DEDICATED_DESKTOP'
+        ? 85
+        : env.gpuClass === 'FLAGSHIP_MOBILE'
+        ? 72
+        : env.gpuClass === 'MID_MOBILE'
+        ? 48
+        : env.gpuClass === 'LOW_MOBILE'
+        ? 25
+        : 45;
+    const gpuCapCeiling =
+      env.gpuClass === 'LOW_MOBILE'
+        ? 52
+        : env.gpuClass === 'MID_MOBILE'
+        ? 78
+        : 100;
+    const gpuScore = Math.round(
+      Math.max(
+        14,
+        Math.min(gpuCapCeiling, drawScore * 0.7 + gpuCapFloor * 0.3)
+      )
+    );
+
+    return {
+      gpuScore,
+      gpuShaderMs: Number(gpuShaderMs.toFixed(2)),
+    };
+  } catch {
+    return { gpuScore: 26, gpuShaderMs: 30 };
+  } finally {
+    probeScene.clear();
+    geo?.dispose();
+    mat?.dispose();
+    rt?.dispose();
+  }
+}
+
+export function loadCachedBenchmark(
+  env: HardwareEnvelope
+): LaunchBenchmarkReport | null {
+  try {
+    const raw = localStorage.getItem(BENCHMARK_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<LaunchBenchmarkReport>;
+    if (
+      parsed &&
+      parsed.completed &&
+      parsed.hardwareSignature === buildHardwareSignature(env) &&
+      typeof parsed.timestampMs === 'number' &&
+      Date.now() - parsed.timestampMs < 7 * 24 * 60 * 60 * 1000 &&
+      (parsed.lockedTier === 'HIGH' ||
+        parsed.lockedTier === 'MEDIUM' ||
+        parsed.lockedTier === 'LOW')
+    ) {
+      return parsed as LaunchBenchmarkReport;
+    }
+  } catch {
+    // Ignore storage/parse errors
+  }
+  return null;
+}
+
+export function applyBenchmarkToEnvelope(
+  env: HardwareEnvelope,
+  report: LaunchBenchmarkReport
+): void {
+  env.benchmarkReport = report;
+  env.maxSafeTier = report.lockedTier;
+  env.initialTier = report.lockedTier;
+  if (report.lockedTier === 'LOW') {
+    env.recommendedTextureSize = env.vramBudgetMb <= 72 ? 128 : 256;
+    env.recommendedShaderLevel = 'FAST';
+  } else if (report.lockedTier === 'MEDIUM') {
+    env.recommendedTextureSize = env.vramBudgetMb < 105 ? 256 : 512;
+    env.recommendedShaderLevel = 'BALANCED';
+  } else {
+    env.recommendedTextureSize = env.vramBudgetMb >= 190 ? 1024 : 512;
+    env.recommendedShaderLevel = 'FULL';
+  }
+}
+
+/**
+ * Automated launch benchmark strictly profiling CPU, RAM, and GPU throughput
+ * to lock the highest rendering fidelity capable of sustaining the target FPS
+ * without thermal or memory throttling.
+ */
+export async function runLaunchHardwareBenchmark(
+  renderer: THREE.WebGLRenderer,
+  env: HardwareEnvelope,
+  onStage?: (label: string) => void
+): Promise<LaunchBenchmarkReport> {
+  const startTotal = performance.now();
+
+  onStage?.('Benchmarking CPU compute throughput');
+  await yieldBenchmarkFrame();
+  const cpuRes = benchmarkCpuThroughput(env.cores);
+
+  onStage?.('Benchmarking system RAM & bandwidth');
+  await yieldBenchmarkFrame();
+  const ramRes = benchmarkRamProfile(env);
+
+  onStage?.('Benchmarking GPU shader & fill-rate');
+  await yieldBenchmarkFrame();
+  const gpuRes = benchmarkGpuThroughput(renderer, env);
+
+  const compositeScore = Math.round(
+    gpuRes.gpuScore * 0.48 + cpuRes.cpuScore * 0.34 + ramRes.ramScore * 0.18
+  );
+  const bottleneckScore = Math.min(
+    gpuRes.gpuScore,
+    cpuRes.cpuScore,
+    ramRes.ramScore
+  );
+
+  // Strictly lock maximum rendering fidelity tier to sustain locked frame rate
+  let lockedTier: QualityTier;
+  let targetFps = 60;
+  let recommendedResScale = 1.0;
+
+  if (
+    env.isSoftwareGl ||
+    bottleneckScore < 28 ||
+    compositeScore < 44 ||
+    (env.memoryGb !== null && env.memoryGb <= 2)
+  ) {
+    lockedTier = 'LOW';
+    targetFps = env.isSoftwareGl ? 30 : 60;
+    recommendedResScale = env.isSoftwareGl
+      ? 1.0
+      : compositeScore < 34
+      ? 0.7
+      : 0.85;
+  } else if (
+    bottleneckScore < 52 ||
+    compositeScore < 70 ||
+    (env.memoryGb !== null && env.memoryGb <= 4 && env.isMobile) ||
+    env.gpuClass === 'LOW_MOBILE'
+  ) {
+    lockedTier = 'MEDIUM';
+    targetFps = 60;
+    recommendedResScale =
+      compositeScore >= 62 && gpuRes.gpuScore >= 58 ? 1.0 : 0.85;
+  } else {
+    lockedTier = 'HIGH';
+    targetFps = 60;
+    recommendedResScale =
+      compositeScore >= 82 && gpuRes.gpuScore >= 78 ? 1.0 : 0.9;
+  }
+
+  // Respect hard hardware ceiling derived from capability probe
+  const ceilingTier = env.hardwareCeilingTier ?? env.maxSafeTier;
+  if (
+    ceilingTier === 'LOW' ||
+    (ceilingTier === 'MEDIUM' && lockedTier === 'HIGH')
+  ) {
+    lockedTier = ceilingTier;
+  }
+
+  const durationMs = Math.max(1, Math.round(performance.now() - startTotal));
+  const report: LaunchBenchmarkReport = {
+    completed: true,
+    cpuScore: cpuRes.cpuScore,
+    gpuScore: gpuRes.gpuScore,
+    ramScore: ramRes.ramScore,
+    compositeScore,
+    lockedTier,
+    targetFps,
+    recommendedResScale,
+    gpuName: env.gpuRenderer,
+    cores: env.cores,
+    memoryGb: env.memoryGb,
+    durationMs,
+    cpuOpsPerMs: cpuRes.opsPerMs,
+    gpuShaderMs: gpuRes.gpuShaderMs,
+    ramBandwidthScore: ramRes.bandwidthScore,
+    hardwareSignature: buildHardwareSignature(env),
+    timestampMs: Date.now(),
+  };
+
+  applyBenchmarkToEnvelope(env, report);
+  try {
+    localStorage.setItem(BENCHMARK_STORAGE_KEY, JSON.stringify(report));
+  } catch {
+    // Ignore storage errors
+  }
+
+  return report;
+}
+

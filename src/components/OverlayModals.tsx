@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BookOpen, CheckCircle2, Lock, Play, RotateCcw, Settings } from 'lucide-react';
+import { BookOpen, CheckCircle2, Lock, Play, RotateCcw, Settings, SlidersHorizontal } from 'lucide-react';
 import { ASTRA_CONFIG } from '../engine/astraConfig';
 import { PlayMode, QualityMode, WorldHudSnapshot } from '../types/world';
 import { AstraIconBadge } from './AstraIcons';
@@ -13,7 +13,9 @@ interface OverlayModalsProps {
   onRevive: () => void;
   onRestart: () => void;
   onChangeQualityMode: (mode: QualityMode) => void;
+  onRerunBenchmark: () => void;
   onTogglePerfStats: () => void;
+  onOpenControlCustomizer: () => void;
   onDismissStoryIntro: () => void;
   onDismissUnlockPopup: () => void;
 }
@@ -34,7 +36,9 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
   onRevive,
   onRestart,
   onChangeQualityMode,
+  onRerunBenchmark,
   onTogglePerfStats,
+  onOpenControlCustomizer,
   onDismissStoryIntro,
   onDismissUnlockPopup,
 }) => {
@@ -252,7 +256,7 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
                       ? `Auto (${hud.qualityTier})`
                       : hud.qualityTier}
                     {' · '}
-                    {hud.fps} FPS
+                    {hud.fps}/{hud.targetFps} FPS · {Math.round(hud.resolutionScale * 100)}%
                   </span>
                 </div>
 
@@ -276,6 +280,31 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
                   })}
                 </div>
 
+                {hud.hardwareBenchmark && (
+                  <div className="rounded border border-amber-200/15 bg-[#0F131B] px-3 py-2 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-[#C9C1B2]">
+                        Hardware Lock:{' '}
+                        <span className="font-semibold text-emerald-300">
+                          {hud.hardwareBenchmark.lockedTier} ({hud.hardwareBenchmark.targetFps} FPS)
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={onRerunBenchmark}
+                        className="rounded border border-amber-200/25 bg-[#181D28] px-2 py-0.5 text-[10px] font-medium text-amber-200 hover:border-amber-300/60 cursor-pointer"
+                      >
+                        Re-Profile
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 font-mono-tabular text-[10px] text-[#DFD7C8]">
+                      <span>CPU: {hud.hardwareBenchmark.cpuScore}/100</span>
+                      <span>GPU: {hud.hardwareBenchmark.gpuScore}/100</span>
+                      <span>RAM: {hud.hardwareBenchmark.ramScore}/100</span>
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between pt-1">
                   <span className="text-xs text-[#C9C1B2]">Show FPS &amp; Tier HUD</span>
                   <button
@@ -288,6 +317,17 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
                     }`}
                   >
                     {showPerfStats ? 'On' : 'Off'}
+                  </button>
+                </div>
+
+                <div className="pt-2 border-t border-amber-200/10">
+                  <button
+                    type="button"
+                    onClick={onOpenControlCustomizer}
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-md border border-amber-300/60 bg-[#1B2130] px-4 py-2 text-xs font-semibold tracking-wider text-amber-200 hover:border-amber-300 hover:bg-[#242B3E] cursor-pointer transition-colors"
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5 text-amber-300" aria-hidden="true" />
+                    <span>CUSTOMIZE CONTROLS</span>
                   </button>
                 </div>
               </div>

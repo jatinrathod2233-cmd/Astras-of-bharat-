@@ -8,12 +8,29 @@ export type ProjectileArchetypeId =
   | 'NAGASTRA_SERPENT'
   | 'BRAHMASTRA';
 
+export type ProjectilePhysicsCategory =
+  | 'BALLISTIC_ARROW'
+  | 'ENERGY_GYROSCOPIC'
+  | 'ENERGY_BEAM'
+  | 'ELEMENTAL_FIRE'
+  | 'ELEMENTAL_WATER'
+  | 'ELEMENTAL_WIND'
+  | 'ELEMENTAL_SERPENT';
+
+export type PersistentZoneKind = 'NONE' | 'AGNI_MANDALA' | 'VAYU_TORNADO';
+
 export interface ProjectilePhysicsProfile {
   archetype: ProjectileArchetypeId;
+  category: ProjectilePhysicsCategory;
   label: string;
   speed: number;
   gravity: number;
   drag: number;
+  quadraticDrag: number;
+  buoyancyAccel: number;
+  helicalOmega: number;
+  helicalRadiusAccel: number;
+  inheritCasterVelFraction: number;
   maxLifeSec: number;
   cooldownSec: number;
   hitRadius: number;
@@ -25,6 +42,8 @@ export interface ProjectilePhysicsProfile {
   knockbackForce: number;
   liftHeight: number;
   splitCount: number;
+  maxImpactHits: number;
+  returnCatchRadius: number;
   lateralCurveAccel: number;
   returnAfterSec: number;
   spinRadPerSec: number;
@@ -32,6 +51,8 @@ export interface ProjectilePhysicsProfile {
   slitherFreq: number;
   slitherAmp: number;
   heatPullRadius: number;
+  persistentZoneKind: PersistentZoneKind;
+  persistentZoneDurationSec: number;
 }
 
 export interface ProjectileKinematicsState {
@@ -84,6 +105,7 @@ export interface ProjectileRegisterRequest {
   origin: Vec3Like;
   direction: Vec3Like;
   casterPos: Vec3Like;
+  casterVel?: Vec3Like;
   stealthAmbush: boolean;
   clientTimestampMs: number;
   parentClientShotId?: string | null;
@@ -96,13 +118,18 @@ export interface ProjectileRegisterResponse {
   projectileId: string;
   clientShotId: string;
   archetype: ProjectileArchetypeId;
+  category: ProjectilePhysicsCategory;
   deduplicated?: boolean;
   rejectionReason?: string;
   serverTimeMs: number;
   authoritativeSpeed: number;
 }
 
-export type ProjectileHitKind = 'ENEMY' | 'ENVIRONMENT' | 'EXPIRED';
+export type ProjectileHitKind =
+  | 'ENEMY'
+  | 'ENVIRONMENT'
+  | 'CASTER_RETURN'
+  | 'EXPIRED';
 
 export interface ProjectileImpactValidationRequest {
   sessionId: string;
@@ -113,7 +140,10 @@ export interface ProjectileImpactValidationRequest {
   reportedHitPos: Vec3Like;
   reportedEnemyId: string | null;
   casterPos: Vec3Like;
+  casterVel?: Vec3Like;
   homingTargetId?: string | null;
+  strikeIndex?: number;
+  isFinalImpact?: boolean;
   enemies?: EnemyActorSnapshot[];
 }
 
@@ -121,16 +151,43 @@ export interface ProjectileImpactValidationResponse {
   accepted: boolean;
   clientShotId: string;
   archetype: ProjectileArchetypeId;
+  strikeIndex: number;
+  isFinalImpact: boolean;
   alreadyResolved?: boolean;
   rejectionReason?: string;
   trajectoryErrorM: number;
   maxAllowedErrorM: number;
+  terrainElevationM: number | null;
   serverSimulatedPos: Vec3Like;
   serverHitPos: Vec3Like;
   authorizedHits: AuthorizedHitDirective[];
   totalAuthorizedDamage: number;
   karmaAwarded: number;
   allowSplitSerpents: boolean;
+  spawnedZoneKind: PersistentZoneKind;
+  serverTimeMs: number;
+}
+
+export interface HazardZoneTickRequest {
+  sessionId: string;
+  zoneShotId: string;
+  zoneKind: Exclude<PersistentZoneKind, 'NONE'>;
+  dtSec: number;
+  enemies: EnemyActorSnapshot[];
+}
+
+export interface HazardZoneTickResponse {
+  accepted: boolean;
+  zoneShotId: string;
+  zoneKind: Exclude<PersistentZoneKind, 'NONE'>;
+  rejectionReason?: string;
+  authorizedTicks: Array<{
+    enemyId: string;
+    damage: number;
+    pullDx: number;
+    pullDz: number;
+    liftHeight: number;
+  }>;
   serverTimeMs: number;
 }
 
@@ -140,10 +197,16 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
 > = {
   ARROW: {
     archetype: 'ARROW',
+    category: 'BALLISTIC_ARROW',
     label: 'Sharnga Arrow',
     speed: 48,
-    gravity: 9.8,
-    drag: 0.08,
+    gravity: 9.81,
+    drag: 0.04,
+    quadraticDrag: 0.0028,
+    buoyancyAccel: 0,
+    helicalOmega: 0,
+    helicalRadiusAccel: 0,
+    inheritCasterVelFraction: 0.35,
     maxLifeSec: 1.65,
     cooldownSec: 0.22,
     hitRadius: 0.16,
@@ -155,6 +218,8 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     knockbackForce: 0,
     liftHeight: 0,
     splitCount: 0,
+    maxImpactHits: 1,
+    returnCatchRadius: 0,
     lateralCurveAccel: 0,
     returnAfterSec: 0,
     spinRadPerSec: 0,
@@ -162,40 +227,58 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     slitherFreq: 0,
     slitherAmp: 0,
     heatPullRadius: 0,
+    persistentZoneKind: 'NONE',
+    persistentZoneDurationSec: 0,
   },
   CHAKRA: {
     archetype: 'CHAKRA',
+    category: 'ENERGY_GYROSCOPIC',
     label: 'Sudarshan Chakra',
-    speed: 34,
+    speed: 36,
     gravity: 0.0,
-    drag: 0.02,
-    maxLifeSec: 1.75,
+    drag: 0.015,
+    quadraticDrag: 0.0,
+    buoyancyAccel: 0,
+    helicalOmega: 0,
+    helicalRadiusAccel: 0,
+    inheritCasterVelFraction: 0.15,
+    maxLifeSec: 2.25,
     cooldownSec: 8.5,
-    hitRadius: 0.56,
-    aoeRadius: 10.0,
+    hitRadius: 0.62,
+    aoeRadius: 6.5,
     directDamage: 95,
-    splashDamage: 85,
+    splashDamage: 72,
     dotDamagePerSec: 0,
     effectDurationSec: 0,
     knockbackForce: 6,
     liftHeight: 0,
     splitCount: 0,
-    lateralCurveAccel: 11.5,
-    returnAfterSec: 0.85,
-    spinRadPerSec: 26.0,
-    homingTurnRate: 5.5,
+    maxImpactHits: 4,
+    returnCatchRadius: 1.9,
+    lateralCurveAccel: 13.5,
+    returnAfterSec: 0.78,
+    spinRadPerSec: 28.0,
+    homingTurnRate: 8.5,
     slitherFreq: 0,
     slitherAmp: 0,
     heatPullRadius: 0,
+    persistentZoneKind: 'NONE',
+    persistentZoneDurationSec: 0,
   },
   AGNEYASTRA: {
     archetype: 'AGNEYASTRA',
+    category: 'ELEMENTAL_FIRE',
     label: 'Agneyastra',
     speed: 46,
-    gravity: 3.2,
-    drag: 0.04,
+    gravity: 3.4,
+    drag: 0.025,
+    quadraticDrag: 0.0008,
+    buoyancyAccel: 1.45,
+    helicalOmega: 0,
+    helicalRadiusAccel: 0,
+    inheritCasterVelFraction: 0.25,
     maxLifeSec: 1.45,
-    cooldownSec: 3.8,
+    cooldownSec: 4.5,
     hitRadius: 0.42,
     aoeRadius: 8.2,
     directDamage: 86,
@@ -205,6 +288,8 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     knockbackForce: 5,
     liftHeight: 0,
     splitCount: 1,
+    maxImpactHits: 1,
+    returnCatchRadius: 0,
     lateralCurveAccel: 0,
     returnAfterSec: 0,
     spinRadPerSec: 8.2,
@@ -212,15 +297,23 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     slitherFreq: 0,
     slitherAmp: 0,
     heatPullRadius: 11.5,
+    persistentZoneKind: 'AGNI_MANDALA',
+    persistentZoneDurationSec: 3.0,
   },
   VARUNASTRA: {
     archetype: 'VARUNASTRA',
+    category: 'ELEMENTAL_WATER',
     label: 'Varunastra',
     speed: 44,
-    gravity: 4.6,
-    drag: 0.14,
+    gravity: 5.4,
+    drag: 0.11,
+    quadraticDrag: 0.0045,
+    buoyancyAccel: 0,
+    helicalOmega: 0,
+    helicalRadiusAccel: 0,
+    inheritCasterVelFraction: 0.2,
     maxLifeSec: 1.45,
-    cooldownSec: 4.2,
+    cooldownSec: 5.0,
     hitRadius: 0.46,
     aoeRadius: 9.0,
     directDamage: 54,
@@ -230,6 +323,8 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     knockbackForce: 18,
     liftHeight: 0,
     splitCount: 1,
+    maxImpactHits: 1,
+    returnCatchRadius: 0,
     lateralCurveAccel: 0,
     returnAfterSec: 0,
     spinRadPerSec: 4.5,
@@ -237,15 +332,23 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     slitherFreq: 0,
     slitherAmp: 0,
     heatPullRadius: 0,
+    persistentZoneKind: 'NONE',
+    persistentZoneDurationSec: 0,
   },
   VAYAVYASTRA: {
     archetype: 'VAYAVYASTRA',
+    category: 'ELEMENTAL_WIND',
     label: 'Vayavyastra',
     speed: 52,
-    gravity: 0.8,
-    drag: 0.01,
+    gravity: 0.7,
+    drag: 0.008,
+    quadraticDrag: 0.0,
+    buoyancyAccel: 0.35,
+    helicalOmega: 9.2,
+    helicalRadiusAccel: 3.8,
+    inheritCasterVelFraction: 0.2,
     maxLifeSec: 1.45,
-    cooldownSec: 5.1,
+    cooldownSec: 6.0,
     hitRadius: 0.40,
     aoeRadius: 9.5,
     directDamage: 42,
@@ -255,6 +358,8 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     knockbackForce: 0,
     liftHeight: 4.8,
     splitCount: 1,
+    maxImpactHits: 1,
+    returnCatchRadius: 0,
     lateralCurveAccel: 0,
     returnAfterSec: 0,
     spinRadPerSec: 12.0,
@@ -262,15 +367,23 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     slitherFreq: 4.0,
     slitherAmp: 0.55,
     heatPullRadius: 0,
+    persistentZoneKind: 'VAYU_TORNADO',
+    persistentZoneDurationSec: 3.4,
   },
   NAGASTRA: {
     archetype: 'NAGASTRA',
+    category: 'ELEMENTAL_SERPENT',
     label: 'Nagastra',
     speed: 42,
     gravity: 2.8,
-    drag: 0.05,
+    drag: 0.04,
+    quadraticDrag: 0.0012,
+    buoyancyAccel: 0,
+    helicalOmega: 0,
+    helicalRadiusAccel: 0,
+    inheritCasterVelFraction: 0.25,
     maxLifeSec: 1.45,
-    cooldownSec: 5.5,
+    cooldownSec: 6.5,
     hitRadius: 0.34,
     aoeRadius: 14.0,
     directDamage: 38,
@@ -280,6 +393,8 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     knockbackForce: 0,
     liftHeight: 0,
     splitCount: 4,
+    maxImpactHits: 1,
+    returnCatchRadius: 0,
     lateralCurveAccel: 0,
     returnAfterSec: 0,
     spinRadPerSec: 3.0,
@@ -287,13 +402,21 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     slitherFreq: 7.5,
     slitherAmp: 1.2,
     heatPullRadius: 0,
+    persistentZoneKind: 'NONE',
+    persistentZoneDurationSec: 0,
   },
   NAGASTRA_SERPENT: {
     archetype: 'NAGASTRA_SERPENT',
+    category: 'ELEMENTAL_SERPENT',
     label: 'Nagastra Cobra',
     speed: 24,
-    gravity: 1.2,
+    gravity: 1.1,
     drag: 0.04,
+    quadraticDrag: 0.0,
+    buoyancyAccel: 0,
+    helicalOmega: 0,
+    helicalRadiusAccel: 0,
+    inheritCasterVelFraction: 0.0,
     maxLifeSec: 1.9,
     cooldownSec: 0,
     hitRadius: 0.34,
@@ -305,6 +428,8 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     knockbackForce: 0,
     liftHeight: 0,
     splitCount: 0,
+    maxImpactHits: 1,
+    returnCatchRadius: 0,
     lateralCurveAccel: 0,
     returnAfterSec: 0,
     spinRadPerSec: 0,
@@ -312,15 +437,23 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     slitherFreq: 11.5,
     slitherAmp: 2.4,
     heatPullRadius: 0,
+    persistentZoneKind: 'NONE',
+    persistentZoneDurationSec: 0,
   },
   BRAHMASTRA: {
     archetype: 'BRAHMASTRA',
+    category: 'ENERGY_BEAM',
     label: 'Brahmastra',
     speed: 64,
     gravity: 0.0,
     drag: 0.0,
+    quadraticDrag: 0.0,
+    buoyancyAccel: 0,
+    helicalOmega: 0,
+    helicalRadiusAccel: 0,
+    inheritCasterVelFraction: 0.0,
     maxLifeSec: 1.8,
-    cooldownSec: 24.0,
+    cooldownSec: 28.0,
     hitRadius: 0.80,
     aoeRadius: 18.0,
     directDamage: 320,
@@ -330,6 +463,8 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     knockbackForce: 28,
     liftHeight: 0,
     splitCount: 1,
+    maxImpactHits: 1,
+    returnCatchRadius: 0,
     lateralCurveAccel: 0,
     returnAfterSec: 0,
     spinRadPerSec: 14.0,
@@ -337,6 +472,8 @@ export const PROJECTILE_PHYSICS_REGISTRY: Record<
     slitherFreq: 0,
     slitherAmp: 0,
     heatPullRadius: 0,
+    persistentZoneKind: 'NONE',
+    persistentZoneDurationSec: 0,
   },
 };
 
@@ -351,7 +488,9 @@ export function isValidProjectileArchetype(
 
 /**
  * Pure, allocation-free deterministic kinematics step shared identically
- * between client prediction and server trajectory validation.
+ * between client prediction and server trajectory validation across distinct
+ * weapon categories: ballistic arrows, gyroscopic/beam energy projectiles, and
+ * pyro/hydro/wind/serpent elemental attacks.
  */
 export function stepProjectileKinematics(
   state: ProjectileKinematicsState,
@@ -364,72 +503,152 @@ export function stepProjectileKinematics(
   state.elapsedSec += dt;
   state.spinAngle += profile.spinRadPerSec * dt;
 
-  // 1. Homing serpent steering
-  if (state.archetype === 'NAGASTRA_SERPENT') {
-    if (targetPos) {
-      const tx = targetPos.x - state.x;
-      const ty = targetPos.y + 1.1 - state.y;
-      const tz = targetPos.z - state.z;
-      const len = Math.max(0.1, Math.hypot(tx, ty, tz));
-      const steer = 1 - Math.exp(-profile.homingTurnRate * dt);
-      const desVx = (tx / len) * profile.speed;
-      const desVy = (ty / len) * profile.speed;
-      const desVz = (tz / len) * profile.speed;
-      state.vx += (desVx - state.vx) * steer;
-      state.vy += (desVy - state.vy) * steer;
-      state.vz += (desVz - state.vz) * steer;
-    } else {
+  switch (profile.category) {
+    case 'BALLISTIC_ARROW': {
+      // Parabolic gravity drop + quadratic aerodynamic air drag
       state.vy -= profile.gravity * dt;
+      const spd = Math.hypot(state.vx, state.vy, state.vz);
+      if (profile.quadraticDrag > 0 && spd > 0.1) {
+        const quadFactor = 1 / (1 + profile.quadraticDrag * spd * dt);
+        state.vx *= quadFactor;
+        state.vy *= quadFactor;
+        state.vz *= quadFactor;
+      }
+      break;
     }
-  } else {
-    // 2. Vertical gravity drop
-    state.vy -= profile.gravity * dt;
-  }
 
-  // 3. Sudarshan Chakra gyroscopic boomerang curve & orbital return
-  if (state.archetype === 'CHAKRA') {
-    const horizSpeed = Math.hypot(state.vx, state.vz);
-    if (horizSpeed > 0.2) {
-      const nx = state.vx / horizSpeed;
-      const nz = state.vz / horizSpeed;
-      if (state.elapsedSec < profile.returnAfterSec) {
-        // Outbound crescent curve via right-hand perpendicular Magnus thrust
-        const latX = -nz;
-        const latZ = nx;
-        state.vx += latX * profile.lateralCurveAccel * dt;
-        state.vz += latZ * profile.lateralCurveAccel * dt;
-      } else if (casterPos) {
-        // Boomerang return arc toward caster height plane
-        const rx = casterPos.x - state.x;
-        const ry = casterPos.y + 1.45 - state.y;
-        const rz = casterPos.z - state.z;
-        const dist = Math.hypot(rx, ry, rz);
-        if (dist > 1.2) {
-          const steer = 1 - Math.exp(-profile.homingTurnRate * dt);
-          state.vx += ((rx / dist) * profile.speed - state.vx) * steer;
-          state.vy += ((ry / dist) * profile.speed - state.vy) * steer;
-          state.vz += ((rz / dist) * profile.speed - state.vz) * steer;
+    case 'ENERGY_GYROSCOPIC': {
+      // Three-phase Sudarshan Chakra flight:
+      // 1) Outbound Magnus crescent curve + optional lock-on deflection
+      // 2) Apex cleave sweep
+      // 3) Guided zero-G boomerang return arc to caster
+      const horizSpeed = Math.hypot(state.vx, state.vz);
+      if (horizSpeed > 0.2) {
+        const nx = state.vx / horizSpeed;
+        const nz = state.vz / horizSpeed;
+        if (state.elapsedSec < profile.returnAfterSec) {
+          const latX = -nz;
+          const latZ = nx;
+          const phaseFactor =
+            state.elapsedSec < profile.returnAfterSec * 0.55 ? 1.0 : 0.45;
+          state.vx += latX * profile.lateralCurveAccel * phaseFactor * dt;
+          state.vz += latZ * profile.lateralCurveAccel * phaseFactor * dt;
+          if (targetPos) {
+            const tx = targetPos.x - state.x;
+            const ty = targetPos.y + 1.25 - state.y;
+            const tz = targetPos.z - state.z;
+            const tLen = Math.max(0.2, Math.hypot(tx, ty, tz));
+            const lockSteer = 1 - Math.exp(-3.2 * dt);
+            state.vx += ((tx / tLen) * profile.speed - state.vx) * lockSteer;
+            state.vy += ((ty / tLen) * profile.speed - state.vy) * lockSteer;
+            state.vz += ((tz / tLen) * profile.speed - state.vz) * lockSteer;
+          }
+        } else if (casterPos) {
+          const rx = casterPos.x - state.x;
+          const ry = casterPos.y + 1.45 - state.y;
+          const rz = casterPos.z - state.z;
+          const dist = Math.hypot(rx, ry, rz);
+          if (dist > 0.5) {
+            const returnSpeed = profile.speed * 1.12;
+            const steer = 1 - Math.exp(-profile.homingTurnRate * dt);
+            state.vx += ((rx / dist) * returnSpeed - state.vx) * steer;
+            state.vy += ((ry / dist) * returnSpeed - state.vy) * steer;
+            state.vz += ((rz / dist) * returnSpeed - state.vz) * steer;
+          }
         }
       }
+      break;
+    }
+
+    case 'ENERGY_BEAM': {
+      // Zero-gravity, zero-drag hypersonic celestial lance with plasma surge
+      const spd = Math.hypot(state.vx, state.vy, state.vz);
+      if (spd > 0.1 && spd < profile.speed * 1.16) {
+        const boost = 1 + 0.12 * dt;
+        state.vx *= boost;
+        state.vy *= boost;
+        state.vz *= boost;
+      }
+      break;
+    }
+
+    case 'ELEMENTAL_FIRE': {
+      // Pyroclastic buoyant lift + scorching forward thrust
+      state.vy -= (profile.gravity - profile.buoyancyAccel) * dt;
+      const spd = Math.hypot(state.vx, state.vy, state.vz);
+      if (spd > 0.5 && spd < profile.speed * 1.14) {
+        const thrust = 1 + 0.08 * dt;
+        state.vx *= thrust;
+        state.vy *= thrust;
+        state.vz *= thrust;
+      }
+      break;
+    }
+
+    case 'ELEMENTAL_WATER': {
+      // Dense torrential mass + quadratic hydro drag deceleration
+      state.vy -= profile.gravity * dt;
+      const spd = Math.hypot(state.vx, state.vy, state.vz);
+      if (profile.quadraticDrag > 0 && spd > 0.1) {
+        const hydroFactor = 1 / (1 + profile.quadraticDrag * spd * dt);
+        state.vx *= hydroFactor;
+        state.vy *= hydroFactor;
+        state.vz *= hydroFactor;
+      }
+      break;
+    }
+
+    case 'ELEMENTAL_WIND': {
+      // Buoyant gale + dual-axis 3D helical vortex drill
+      state.vy -= (profile.gravity - profile.buoyancyAccel) * dt;
+      const hSpd = Math.hypot(state.vx, state.vz);
+      if (hSpd > 0.5) {
+        const px = -state.vz / hSpd;
+        const pz = state.vx / hSpd;
+        const phase = state.elapsedSec * profile.helicalOmega;
+        const swirlLat = Math.cos(phase) * profile.helicalRadiusAccel * dt;
+        const swirlVert = Math.sin(phase) * (profile.helicalRadiusAccel * 0.55) * dt;
+        state.vx += px * swirlLat;
+        state.vz += pz * swirlLat;
+        state.vy += swirlVert;
+      }
+      break;
+    }
+
+    case 'ELEMENTAL_SERPENT': {
+      if (state.archetype === 'NAGASTRA_SERPENT' && targetPos) {
+        const tx = targetPos.x - state.x;
+        const ty = targetPos.y + 1.1 - state.y;
+        const tz = targetPos.z - state.z;
+        const len = Math.max(0.1, Math.hypot(tx, ty, tz));
+        const steer = 1 - Math.exp(-profile.homingTurnRate * dt);
+        state.vx += ((tx / len) * profile.speed - state.vx) * steer;
+        state.vy += ((ty / len) * profile.speed - state.vy) * steer;
+        state.vz += ((tz / len) * profile.speed - state.vz) * steer;
+      } else {
+        state.vy -= profile.gravity * dt;
+      }
+      const hSpd = Math.hypot(state.vx, state.vz);
+      if (hSpd > 0.5 && profile.slitherAmp > 0) {
+        const px = -state.vz / hSpd;
+        const pz = state.vx / hSpd;
+        const wave =
+          Math.cos(state.elapsedSec * profile.slitherFreq) *
+          profile.slitherAmp *
+          dt;
+        const crest =
+          Math.sin(state.elapsedSec * profile.slitherFreq * 0.65) *
+          (profile.slitherAmp * 0.35) *
+          dt;
+        state.vx += px * wave * 6.0;
+        state.vz += pz * wave * 6.0;
+        state.vy += crest * 3.0;
+      }
+      break;
     }
   }
 
-  // 4. Serpentine / gale lateral wave weave
-  if (profile.slitherAmp > 0 && profile.slitherFreq > 0) {
-    const hSpd = Math.hypot(state.vx, state.vz);
-    if (hSpd > 0.5) {
-      const px = -state.vz / hSpd;
-      const pz = state.vx / hSpd;
-      const wave =
-        Math.cos(state.elapsedSec * profile.slitherFreq) *
-        profile.slitherAmp *
-        dt;
-      state.vx += px * wave * 6.0;
-      state.vz += pz * wave * 6.0;
-    }
-  }
-
-  // 5. Aerodynamic / hydro drag
+  // Linear aerodynamic / ethereal damping shared across categories
   if (profile.drag > 0) {
     const damp = Math.exp(-profile.drag * dt);
     state.vx *= damp;
@@ -437,7 +656,7 @@ export function stepProjectileKinematics(
     state.vz *= damp;
   }
 
-  // 6. Semi-implicit Euler position integration
+  // Semi-implicit Euler position integration
   state.x += state.vx * dt;
   state.y += state.vy * dt;
   state.z += state.vz * dt;
@@ -557,7 +776,7 @@ export function computeAuthoritativeHits(
       if (dSq > rSq) continue;
 
       const isDirect = directEnemyId !== null && e.id === directEnemyId;
-      // Vayavyastra whirlwind handles radial damage via tornado DoT ticks unless direct hit
+      // Vayavyastra whirlwind handles radial damage via persistent tornado zone ticks unless direct hit
       if (archetype === 'VAYAVYASTRA' && !isDirect) continue;
       // Nagastra main impact deals direct hit damage then spawns split serpents
       if (archetype === 'NAGASTRA' && !isDirect) continue;
