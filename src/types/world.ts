@@ -20,7 +20,7 @@ export interface MissionDef {
 
 export interface RadarBlip {
   id: string;
-  kind: 'RATHA' | 'ENEMY' | 'COMMANDER' | 'WAYPOINT' | 'TEMPLE' | 'ASTRA_OBJECTIVE';
+  kind: 'RATHA' | 'ENEMY' | 'COMMANDER' | 'WAYPOINT' | 'TEMPLE' | 'ASTRA_OBJECTIVE' | 'ALLY_PLAYER';
   x: number;
   z: number;
 }

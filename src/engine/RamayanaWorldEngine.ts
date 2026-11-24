@@ -45,6 +45,15 @@ import {
   EnemyDissolveUniforms,
   installEnemyAshDissolution,
 } from './astraVfx';
+import {
+  getHeroPreset,
+  LAN_SYNC_INTERVAL_MS,
+  LanEnemySyncState,
+  LanPlayerState,
+  LanShotEvent,
+  LanWorldSnapshot,
+} from '../shared/lanMultiplayer';
+import { LanMultiplayerClient } from './LanMultiplayerClient';
 import { DynamicAssetScaler } from './DynamicAssetScaler';
 import {
   HardwareEnvelope,
@@ -541,6 +550,40 @@ interface EnemyEntity {
   dissolveDuration: number;
   dissolveSparkAccum: number;
   lastDamageSource: AstraId | 'STANDARD' | 'CHAKRA';
+  syncTargetX?: number;
+  syncTargetY?: number;
+  syncTargetZ?: number;
+  syncTargetYaw?: number;
+  pendingClaimDmg?: number;
+}
+
+interface RemotePlayerEntity {
+  id: string;
+  name: string;
+  accentHex: string;
+  rig: CharacterRig;
+  auraRing: THREE.Mesh;
+  nameplate: THREE.Sprite;
+  nameplateTex: THREE.CanvasTexture;
+  pose: CharacterPoseState;
+  x: number;
+  y: number;
+  z: number;
+  targetX: number;
+  targetY: number;
+  targetZ: number;
+  yaw: number;
+  targetYaw: number;
+  horizSpeed: number;
+  grounded: boolean;
+  walkPhase: number;
+  aiming: boolean;
+  stealth: boolean;
+  sprint: boolean;
+  mountKind: MountKind;
+  hp: number;
+  maxHp: number;
+  lastUpdateMs: number;
 }
 
 interface AnimalMountEntity {
@@ -608,6 +651,7 @@ interface ProjectileEntity {
   strikeCount?: number;
   poolKey: string;
   serverRejected?: boolean;
+  isRemoteVisualOnly?: boolean;
 }
 
 interface EnemyProjectileEntity {
@@ -929,6 +973,13 @@ export class RamayanaWorldEngine {
   private boundContextLostHandler: ((e: Event) => void) | null = null;
   private boundContextRestoredHandler: (() => void) | null = null;
   private envRenderTarget: THREE.WebGLRenderTarget | null = null;
+
+  private lanClient: LanMultiplayerClient | null = null;
+  private remotePlayers = new Map<string, RemotePlayerEntity>();
+  private lanSyncAccum = 0;
+  private lanSnapSeq = 0;
+  private lanLocalPlayerName = 'Lord Ram';
+  private lanLocalHeroId = 'RAM';
 
   private astraVfx: AstraVfxManager | null = null;
   private astraQuest: AstraQuestSystem | null = null;
@@ -5262,6 +5313,498 @@ export class RamayanaWorldEngine {
     this.emitHud();
   }
 
+  public setMultiplayerClient(
+    client: LanMultiplayerClient | null,
+    localPlayerName = 'Lord Ram',
+    localHeroId = 'RAM'
+  ): void {
+    this.lanClient = client;
+    this.lanLocalPlayerName = localPlayerName;
+    this.lanLocalHeroId = localHeroId;
+    if (!client) {
+      this.clearRemotePlayers();
+      return;
+    }
+
+    client.setEngineHandlers({
+      onMatchStarted: () => {
+        if (this.mode !== 'PLAYING') {
+          this.setMode('PLAYING');
+        }
+      },
+      onRemotePlayerState: (st) => {
+        this.upsertRemotePlayerState(st);
+      },
+      onWorldSnapshot: (snapshot) => {
+        this.applyRemoteWorldSnapshot(snapshot);
+      },
+      onRemoteShot: (shot) => {
+        this.spawnRemoteShotVisual(shot);
+      },
+      onEnemyDamageClaim: (enemyId, amount, source) => {
+        if (!client.isHostingMatch()) return;
+        const safeAmt = Math.min(400, Math.max(0, Number(amount) || 0));
+        if (safeAmt <= 0) return;
+        for (let i = 0; i < this.enemies.length; i++) {
+          const e = this.enemies[i];
+          if (e.id === enemyId && e.alive) {
+            this.damageEnemy(e, safeAmt, source);
+            break;
+          }
+        }
+      },
+      onPeerListChanged: (activeIds) => {
+        for (const id of Array.from(this.remotePlayers.keys())) {
+          if (!activeIds.has(id)) {
+            this.removeRemotePlayer(id);
+          }
+        }
+      },
+      onSessionClosed: () => {
+        this.clearRemotePlayers();
+      },
+    });
+  }
+
+  private createNameplateSprite(name: string, accentHex: string): {
+    sprite: THREE.Sprite;
+    texture: THREE.CanvasTexture;
+  } {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.clearRect(0, 0, 256, 64);
+      ctx.fillStyle = 'rgba(13, 16, 22, 0.82)';
+      ctx.strokeStyle = accentHex;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.roundRect(14, 10, 228, 42, 10);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#F7F1E3';
+      ctx.font = 'bold 22px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(name.slice(0, 16), 128, 31);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(1.9, 0.48, 1);
+    sprite.position.set(0, 2.38, 0);
+    return { sprite, texture };
+  }
+
+  private upsertRemotePlayerState(st: LanPlayerState): void {
+    if (!this.worldReady || !this.textures) return;
+    const localId = this.lanClient?.getLocalPlayerId();
+    if (localId && st.id === localId) return;
+
+    let rp = this.remotePlayers.get(st.id);
+    if (!rp) {
+      const rig = createLordRamModel(this.textures);
+      const ringGeo = new THREE.RingGeometry(0.55, 0.72, 24);
+      ringGeo.rotateX(-Math.PI / 2);
+      const accent = st.accentHex || getHeroPreset(st.heroId).accentHex;
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: accent,
+        transparent: true,
+        opacity: 0.78,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const auraRing = new THREE.Mesh(ringGeo, ringMat);
+      auraRing.position.y = 0.04;
+      rig.root.add(auraRing);
+
+      const { sprite, texture } = this.createNameplateSprite(st.name, accent);
+      rig.root.add(sprite);
+      rig.root.position.set(st.x, st.y, st.z);
+      rig.root.rotation.order = 'YXZ';
+      rig.root.rotation.set(0, st.yaw, 0);
+      this.scene.add(rig.root);
+
+      rp = {
+        id: st.id,
+        name: st.name,
+        accentHex: accent,
+        rig,
+        auraRing,
+        nameplate: sprite,
+        nameplateTex: texture,
+        pose: createDefaultPoseState(0.93),
+        x: st.x,
+        y: st.y,
+        z: st.z,
+        targetX: st.x,
+        targetY: st.y,
+        targetZ: st.z,
+        yaw: st.yaw,
+        targetYaw: st.yaw,
+        horizSpeed: st.horizSpeed,
+        grounded: st.grounded,
+        walkPhase: st.walkPhase,
+        aiming: st.aiming,
+        stealth: st.stealth,
+        sprint: st.sprint,
+        mountKind: st.mountKind,
+        hp: st.hp,
+        maxHp: st.maxHp,
+        lastUpdateMs: performance.now(),
+      };
+      this.remotePlayers.set(st.id, rp);
+      return;
+    }
+
+    rp.targetX = st.x;
+    rp.targetY = st.y;
+    rp.targetZ = st.z;
+    rp.targetYaw = st.yaw;
+    rp.horizSpeed = st.horizSpeed;
+    rp.grounded = st.grounded;
+    rp.walkPhase = st.walkPhase;
+    rp.aiming = st.aiming;
+    rp.stealth = st.stealth;
+    rp.sprint = st.sprint;
+    rp.mountKind = st.mountKind;
+    rp.hp = st.hp;
+    rp.maxHp = st.maxHp;
+    rp.lastUpdateMs = performance.now();
+  }
+
+  private removeRemotePlayer(id: string): void {
+    const rp = this.remotePlayers.get(id);
+    if (!rp) return;
+    this.remotePlayers.delete(id);
+    this.scene.remove(rp.rig.root);
+    rp.auraRing.geometry.dispose();
+    (rp.auraRing.material as THREE.Material).dispose();
+    rp.nameplateTex.dispose();
+    (rp.nameplate.material as THREE.Material).dispose();
+    this.poolManager.disposeObject3DResources(rp.rig.root);
+  }
+
+  private clearRemotePlayers(): void {
+    for (const id of Array.from(this.remotePlayers.keys())) {
+      this.removeRemotePlayer(id);
+    }
+  }
+
+  private updateRemotePlayers(dt: number, elapsed: number): void {
+    const alpha = 1 - Math.exp(-15 * dt);
+    this.remotePlayers.forEach((rp) => {
+      rp.x = THREE.MathUtils.lerp(rp.x, rp.targetX, alpha);
+      rp.y = THREE.MathUtils.lerp(rp.y, rp.targetY, alpha);
+      rp.z = THREE.MathUtils.lerp(rp.z, rp.targetZ, alpha);
+      rp.yaw = dampAngle(rp.yaw, rp.targetYaw, 16, dt);
+
+      rp.rig.root.position.set(rp.x, rp.y, rp.z);
+      rp.rig.root.rotation.y = rp.yaw;
+
+      const moveNorm = THREE.MathUtils.clamp(rp.horizSpeed / 12, 0, 1);
+      if (rp.horizSpeed > 0.25) {
+        rp.walkPhase += dt * (rp.sprint ? 12.5 : 8.5);
+      }
+      this.applyArticulatedLocomotion(
+        rp.rig,
+        rp.walkPhase,
+        moveNorm,
+        rp.sprint,
+        rp.grounded,
+        rp.aiming,
+        false,
+        0.93,
+        elapsed,
+        dt,
+        rp.pose
+      );
+    });
+  }
+
+  private applyRemoteWorldSnapshot(snapshot: LanWorldSnapshot): void {
+    if (!this.worldReady) return;
+    const localId = this.lanClient?.getLocalPlayerId();
+    for (let i = 0; i < snapshot.players.length; i++) {
+      const p = snapshot.players[i];
+      if (!localId || p.id !== localId) {
+        this.upsertRemotePlayerState(p);
+      }
+    }
+
+    if (!this.lanClient?.isClientInMatch()) return;
+
+    this.dayTime = snapshot.dayTime;
+    this.missionIdx = snapshot.missionIdx;
+    this.missionProgress = snapshot.missionProgress;
+    this.completedMissions = snapshot.completedMissions;
+
+    const existingById = new Map<string, EnemyEntity>();
+    for (let i = 0; i < this.enemies.length; i++) {
+      existingById.set(this.enemies[i].id, this.enemies[i]);
+    }
+
+    const seenIds = new Set<string>();
+    for (let i = 0; i < snapshot.enemies.length; i++) {
+      const se = snapshot.enemies[i];
+      seenIds.add(se.id);
+      const existing = existingById.get(se.id);
+      if (!existing) {
+        if (!se.alive) continue;
+        const createdId = this.spawnEnemy(
+          se.x,
+          se.z,
+          se.isCommander,
+          se.missionTag,
+          se.variant,
+          true,
+          1.0,
+          se.customScale
+        );
+        const created = this.enemies[this.enemies.length - 1];
+        if (created && created.id === createdId) {
+          created.id = se.id;
+          created.hp = se.hp;
+          created.maxHp = se.maxHp;
+          created.yaw = se.yaw;
+          created.syncTargetX = se.x;
+          created.syncTargetY = se.y;
+          created.syncTargetZ = se.z;
+          created.syncTargetYaw = se.yaw;
+        }
+      } else {
+        existing.syncTargetX = se.x;
+        existing.syncTargetY = se.y;
+        existing.syncTargetZ = se.z;
+        existing.syncTargetYaw = se.yaw;
+        existing.hp = se.hp;
+        existing.maxHp = se.maxHp;
+        if (existing.alive && !se.alive) {
+          existing.alive = false;
+          if (se.dissolving) {
+            this.startEnemyAshDissolution(existing);
+          } else {
+            existing.rig.root.scale.setScalar(1);
+            this.poolManager.release(
+              this.demonPoolKey(existing.variant, existing.isCommander),
+              existing.rig
+            );
+          }
+        }
+      }
+    }
+
+    // Remove stale non-boss enemies pruned on Host
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      if (!seenIds.has(e.id) && e.alive && !e.dissolving) {
+        e.alive = false;
+        e.rig.root.scale.setScalar(1);
+        this.poolManager.release(
+          this.demonPoolKey(e.variant, e.isCommander),
+          e.rig
+        );
+        swapRemoveAt(this.enemies, i);
+      }
+    }
+  }
+
+  private buildHostWorldSnapshot(): LanWorldSnapshot {
+    const hero = getHeroPreset(this.lanLocalHeroId);
+    const localPlayer: LanPlayerState = {
+      id: this.lanClient?.getLocalPlayerId() || 'host',
+      name: this.lanLocalPlayerName,
+      heroId: hero.id,
+      accentHex: hero.accentHex,
+      x: Number(this.playerX.toFixed(2)),
+      y: Number(this.playerY.toFixed(2)),
+      z: Number(this.playerZ.toFixed(2)),
+      yaw: Number(this.playerYaw.toFixed(3)),
+      horizSpeed: Number(this.playerHorizSpeed.toFixed(2)),
+      grounded: this.grounded,
+      walkPhase: Number(this.walkPhase.toFixed(2)),
+      aiming: this.input.fireHeld || this.bowDrawHoldTimer > 0,
+      stealth: this.stealthActive,
+      sprint: this.input.sprint,
+      mountKind:
+        this.mountedChariotIndex !== null
+          ? 'RATHA'
+          : this.mountedAnimalIndex !== null
+          ? this.animals[this.mountedAnimalIndex].kind
+          : 'NONE',
+      hp: Math.round(this.hp),
+      maxHp: this.maxHp,
+      selectedAstra: this.astraQuest?.selectedAstra ?? null,
+      seq: ++this.lanSnapSeq,
+    };
+
+    const enemiesOut: LanEnemySyncState[] = [];
+    const cap = Math.min(this.enemies.length, 48);
+    for (let i = 0; i < cap; i++) {
+      const e = this.enemies[i];
+      enemiesOut.push({
+        id: e.id,
+        variant: e.variant,
+        isCommander: e.isCommander,
+        x: Number(e.x.toFixed(2)),
+        y: Number(e.y.toFixed(2)),
+        z: Number(e.z.toFixed(2)),
+        yaw: Number(e.yaw.toFixed(3)),
+        hp: Math.round(e.hp),
+        maxHp: e.maxHp,
+        alive: e.alive,
+        dissolving: e.dissolving,
+        customScale: e.customScale,
+        missionTag: e.missionTag,
+      });
+    }
+
+    return {
+      serverTimeMs: Date.now(),
+      dayTime: Number(this.dayTime.toFixed(4)),
+      missionIdx: this.missionIdx,
+      missionProgress: this.missionProgress,
+      completedMissions: this.completedMissions,
+      players: [localPlayer],
+      enemies: enemiesOut,
+    };
+  }
+
+  private spawnRemoteShotVisual(shot: LanShotEvent): void {
+    if (!this.worldReady) return;
+    const isChakra = shot.archetype === 'CHAKRA';
+    const astraId: AstraId | null =
+      shot.archetype === 'AGNEYASTRA' ||
+      shot.archetype === 'VARUNASTRA' ||
+      shot.archetype === 'VAYAVYASTRA' ||
+      shot.archetype === 'NAGASTRA' ||
+      shot.archetype === 'BRAHMASTRA'
+        ? shot.archetype
+        : null;
+
+    let poolKey = 'arrow';
+    let meshGroup: THREE.Group;
+    let spinPivot: THREE.Group | undefined;
+
+    if (isChakra) {
+      poolKey = 'chakra';
+      meshGroup = this.poolManager.acquire<THREE.Group>(poolKey);
+      spinPivot = meshGroup.userData.spinPivot as THREE.Group | undefined;
+      soundEngine.playAstraBlast();
+    } else if (astraId) {
+      poolKey = `astra_arrow_${astraId}`;
+      meshGroup = this.poolManager.acquire<THREE.Group>(poolKey);
+      soundEngine.playAstraRelease(astraId);
+    } else if (shot.archetype === 'NAGASTRA_SERPENT') {
+      poolKey = 'astra_serpent';
+      meshGroup = this.poolManager.acquire<THREE.Group>(poolKey);
+    } else {
+      meshGroup = this.poolManager.acquire<THREE.Group>(poolKey);
+      soundEngine.playBowShot();
+    }
+
+    const profile = PROJECTILE_PHYSICS_REGISTRY[shot.archetype];
+    meshGroup.position.set(shot.origin.x, shot.origin.y, shot.origin.z);
+    meshGroup.lookAt(
+      shot.origin.x + shot.dir.x,
+      shot.origin.y + shot.dir.y,
+      shot.origin.z + shot.dir.z
+    );
+
+    this.projectiles.push({
+      mesh: meshGroup,
+      spinPivot,
+      archetype: shot.archetype,
+      clientShotId: shot.shotId,
+      x: shot.origin.x,
+      y: shot.origin.y,
+      z: shot.origin.z,
+      vx: shot.dir.x * profile.speed,
+      vy: shot.dir.y * profile.speed,
+      vz: shot.dir.z * profile.speed,
+      elapsedFlightSec: 0,
+      spinAngle: 0,
+      isChakra,
+      stealthAmbush: shot.stealthAmbush,
+      life: profile.maxLifeSec,
+      astraId,
+      isSplitSerpent: shot.archetype === 'NAGASTRA_SERPENT',
+      homingTargetId: shot.homingTargetId,
+      poolKey,
+      isRemoteVisualOnly: true,
+    });
+  }
+
+  private resolveRemoteAstraVisualImpact(
+    p: ProjectileEntity,
+    hitX: number,
+    hitY: number,
+    hitZ: number
+  ): void {
+    const astraId = p.astraId;
+    if (!astraId) {
+      this.spawnBlast(hitX, hitY, hitZ, p.isChakra ? 0xff5a12 : 0xf6c343);
+      return;
+    }
+    const cfg = ASTRA_CONFIG[astraId];
+    const profile = this.qualityManager.getProfile();
+    const gY = groundHeightAt(hitX, hitZ);
+
+    if (astraId === 'AGNEYASTRA') {
+      this.astraVfx?.spawnAgniMandalaField(
+        hitX,
+        gY,
+        hitZ,
+        cfg.radius,
+        2.5,
+        0,
+        profile.particleScale,
+        profile.tier
+      );
+      soundEngine.playAstraImpact('AGNEYASTRA');
+    } else if (astraId === 'VARUNASTRA') {
+      this.astraVfx?.spawnWaterWave(hitX, gY, hitZ, cfg.radius, profile.particleScale, profile.tier);
+      soundEngine.playAstraImpact('VARUNASTRA');
+    } else if (astraId === 'VAYAVYASTRA') {
+      this.astraVfx?.spawnTornado(
+        hitX,
+        gY,
+        hitZ,
+        cfg.radius,
+        cfg.liftHeight,
+        0,
+        cfg.effectDurationSec,
+        profile.particleScale
+      );
+      soundEngine.playAstraImpact('VAYAVYASTRA');
+    } else if (astraId === 'NAGASTRA') {
+      soundEngine.playAstraImpact('NAGASTRA');
+      this.spawnBlast(hitX, hitY, hitZ, cfg.primaryHex);
+    } else if (astraId === 'BRAHMASTRA') {
+      this.astraVfx?.spawnBrahmastraBeamAndCrater(
+        p.x,
+        p.y + 1.1,
+        p.z,
+        hitX,
+        hitY,
+        hitZ,
+        cfg.craterRadius,
+        cfg.craterDepth,
+        cfg.craterDurationSec,
+        profile.particleScale,
+        profile.tier
+      );
+      soundEngine.playAstraImpact('BRAHMASTRA');
+    }
+  }
+
   public reviveAtPalace(): void {
     if (!this.worldReady) return;
     this.clearInputs();
@@ -6526,6 +7069,17 @@ export class RamayanaWorldEngine {
     };
     this.projectiles.push(entity);
 
+    if (this.lanClient?.isMultiplayerActive()) {
+      this.lanClient.sendShot({
+        shotId: clientShotId,
+        archetype,
+        origin: { x: startX, y: startY, z: startZ },
+        dir: { x: dirX, y: dirY, z: dirZ },
+        stealthAmbush: isStealthAmbush,
+        homingTargetId: chakraLockId,
+      });
+    }
+
     const nearby = this.projectileSync.buildNearbySnapshots(
       this.playerX,
       this.playerZ,
@@ -6884,6 +7438,27 @@ export class RamayanaWorldEngine {
   ): boolean {
     if (!enemy.alive || amount <= 0) return false;
     enemy.lastDamageSource = source;
+
+    // On LAN Clients, forward damage claims to Host authoritatively while showing hit reaction
+    if (this.lanClient?.isClientInMatch()) {
+      enemy.pendingClaimDmg = (enemy.pendingClaimDmg ?? 0) + amount;
+      if (enemy.pendingClaimDmg >= 4 || enemy.hp - amount <= 0) {
+        const claimAmt = enemy.pendingClaimDmg;
+        enemy.pendingClaimDmg = 0;
+        this.lanClient.sendEnemyDamageClaim(
+          enemy.id,
+          claimAmt,
+          source,
+          `lan_${Date.now()}`
+        );
+      }
+      enemy.hp = Math.max(1, enemy.hp - amount);
+      enemy.hitReactTimer = 0.24;
+      enemy.hitReactPitch = -0.3;
+      soundEngine.playHit();
+      return false;
+    }
+
     enemy.hp -= amount;
     this.astraQuest?.onPlayerDamagedEnemy(enemy.id, amount);
     soundEngine.playHit();
@@ -9177,6 +9752,12 @@ export class RamayanaWorldEngine {
         p.mesh.position.set(hitX, hitY, hitZ);
 
         const dmgMult = p.stealthAmbush ? 2.0 : 1.0;
+        if (p.isRemoteVisualOnly) {
+          this.resolveRemoteAstraVisualImpact(p, hitX, hitY, hitZ);
+          this.poolManager.release(p.poolKey, p.mesh);
+          swapRemoveAt(this.projectiles, i);
+          continue;
+        }
         const optimisticHits: OptimisticDamageRecord[] = [];
         const nearbySnap = this.projectileSync.buildNearbySnapshots(
           hitX,
@@ -9372,6 +9953,12 @@ export class RamayanaWorldEngine {
 
       if (p.life <= 0) {
         const expY = Math.max(p.y, groundHeightAt(p.x, p.z) + 0.2);
+        if (p.isRemoteVisualOnly) {
+          this.resolveRemoteAstraVisualImpact(p, p.x, expY, p.z);
+          this.poolManager.release(p.poolKey, p.mesh);
+          swapRemoveAt(this.projectiles, i);
+          continue;
+        }
         const optimisticHits: OptimisticDamageRecord[] = [];
         const nearbySnap = this.projectileSync.buildNearbySnapshots(
           p.x,
@@ -9454,9 +10041,11 @@ export class RamayanaWorldEngine {
 
     // 7. Five-Variant Demon AI, Unique Abilities, Enemy Projectiles & Ground Hazards
     //    Absolute Boundary Enforcement: Demons spawn & patrol ONLY inside the 5 km Demon Badlands (x >= DEMON_ZONE_MIN_X)
+    const isLanClient = Boolean(this.lanClient?.isClientInMatch());
     this.spawnTimer += dt;
     const activeAlive = this.enemies.length;
     if (
+      !isLanClient &&
       this.spawnTimer > 5.5 &&
       activeAlive < 14 + this.wantedLevel * 2 &&
       this.playerX >= DEMON_ZONE_MIN_X - 40
@@ -9547,6 +10136,43 @@ export class RamayanaWorldEngine {
 
       if (summonLocked) {
         // Dramatically freeze all surrounding enemies during Brahmastra summon chant & lightning
+        continue;
+      }
+
+      if (isLanClient) {
+        // On LAN Clients, smoothly interpolate enemy positions & facing from Host authoritative snapshot
+        if (
+          e.syncTargetX !== undefined &&
+          e.syncTargetY !== undefined &&
+          e.syncTargetZ !== undefined &&
+          e.syncTargetYaw !== undefined
+        ) {
+          const prevX = e.x;
+          const prevZ = e.z;
+          const eAlpha = 1 - Math.exp(-14 * dt);
+          e.x = THREE.MathUtils.lerp(e.x, e.syncTargetX, eAlpha);
+          e.y = THREE.MathUtils.lerp(e.y, e.syncTargetY, eAlpha);
+          e.z = THREE.MathUtils.lerp(e.z, e.syncTargetZ, eAlpha);
+          e.yaw = dampAngle(e.yaw, e.syncTargetYaw, 14, dt);
+          const moved = Math.hypot(e.x - prevX, e.z - prevZ);
+          const spdNorm = THREE.MathUtils.clamp(moved / Math.max(0.001, dt) / 5.5, 0, 1);
+          if (spdNorm > 0.05) e.walkPhase += (moved / 1.5) * Math.PI * 2;
+          if (e.variant !== 'BOAR_DEMON' && e.variant !== 'SHADOW_GHOST') {
+            this.applyArticulatedLocomotion(
+              e.rig,
+              e.walkPhase,
+              spdNorm,
+              false,
+              true,
+              false,
+              true,
+              e.variant === 'RABBIT_DEMON' ? 0.88 : 0.96,
+              elapsed,
+              dt,
+              e.pose
+            );
+          }
+        }
         continue;
       }
 
@@ -10814,6 +11440,47 @@ export class RamayanaWorldEngine {
     }
 
     // 10b. Post-Camera Occlusion Culling, Entity Detail LOD & Transform Sync
+    if (this.remotePlayers.size > 0) {
+      this.updateRemotePlayers(dt, elapsed);
+    }
+
+    if (this.lanClient?.isMultiplayerActive()) {
+      this.lanSyncAccum += dt;
+      if (this.lanSyncAccum >= LAN_SYNC_INTERVAL_MS / 1000) {
+        this.lanSyncAccum = 0;
+        const hero = getHeroPreset(this.lanLocalHeroId);
+        this.lanClient.sendLocalPlayerState({
+          name: this.lanLocalPlayerName,
+          heroId: hero.id,
+          accentHex: hero.accentHex,
+          x: Number(this.playerX.toFixed(2)),
+          y: Number(this.playerY.toFixed(2)),
+          z: Number(this.playerZ.toFixed(2)),
+          yaw: Number(this.playerYaw.toFixed(3)),
+          horizSpeed: Number(this.playerHorizSpeed.toFixed(2)),
+          grounded: this.grounded,
+          walkPhase: Number(this.walkPhase.toFixed(2)),
+          aiming: this.input.fireHeld || this.bowDrawHoldTimer > 0,
+          stealth: this.stealthActive,
+          sprint: this.input.sprint,
+          mountKind:
+            this.mountedChariotIndex !== null
+              ? 'RATHA'
+              : this.mountedAnimalIndex !== null
+              ? this.animals[this.mountedAnimalIndex].kind
+              : 'NONE',
+          hp: Math.round(this.hp),
+          maxHp: this.maxHp,
+          selectedAstra: this.astraQuest?.selectedAstra ?? null,
+          seq: ++this.lanSnapSeq,
+        });
+
+        if (this.lanClient.isHostingMatch()) {
+          this.lanClient.sendWorldSnapshot(this.buildHostWorldSnapshot());
+        }
+      }
+    }
+
     const fog = this.scene.fog as THREE.Fog | null;
     this.occlusionManager.prepareCullingBasis(this.camera, fog ? fog.far : 280, true);
 
@@ -11712,6 +12379,9 @@ export class RamayanaWorldEngine {
         pushBlip(e.id, e.isCommander ? 'COMMANDER' : 'ENEMY', e.x, e.z);
       }
     }
+    this.remotePlayers.forEach((rp) => {
+      pushBlip(`ally_${rp.id}`, 'ALLY_PLAYER', rp.x, rp.z);
+    });
     if (activeMission) {
       pushBlip(
         activeMission.id,
@@ -12134,6 +12804,7 @@ export class RamayanaWorldEngine {
     document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     this.detachContextListeners(this.renderer.domElement);
     this.occlusionManager.clear();
+    this.clearRemotePlayers();
     this.dynamicScaler.dispose();
     this.projectileSync.dispose();
     this.astraVfx?.dispose();

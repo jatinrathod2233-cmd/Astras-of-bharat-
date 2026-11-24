@@ -11,15 +11,53 @@ import android.webkit.JavascriptInterface
 
 /**
  * Native Android bridge exposed to the Three.js / React game engine at window.AndroidBridge.
- * Handles hardware haptic feedback, screen-awake locking, mode synchronization, and exit requests.
+ * Handles hardware haptic feedback, screen-awake locking, mode synchronization,
+ * offline Wi-Fi hotspot LAN multiplayer sockets, and exit requests.
  */
 class AndroidGameBridge(
     private val activity: Activity,
+    private val lanManager: LanMultiplayerManager,
     private val onModeSync: (String) -> Unit
 ) {
 
     @JavascriptInterface
     fun isNativeAndroid(): Boolean = true
+
+    @JavascriptInterface
+    fun lanIsSupported(): Boolean = true
+
+    @JavascriptInterface
+    fun lanGetNetworkInfo(): String = lanManager.getNetworkInfoJson()
+
+    @JavascriptInterface
+    fun lanStartHost(roomName: String, hostName: String, roomCode: String, heroId: String) {
+        lanManager.startHost(roomName, hostName, roomCode, heroId)
+    }
+
+    @JavascriptInterface
+    fun lanStartDiscovery() {
+        lanManager.startDiscovery()
+    }
+
+    @JavascriptInterface
+    fun lanStopDiscovery() {
+        lanManager.stopDiscovery()
+    }
+
+    @JavascriptInterface
+    fun lanJoinHost(hostIp: String, port: Int, roomCode: String, playerName: String, heroId: String) {
+        lanManager.joinHost(hostIp, port, roomCode, playerName, heroId)
+    }
+
+    @JavascriptInterface
+    fun lanSend(wireJson: String) {
+        lanManager.sendWireMessage(wireJson)
+    }
+
+    @JavascriptInterface
+    fun lanStopAll() {
+        lanManager.stopAll()
+    }
 
     @JavascriptInterface
     fun getAppVersion(): String = BuildConfig.VERSION_NAME
@@ -71,7 +109,9 @@ class AndroidGameBridge(
     @JavascriptInterface
     fun exitApp() {
         activity.runOnUiThread {
+            lanManager.stopAll()
             activity.finish()
         }
     }
 }
+

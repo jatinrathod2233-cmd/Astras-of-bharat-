@@ -11,10 +11,12 @@ import {
   Volume2,
   VolumeX,
   Waves,
+  Wifi,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import { ASTRA_CONFIG } from '../engine/astraConfig';
+import type { LanSessionSnapshot } from '../engine/LanMultiplayerClient';
 import { AstraId, WorldHudSnapshot } from '../types/world';
 import { ControlLayoutMap } from '../utils/controlLayout';
 import { AstraIconBadge } from './AstraIcons';
@@ -28,6 +30,7 @@ interface GameHUDProps {
   muted: boolean;
   sprintActive: boolean;
   showPerfStats: boolean;
+  lanSession?: LanSessionSnapshot;
   desktopWheelOpen: boolean;
   desktopWheelCenter: { x: number; y: number };
   desktopHoveredAstra: AstraId | null;
@@ -57,6 +60,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   muted,
   sprintActive,
   showPerfStats,
+  lanSession,
   desktopWheelOpen,
   desktopWheelCenter,
   desktopHoveredAstra,
@@ -144,7 +148,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         cooldowns={hud.astraCooldowns}
       />
 
-      {/* Top-Left: Minimal 80px Radar + Optional Compact FPS/Quality Readout */}
+      {/* Top-Left: Minimal 80px Radar + Optional Compact FPS/LAN Readout */}
       <div className="fixed top-3 left-3 z-20 flex items-start gap-2 pointer-events-none">
         <MinimapRadar
           playerX={hud.playerX}
@@ -152,9 +156,22 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
           playerYaw={hud.playerYaw}
           blips={hud.blips}
         />
-        {showPerfStats && (
-          <div className="rounded border border-amber-200/20 bg-[#0D1016]/70 px-2 py-1 font-mono-tabular text-[10px] text-amber-200">
-            {hud.fps}/{hud.targetFps} FPS · {hud.qualityTier} · {Math.round(hud.resolutionScale * 100)}%
+        {(showPerfStats || lanSession?.active) && (
+          <div className="flex flex-col gap-1">
+            {showPerfStats && (
+              <div className="rounded border border-amber-200/20 bg-[#0D1016]/70 px-2 py-1 font-mono-tabular text-[10px] text-amber-200">
+                {hud.fps}/{hud.targetFps} FPS · {hud.qualityTier} · {Math.round(hud.resolutionScale * 100)}%
+              </div>
+            )}
+            {lanSession?.active && (
+              <div className="inline-flex items-center gap-1 rounded border border-emerald-400/35 bg-[#0D1016]/75 px-2 py-1 font-mono-tabular text-[10px] text-emerald-200">
+                <Wifi className="h-2.5 w-2.5 text-emerald-400 shrink-0" aria-hidden="true" />
+                <span>
+                  LAN · {lanSession.players.length}/6
+                  {lanSession.pingMs !== null ? ` · ${lanSession.pingMs}ms` : ''}
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>

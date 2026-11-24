@@ -5,12 +5,20 @@ import {
   getHoveredAstraFromPoint,
 } from './components/DivyastraRadialWheel';
 import { GameHUD } from './components/GameHUD';
+import {
+  LanLocalProfile,
+  LanMultiplayerModal,
+} from './components/LanMultiplayerModal';
 import { OverlayModals } from './components/OverlayModals';
 import {
   ASTRA_CONFIG,
   ASTRA_MAX_ENERGY,
   ASTRA_ORDER,
 } from './engine/astraConfig';
+import {
+  LanMultiplayerClient,
+  LanSessionSnapshot,
+} from './engine/LanMultiplayerClient';
 import { RamayanaWorldEngine } from './engine/RamayanaWorldEngine';
 import { AstraId, PlayMode, QualityMode, WorldHudSnapshot } from './types/world';
 import { soundEngine } from './utils/audio';
@@ -105,13 +113,45 @@ const INITIAL_HUD: WorldHudSnapshot = {
 };
 
 const SHOW_FPS_STORAGE_KEY = 'astras_show_fps_v1';
+const LAN_PROFILE_STORAGE_KEY = 'astras_lan_profile_v1';
+
+function loadLanProfile(): LanLocalProfile {
+  try {
+    const raw = localStorage.getItem(LAN_PROFILE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<LanLocalProfile>;
+      if (parsed.playerName && parsed.heroId) {
+        return {
+          playerName: parsed.playerName,
+          heroId: parsed.heroId,
+        };
+      }
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return { playerName: 'Lord Ram', heroId: 'RAM' };
+}
 
 export default function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<RamayanaWorldEngine | null>(null);
+  const lanClientRef = useRef<LanMultiplayerClient | null>(null);
+  if (!lanClientRef.current) {
+    lanClientRef.current = new LanMultiplayerClient();
+  }
 
   const [mode, setMode] = useState<PlayMode>('TITLE');
   const [hud, setHud] = useState<WorldHudSnapshot>(INITIAL_HUD);
+  const [lanSession, setLanSession] = useState<LanSessionSnapshot>(() =>
+    lanClientRef.current!.getSnapshot()
+  );
+  const [lanProfile, setLanProfile] = useState<LanLocalProfile>(() => loadLanProfile());
+  const lanProfileRef = useRef<LanLocalProfile>(lanProfile);
+  lanProfileRef.current = lanProfile;
+  const [lanModalOpen, setLanModalOpen] = useState(false);
+  const lanModalOpenRef = useRef(false);
+  lanModalOpenRef.current = lanModalOpen;
   const [muted, setMuted] = useState<boolean>(() => soundEngine.isMuted());
   const [touchSprint, setTouchSprint] = useState(false);
   const [viewport, setViewport] = useState<{ w: number; h: number }>(() =>
@@ -202,6 +242,8 @@ export default function App() {
     }
     if (mode !== 'PLAYING') {
       resetAllInputs();
+    } else {
+      setLanModalOpen(false);
     }
     if (mode !== 'PAUSED') {
       setCustomizingControls(false);
@@ -236,6 +278,17 @@ export default function App() {
     };
   }, [resetAllInputs]);
 
+  // Subscribe to offline Wi-Fi Hotspot LAN client state
+  useEffect(() => {
+    const client = lanClientRef.current;
+    if (!client) return;
+    const unsub = client.subscribe((snap) => setLanSession(snap));
+    return () => {
+      unsub();
+      client.dispose();
+    };
+  }, []);
+
   // Initialize Three.js Open World once
   useEffect(() => {
     const container = mountRef.current;
@@ -246,14 +299,38 @@ export default function App() {
       onModeChange: (nextMode) => setMode(nextMode),
     });
     engineRef.current = engine;
+    if (lanClientRef.current) {
+      engine.setMultiplayerClient(
+        lanClientRef.current,
+        lanProfileRef.current.playerName,
+        lanProfileRef.current.heroId
+      );
+    }
     (window as unknown as { __ramayanaEngine?: RamayanaWorldEngine }).__ramayanaEngine = engine;
 
     return () => {
       (window as unknown as { __ramayanaEngine?: RamayanaWorldEngine }).__ramayanaEngine = undefined;
+      engine.setMultiplayerClient(null);
       engine.dispose();
       engineRef.current = null;
     };
   }, []);
+
+  // Keep engine's local multiplayer identity synced when profile changes
+  useEffect(() => {
+    try {
+      localStorage.setItem(LAN_PROFILE_STORAGE_KEY, JSON.stringify(lanProfile));
+    } catch {
+      // Ignore storage errors
+    }
+    if (engineRef.current && lanClientRef.current) {
+      engineRef.current.setMultiplayerClient(
+        lanClientRef.current,
+        lanProfile.playerName,
+        lanProfile.heroId
+      );
+    }
+  }, [lanProfile]);
 
   // Prevent browser pinch-zoom or rubber-band scrolling on mobile touchscreens
   useEffect(() => {
@@ -305,6 +382,10 @@ export default function App() {
       if (!engine) return;
 
       if (e.code === 'Escape') {
+        if (lanModalOpenRef.current) {
+          setLanModalOpen(false);
+          return;
+        }
         if (customizingControlsRef.current) {
           setCustomizingControls(false);
           return;
@@ -625,6 +706,7 @@ export default function App() {
           muted={muted}
           sprintActive={touchSprint}
           showPerfStats={showPerfStats}
+          lanSession={lanSession}
           desktopWheelOpen={desktopWheelOpen}
           desktopWheelCenter={desktopWheelCenter}
           desktopHoveredAstra={desktopHoveredAstra}
@@ -653,6 +735,7 @@ export default function App() {
         mode={mode}
         hud={hud}
         showPerfStats={showPerfStats}
+        lanSession={lanSession}
         onStartGame={handleStartGame}
         onResume={handleResume}
         onRevive={handleRevive}
@@ -661,6 +744,7 @@ export default function App() {
         onRerunBenchmark={handleRerunBenchmark}
         onTogglePerfStats={handleTogglePerfStats}
         onOpenControlCustomizer={() => setCustomizingControls(true)}
+        onOpenLanMultiplayer={() => setLanModalOpen(true)}
         onDismissStoryIntro={handleDismissStoryIntro}
         onDismissUnlockPopup={handleDismissUnlockPopup}
       />
@@ -672,6 +756,21 @@ export default function App() {
           viewport={viewport}
           onChangeLayout={setControlLayout}
           onClose={() => setCustomizingControls(false)}
+        />
+      )}
+
+      {/* Offline Wi-Fi Hotspot LAN Multiplayer Modal (2–6 Players) */}
+      {lanModalOpen && lanClientRef.current && (
+        <LanMultiplayerModal
+          lanClient={lanClientRef.current}
+          session={lanSession}
+          profile={lanProfile}
+          onUpdateProfile={setLanProfile}
+          onClose={() => setLanModalOpen(false)}
+          onEnterMatch={() => {
+            setLanModalOpen(false);
+            handleStartGame();
+          }}
         />
       )}
     </div>

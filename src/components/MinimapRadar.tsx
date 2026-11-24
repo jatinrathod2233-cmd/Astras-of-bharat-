@@ -108,6 +108,18 @@ export const MinimapRadar: React.FC<MinimapRadarProps> = React.memo(
         } else if (b.kind === 'RATHA') {
           ctx.fillStyle = '#E8AE3B';
           ctx.fillRect(px - 2, py - 2, 4, 4);
+        } else if (b.kind === 'ALLY_PLAYER') {
+          ctx.fillStyle = '#38BDF8';
+          ctx.strokeStyle = '#F7F1E3';
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(px, py - 3.2);
+          ctx.lineTo(px + 2.8, py);
+          ctx.lineTo(px, py + 3.2);
+          ctx.lineTo(px - 2.8, py);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
         } else {
           ctx.fillStyle = b.kind === 'COMMANDER' ? '#FF4D2E' : '#E05A47';
           ctx.beginPath();

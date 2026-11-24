@@ -27,11 +27,13 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewAssetLoader
+import org.json.JSONObject
 import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var gameWebView: WebView
+    private lateinit var lanManager: LanMultiplayerManager
     private lateinit var gameBridge: AndroidGameBridge
 
     @Volatile
@@ -108,7 +110,19 @@ class MainActivity : AppCompatActivity() {
             cacheMode = WebSettings.LOAD_DEFAULT
         }
 
-        gameBridge = AndroidGameBridge(this) { mode ->
+        lanManager = LanMultiplayerManager(applicationContext) { eventJson ->
+            val quoted = JSONObject.quote(eventJson)
+            runOnUiThread {
+                if (::gameWebView.isInitialized) {
+                    gameWebView.evaluateJavascript(
+                        "window.__onNativeLanEvent && window.__onNativeLanEvent($quoted);",
+                        null
+                    )
+                }
+            }
+        }
+
+        gameBridge = AndroidGameBridge(this, lanManager) { mode ->
             currentGameMode = mode
         }
         gameWebView.addJavascriptInterface(gameBridge, "AndroidBridge")
@@ -295,6 +309,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (::lanManager.isInitialized) {
+            lanManager.stopAll()
+        }
         if (::gameWebView.isInitialized) {
             gameWebView.removeJavascriptInterface("AndroidBridge")
             gameWebView.stopLoading()

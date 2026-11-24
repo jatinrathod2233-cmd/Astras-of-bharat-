@@ -1,8 +1,13 @@
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import fs from 'fs';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  getLocalIpv4Addresses,
+  LanRoomServer,
+} from './src/server/lanRoomServer.ts';
 import { ProjectileAuthorityService } from './src/server/projectileAuthority.ts';
 import { PROJECTILE_PHYSICS_REGISTRY } from './src/shared/projectilePhysics.ts';
 
@@ -12,7 +17,7 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{8,64}$/;
 
-export function createApp(): express.Express {
+export function createApp(lanServer = new LanRoomServer()): express.Express {
   const app = express();
   const authority = new ProjectileAuthorityService();
 
@@ -91,11 +96,32 @@ export function createApp(): express.Express {
     }
   );
 
+  app.get('/api/lan/info', (_req: Request, res: Response): void => {
+    const ips = getLocalIpv4Addresses();
+    res.json({
+      ok: true,
+      port: PORT,
+      localIps: ips,
+      primaryIp: ips[0] ?? '127.0.0.1',
+    });
+  });
+
+  app.get('/api/lan/rooms', (_req: Request, res: Response): void => {
+    res.json({
+      ok: true,
+      rooms: lanServer.listRooms(PORT),
+    });
+  });
+
   return app;
 }
 
 async function startServer(): Promise<void> {
-  const app = createApp();
+  const lanServer = new LanRoomServer();
+  const app = createApp(lanServer);
+  const httpServer = http.createServer(app);
+  lanServer.attachToHttpServer(httpServer);
+
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {
@@ -115,7 +141,7 @@ async function startServer(): Promise<void> {
     }
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Astras of Bharat server listening on http://0.0.0.0:${PORT}`);
   });
 }
