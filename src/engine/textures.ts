@@ -38,6 +38,13 @@ export interface ProceduralTextures {
   contactShadow: THREE.CanvasTexture;
   setAnisotropy: (cap: number) => void;
   reuploadAll: () => void;
+  getCurrentSize: () => number;
+  getEstimatedVramBytes: () => number;
+  downscaleStep: (
+    targetMaxSize: number,
+    dropSecondaryMips: boolean,
+    budgetMs?: number
+  ) => boolean;
   dispose: () => void;
 }
 
@@ -46,12 +53,58 @@ export interface AsyncTextureLoadOptions {
   onProgress?: (fraction: number, label: string) => void;
   /** Time slice budget in ms before yielding to main thread (default 6ms for 60fps mobile). */
   frameBudgetMs?: number;
-  /** Target procedural texture resolution (2048 | 1024 | 512 | 256). */
-  textureSize?: 2048 | 1024 | 512 | 256;
+  /** Target procedural texture resolution (2048 | 1024 | 512 | 256 | 128). */
+  textureSize?: 2048 | 1024 | 512 | 256 | 128;
   /** Maximum anisotropic filtering cap (HIGH: up to 16, MEDIUM: 2, LOW: 1). */
   maxAnisotropy?: number;
   /** Skip mipmap generation on secondary roughness/detail maps to save GPU memory & bandwidth. */
   skipNonEssentialMipmaps?: boolean;
+}
+
+export function downscaleCanvasTextureInPlace(
+  tex: THREE.CanvasTexture,
+  targetMaxSize: number,
+  generateMipmaps: boolean
+): boolean {
+  const oldCanvas = tex.image as HTMLCanvasElement | undefined;
+  if (!oldCanvas || typeof oldCanvas.width !== 'number') return false;
+  const curW = oldCanvas.width;
+  const curH = oldCanvas.height;
+  const maxDim = Math.max(curW, curH);
+  let changed = false;
+
+  if (maxDim > targetMaxSize && targetMaxSize >= 32) {
+    const scale = targetMaxSize / maxDim;
+    const nextW = Math.max(32, Math.round(curW * scale));
+    const nextH = Math.max(32, Math.round(curH * scale));
+    const newCanvas = document.createElement('canvas');
+    newCanvas.width = nextW;
+    newCanvas.height = nextH;
+    const ctx2d = newCanvas.getContext('2d');
+    if (ctx2d) {
+      ctx2d.imageSmoothingEnabled = true;
+      ctx2d.imageSmoothingQuality = 'high';
+      ctx2d.drawImage(oldCanvas, 0, 0, nextW, nextH);
+      tex.image = newCanvas;
+      // Immediately release old oversized 2D backing store memory
+      oldCanvas.width = 0;
+      oldCanvas.height = 0;
+      changed = true;
+    }
+  }
+
+  if (tex.generateMipmaps !== generateMipmaps) {
+    tex.generateMipmaps = generateMipmaps;
+    tex.minFilter = generateMipmaps
+      ? THREE.LinearMipmapLinearFilter
+      : THREE.LinearFilter;
+    changed = true;
+  }
+
+  if (changed) {
+    tex.needsUpdate = true;
+  }
+  return changed;
 }
 
 function configureColorTexture(
@@ -228,6 +281,12 @@ function fbm(x: number, y: number, octaves = 4): number {
   return val;
 }
 
+interface TrackedTexEntry {
+  tex: THREE.CanvasTexture;
+  isColor: boolean;
+  defaultMipmapped: boolean;
+}
+
 interface TextureSynthContext {
   S: number;
   K: number;
@@ -236,10 +295,16 @@ interface TextureSynthContext {
   useSecondaryMips: boolean;
   scratchHeight: Float32Array;
   created: THREE.CanvasTexture[];
+  entries: TrackedTexEntry[];
 }
 
 function trackTex<T extends THREE.CanvasTexture>(ctx: TextureSynthContext, t: T): T {
   ctx.created.push(t);
+  ctx.entries.push({
+    tex: t,
+    isColor: t.colorSpace === THREE.SRGBColorSpace,
+    defaultMipmapped: t.generateMipmaps,
+  });
   return t;
 }
 
@@ -940,6 +1005,95 @@ function createSynthContext(
     useSecondaryMips: !options.skipNonEssentialMipmaps,
     scratchHeight: new Float32Array(S * S),
     created: [],
+    entries: [],
+  };
+}
+
+function buildTextureHandle(
+  renderer: THREE.WebGLRenderer,
+  ctx: TextureSynthContext
+) {
+  let downscaleCursor = 0;
+  let lastTargetSize = ctx.S;
+  let lastDropSecondaryMips = !ctx.useSecondaryMips;
+
+  return {
+    setAnisotropy: (cap: number) => {
+      const clamped = Math.max(
+        1,
+        Math.min(renderer.capabilities.getMaxAnisotropy() || 1, cap)
+      );
+      for (let i = 0; i < ctx.created.length; i++) {
+        ctx.created[i].anisotropy = clamped;
+        ctx.created[i].needsUpdate = true;
+      }
+    },
+    reuploadAll: () => {
+      for (let i = 0; i < ctx.created.length; i++) {
+        ctx.created[i].needsUpdate = true;
+      }
+    },
+    getCurrentSize: (): number => {
+      let maxDim = 0;
+      for (let i = 0; i < ctx.entries.length; i++) {
+        const img = ctx.entries[i].tex.image as HTMLCanvasElement | undefined;
+        if (img && img.width > maxDim) maxDim = img.width;
+      }
+      return maxDim || ctx.S;
+    },
+    getEstimatedVramBytes: (): number => {
+      let bytes = 0;
+      for (let i = 0; i < ctx.entries.length; i++) {
+        const t = ctx.entries[i].tex;
+        const img = t.image as HTMLCanvasElement | undefined;
+        const w = img?.width || 0;
+        const h = img?.height || 0;
+        if (w > 0 && h > 0) {
+          bytes += w * h * 4 * (t.generateMipmaps ? 1.3333 : 1.0);
+        }
+      }
+      return Math.round(bytes);
+    },
+    downscaleStep: (
+      targetMaxSize: number,
+      dropSecondaryMips: boolean,
+      budgetMs = 2.0
+    ): boolean => {
+      if (
+        targetMaxSize !== lastTargetSize ||
+        dropSecondaryMips !== lastDropSecondaryMips
+      ) {
+        lastTargetSize = targetMaxSize;
+        lastDropSecondaryMips = dropSecondaryMips;
+        downscaleCursor = 0;
+      }
+
+      if (downscaleCursor >= ctx.entries.length) {
+        return true;
+      }
+
+      const start = performance.now();
+      while (downscaleCursor < ctx.entries.length) {
+        const entry = ctx.entries[downscaleCursor++];
+        const wantMip =
+          entry.defaultMipmapped && (entry.isColor || !dropSecondaryMips);
+        downscaleCanvasTextureInPlace(entry.tex, targetMaxSize, wantMip);
+        if (performance.now() - start >= budgetMs) {
+          return downscaleCursor >= ctx.entries.length;
+        }
+      }
+      return true;
+    },
+    dispose: () => {
+      for (let i = 0; i < ctx.created.length; i++) {
+        const img = ctx.created[i].image as HTMLCanvasElement | undefined;
+        ctx.created[i].dispose();
+        if (img && typeof img.width === 'number') {
+          img.width = 0;
+          img.height = 0;
+        }
+      }
+    },
   };
 }
 
@@ -1015,21 +1169,7 @@ export async function createProceduralTexturesAsync(
     ...s10,
     ...s11,
     ...s12,
-    setAnisotropy: (cap: number) => {
-      const clamped = Math.max(1, Math.min(renderer.capabilities.getMaxAnisotropy() || 1, cap));
-      for (let i = 0; i < ctx.created.length; i++) {
-        ctx.created[i].anisotropy = clamped;
-        ctx.created[i].needsUpdate = true;
-      }
-    },
-    reuploadAll: () => {
-      for (let i = 0; i < ctx.created.length; i++) {
-        ctx.created[i].needsUpdate = true;
-      }
-    },
-    dispose: () => {
-      ctx.created.forEach((t) => t.dispose());
-    },
+    ...buildTextureHandle(renderer, ctx),
   };
 }
 
@@ -1064,20 +1204,6 @@ export function createProceduralTextures(
     ...s10,
     ...s11,
     ...s12,
-    setAnisotropy: (cap: number) => {
-      const clamped = Math.max(1, Math.min(renderer.capabilities.getMaxAnisotropy() || 1, cap));
-      for (let i = 0; i < ctx.created.length; i++) {
-        ctx.created[i].anisotropy = clamped;
-        ctx.created[i].needsUpdate = true;
-      }
-    },
-    reuploadAll: () => {
-      for (let i = 0; i < ctx.created.length; i++) {
-        ctx.created[i].needsUpdate = true;
-      }
-    },
-    dispose: () => {
-      ctx.created.forEach((t) => t.dispose());
-    },
+    ...buildTextureHandle(renderer, ctx),
   };
 }

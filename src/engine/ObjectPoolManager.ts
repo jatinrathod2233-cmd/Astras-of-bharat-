@@ -404,6 +404,24 @@ export class ObjectPoolManager {
   }
 
   /**
+   * Aggressively trims idle standby objects across all pools down to `keepFraction` of their
+   * prewarm target (or 0 when `keepFraction <= 0`) without touching active gameplay objects.
+   */
+  public trimIdlePools(keepFraction: number): number {
+    if (this.disposed) return 0;
+    const f = Math.max(0, Math.min(1, keepFraction));
+    let removed = 0;
+    this.pools.forEach((pool) => {
+      const keep = f <= 0 ? 0 : Math.floor(pool.prewarmTarget * f);
+      removed += pool.trimIdle(keep);
+    });
+    if (f <= 0) {
+      this.prewarmCursor = this.prewarmList.length;
+    }
+    return removed;
+  }
+
+  /**
    * Releases and disposes every pool and shared GPU asset cleanly (zero leaks).
    */
   public dispose(): void {

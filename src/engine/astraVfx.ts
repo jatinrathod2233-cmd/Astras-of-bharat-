@@ -1,11 +1,249 @@
 import * as THREE from 'three';
 import { AstraId, QualityTier } from '../types/world';
+import { ShaderComplexityLevel } from './HardwareProfiler';
 import { ObjectPoolManager } from './ObjectPoolManager';
 import { ASTRA_CONFIG } from './astraConfig';
 import { groundHeightAt } from './worldData';
 
 const _vTmp1 = new THREE.Vector3();
 const _vTmp2 = new THREE.Vector3();
+
+export interface EnemyDissolveUniforms {
+  uDissolve: { value: number };
+  uHeatGlow: { value: number };
+  uDissolveTime: { value: number };
+}
+
+/**
+ * Installs a shared GPU-driven 2-second incineration-into-ash PBR shader patch onto all
+ * standard/physical materials of a pooled enemy rig once at pool creation time.
+ * Uses a uniform branch (uDissolve > 0.001) so intact enemies incur zero noise ALU cost,
+ * and shares a single customProgramCacheKey across all demon rigs (zero runtime recompiles).
+ */
+export function installEnemyAshDissolution(root: THREE.Object3D): EnemyDissolveUniforms {
+  const existing = root.userData._dissolveUniforms as EnemyDissolveUniforms | undefined;
+  if (existing) return existing;
+
+  const uniforms: EnemyDissolveUniforms = {
+    uDissolve: { value: 0 },
+    uHeatGlow: { value: 0 },
+    uDissolveTime: { value: 0 },
+  };
+  root.userData._dissolveUniforms = uniforms;
+
+  const patchedMats = new Set<THREE.Material>();
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (let i = 0; i < mats.length; i++) {
+      const mat = mats[i] as THREE.MeshStandardMaterial;
+      if (!mat || !mat.isMeshStandardMaterial || patchedMats.has(mat)) continue;
+      patchedMats.add(mat);
+      mat.customProgramCacheKey = () => 'demon-ash-dissolve-v1';
+      mat.onBeforeCompile = (shader) => {
+        shader.uniforms.uDissolve = uniforms.uDissolve;
+        shader.uniforms.uHeatGlow = uniforms.uHeatGlow;
+        shader.uniforms.uDissolveTime = uniforms.uDissolveTime;
+
+        shader.vertexShader =
+          `
+          uniform float uDissolve;
+          uniform float uDissolveTime;
+          varying vec3 vDissolveLocalPos;
+          ` +
+          shader.vertexShader.replace(
+            '#include <begin_vertex>',
+            `
+            #include <begin_vertex>
+            vDissolveLocalPos = position;
+            if (uDissolve > 0.001) {
+              float crumble = smoothstep(0.10, 1.0, uDissolve);
+              float flutter = sin(position.x * 11.0 + uDissolveTime * 9.5) * cos(position.z * 11.0 - uDissolveTime * 8.0);
+              transformed.y += crumble * (0.30 + max(0.0, position.y) * 0.18) + crumble * flutter * 0.045;
+              transformed.xz *= (1.0 - crumble * 0.26);
+            }
+            `
+          );
+
+        shader.fragmentShader =
+          `
+          uniform float uDissolve;
+          uniform float uHeatGlow;
+          uniform float uDissolveTime;
+          varying vec3 vDissolveLocalPos;
+
+          float agniHash3(vec3 p) {
+            p = fract(p * 0.3183099 + 0.1);
+            p *= 17.0;
+            return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+          }
+          float agniNoise3(vec3 x) {
+            vec3 i = floor(x);
+            vec3 f = fract(x);
+            f = f * f * (3.0 - 2.0 * f);
+            return mix(
+              mix(mix(agniHash3(i + vec3(0.0,0.0,0.0)), agniHash3(i + vec3(1.0,0.0,0.0)), f.x),
+                  mix(agniHash3(i + vec3(0.0,1.0,0.0)), agniHash3(i + vec3(1.0,1.0,0.0)), f.x), f.y),
+              mix(mix(agniHash3(i + vec3(0.0,0.0,1.0)), agniHash3(i + vec3(1.0,0.0,1.0)), f.x),
+                  mix(agniHash3(i + vec3(0.0,1.0,1.0)), agniHash3(i + vec3(1.0,1.0,1.0)), f.x), f.y),
+              f.z
+            );
+          }
+          float agniFbm3(vec3 p) {
+            return 0.62 * agniNoise3(p) + 0.38 * agniNoise3(p * 2.13 + vec3(4.2, 1.7, 3.1));
+          }
+          ` +
+          shader.fragmentShader
+            .replace(
+              '#include <color_fragment>',
+              `
+              #include <color_fragment>
+              float agniEdgeMask = 0.0;
+              if (uDissolve > 0.001 || uHeatGlow > 0.001) {
+                vec3 ashCoord = vDissolveLocalPos * 4.5 + vec3(0.0, -uDissolveTime * 0.45, 0.0);
+                float n3 = agniFbm3(ashCoord);
+                float heightBias = clamp((vDissolveLocalPos.y + 0.55) * 0.14, -0.08, 0.22);
+                float burnField = clamp(n3 * 0.78 + heightBias, 0.02, 0.99);
+
+                if (uDissolve > 0.001) {
+                  float thresh = uDissolve * 1.06;
+                  if (burnField < thresh) {
+                    discard;
+                  }
+                  float distToEdge = burnField - thresh;
+                  float charZone = 1.0 - smoothstep(0.0, 0.30, distToEdge);
+                  float emberZone = 1.0 - smoothstep(0.0, 0.115, distToEdge);
+                  float ashRim = 1.0 - smoothstep(0.0, 0.032, distToEdge);
+                  vec3 sootCol = vec3(0.032, 0.025, 0.022);
+                  vec3 ashCol = vec3(0.36, 0.34, 0.32);
+                  diffuseColor.rgb = mix(diffuseColor.rgb, sootCol, charZone * 0.94);
+                  diffuseColor.rgb = mix(diffuseColor.rgb, ashCol, ashRim * 0.88);
+                  agniEdgeMask = max(emberZone, uHeatGlow * n3 * 0.42);
+                } else {
+                  agniEdgeMask = uHeatGlow * smoothstep(0.36, 0.84, n3) * 0.72;
+                }
+              }
+              `
+            )
+            .replace(
+              '#include <emissivemap_fragment>',
+              `
+              #include <emissivemap_fragment>
+              if (agniEdgeMask > 0.001) {
+                float flicker = 0.82 + 0.18 * sin(uDissolveTime * 19.0 + vDissolveLocalPos.y * 14.0);
+                vec3 crimsonFire = vec3(1.25, 0.20, 0.02);
+                vec3 solarGold = vec3(3.4, 1.95, 0.48);
+                totalEmissiveRadiance += mix(crimsonFire, solarGold, clamp(agniEdgeMask * 1.35, 0.0, 1.0)) * agniEdgeMask * flicker * 1.75;
+              }
+              `
+            );
+      };
+    }
+  });
+
+  return uniforms;
+}
+
+function createAgniMandalaMaterial(
+  isField: boolean,
+  initialShaderQuality = 1.0
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uIntensity: { value: 1.0 },
+      uIsField: { value: isField ? 1.0 : 0.0 },
+      uShaderQuality: { value: initialShaderQuality },
+    },
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform float uIntensity;
+      uniform float uIsField;
+      uniform float uShaderQuality;
+      varying vec2 vUv;
+
+      float mHash(vec2 p) {
+        p = fract(p * vec2(127.1, 311.7));
+        p += dot(p, p + 34.23);
+        return fract(p.x * p.y);
+      }
+      float mNoise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(
+          mix(mHash(i), mHash(i + vec2(1.0, 0.0)), u.x),
+          mix(mHash(i + vec2(0.0, 1.0)), mHash(i + vec2(1.0, 1.0)), u.x),
+          u.y
+        );
+      }
+      float mFbm(vec2 p) {
+        float n0 = mNoise(p);
+        if (uShaderQuality < 0.75) {
+          return n0;
+        }
+        return 0.62 * n0 + 0.38 * mNoise(p * 2.05 + vec2(uTime * 0.4, -uTime * 0.3));
+      }
+
+      void main() {
+        vec2 p = (vUv - 0.5) * 2.0;
+        float r = length(p);
+        if (r > 1.0) discard;
+
+        float ang = atan(p.y, p.x);
+        float heatWarp = (mFbm(vec2(ang * 2.5, r * 5.0 - uTime * 3.4)) - 0.5) * 0.075;
+        float rw = max(0.0, r + heatWarp);
+
+        // Sacred concentric chakra rings
+        float ring1 = exp(-pow((rw - 0.88) * 32.0, 2.0));
+        float ring2 = exp(-pow((rw - 0.67) * 38.0, 2.0));
+        float ring3 = exp(-pow((rw - 0.45) * 42.0, 2.0));
+        float ring4 = exp(-pow((rw - 0.25) * 46.0, 2.0));
+
+        // Counter-rotating sacred Sri-Agni hexagram triangles (3-fold star geometry)
+        float rotA = ang + uTime * 1.45;
+        float rotB = ang - uTime * 1.15;
+        float triA = smoothstep(0.075, 0.0, abs(rw * cos(mod(rotA, 2.0943951) - 1.0471975) - 0.29));
+        float triB = smoothstep(0.075, 0.0, abs(rw * cos(mod(rotB + 1.0471975, 2.0943951) - 1.0471975) - 0.29));
+        float shatkon = max(triA, triB) * smoothstep(0.14, 0.20, rw) * smoothstep(0.68, 0.52, rw);
+
+        // 8-fold glowing lotus petals + 16-fold outer solar spikes
+        float petal8 = pow(max(0.0, cos(ang * 8.0 - uTime * 2.4)), 4.0) * smoothstep(0.38, 0.48, rw) * smoothstep(0.70, 0.58, rw);
+        float ray16 = pow(max(0.0, cos(ang * 16.0 + uTime * 3.1)), 6.0) * smoothstep(0.64, 0.74, rw) * smoothstep(0.97, 0.82, rw);
+
+        // Swirling radial solar heat plasma & corona flare
+        float plasma = mFbm(vec2(ang * 3.0 + r * 3.5, r * 6.5 - uTime * 4.2));
+        float solarCore = exp(-r * 6.4) * (1.25 + 0.35 * sin(uTime * 14.0));
+        float radialCorona = (ring1 * 1.15 + ring2 * 0.95 + ring3 * 0.90 + ring4 * 1.05 + shatkon * 1.15 + petal8 * 0.85 + ray16 * 0.95);
+        float heatHaze = smoothstep(0.98, 0.18, r) * plasma * (0.42 + uIsField * 0.22);
+
+        float energy = (solarCore + radialCorona * (0.72 + plasma * 0.55) + heatHaze) * smoothstep(1.0, 0.78, r);
+        vec3 deepCrimson = vec3(0.95, 0.16, 0.02);
+        vec3 saffronFlame = vec3(1.55, 0.56, 0.07);
+        vec3 whiteGold = vec3(2.8, 2.25, 1.15);
+
+        vec3 col = mix(deepCrimson, saffronFlame, clamp(energy * 0.85, 0.0, 1.0));
+        col = mix(col, whiteGold, clamp(solarCore * 0.95 + max(shatkon, ring1 * 0.65) * 0.45, 0.0, 1.0));
+
+        float alpha = clamp(energy * uIntensity, 0.0, 0.98);
+        if (alpha < 0.01) discard;
+        gl_FragColor = vec4(col * uIntensity, alpha);
+      }
+    `,
+  });
+}
 
 function createRadialGlowTexture(innerHex: string, midHex: string, outerHex: string): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
@@ -350,6 +588,24 @@ export interface TornadoZone {
   tickAccum: number;
 }
 
+export interface AgniMandalaZone {
+  x: number;
+  y: number;
+  z: number;
+  group: THREE.Group;
+  groundDisc: THREE.Mesh;
+  haloDisc: THREE.Mesh;
+  heatRim: THREE.Mesh;
+  groundMat: THREE.ShaderMaterial;
+  haloMat: THREE.ShaderMaterial;
+  rimMat: THREE.MeshBasicMaterial;
+  life: number;
+  maxLife: number;
+  radius: number;
+  pullRadius: number;
+  dps: number;
+}
+
 interface LightningBoltEffect {
   group: THREE.Group;
   life: number;
@@ -415,6 +671,7 @@ export class AstraVfxManager {
 
   public astraFlashLight: THREE.PointLight;
   private flashDecaySpeed = 12.0;
+  private agniHeatHoldTimer = 0;
 
   private emberTex: THREE.CanvasTexture;
   private smokeTex: THREE.CanvasTexture;
@@ -434,10 +691,12 @@ export class AstraVfxManager {
     uTime: { value: number };
     uIntensity: { value: number };
     uBoltFlash: { value: number };
+    uShaderQuality: { value: number };
   };
   private cycloneStrength = 0;
   private cycloneTargetStrength = 0;
   private cycloneFlash = 0;
+  private shaderQualityFactor = 1.0;
 
   // Handheld Brahmastra Lotus rig (mounted cleanly inside Ram's hand / bow during summon)
   public handLotusRig: BrahmastraLotusRig;
@@ -446,6 +705,7 @@ export class AstraVfxManager {
   private scorches: ScorchDecal[] = [];
   private waterWaves: WaterWaveEffect[] = [];
   public tornados: TornadoZone[] = [];
+  public agniMandalas: AgniMandalaZone[] = [];
   private lightningBolts: LightningBoltEffect[] = [];
   private craters: CraterEffect[] = [];
   private sparks: SparkParticle[] = [];
@@ -504,6 +764,7 @@ export class AstraVfxManager {
       uTime: { value: 0 },
       uIntensity: { value: 0 },
       uBoltFlash: { value: 0 },
+      uShaderQuality: { value: 1.0 },
     };
     this.cycloneMat = new THREE.ShaderMaterial({
       uniforms: this.cycloneUniforms,
@@ -521,6 +782,7 @@ export class AstraVfxManager {
         uniform float uTime;
         uniform float uIntensity;
         uniform float uBoltFlash;
+        uniform float uShaderQuality;
         varying vec2 vUv;
 
         float hash21(vec2 p) {
@@ -541,7 +803,9 @@ export class AstraVfxManager {
         float fbm(vec2 p) {
           float v = 0.0;
           float a = 0.52;
+          int maxOct = uShaderQuality >= 0.75 ? 4 : (uShaderQuality >= 0.25 ? 2 : 1);
           for (int i = 0; i < 4; i++) {
+            if (i >= maxOct) break;
             v += a * noise(p);
             p *= 2.03;
             a *= 0.5;
@@ -557,7 +821,7 @@ export class AstraVfxManager {
           float swirl = ang + uTime * 1.15 - r * 3.2;
           vec2 sp = vec2(cos(swirl), sin(swirl)) * (r * 3.2);
           float cloudA = fbm(sp + vec2(uTime * 0.15, -uTime * 0.12));
-          float cloudB = fbm(sp * 1.8 - vec2(uTime * 0.25));
+          float cloudB = uShaderQuality < 0.25 ? cloudA : fbm(sp * 1.8 - vec2(uTime * 0.25));
           float density = smoothstep(0.18, 0.85, cloudA * 0.65 + cloudB * 0.45);
           float radialEdge = smoothstep(1.0, 0.52, r);
           // Subtle luminous eye spiral at the very heart + crackling cloud lightning veins
@@ -589,6 +853,18 @@ export class AstraVfxManager {
     const pm = this.poolManager;
 
     // 1. Fire / Water / Wind / Serpent / Brahmastra Projectile Arrow Models
+    const agniCoreGeo = pm.registerSharedGeometry(new THREE.SphereGeometry(0.14, 12, 10));
+    const agniMandalaMainGeo = pm.registerSharedGeometry(new THREE.PlaneGeometry(2.35, 2.35));
+    const agniMandalaInnerGeo = pm.registerSharedGeometry(new THREE.PlaneGeometry(1.5, 1.5));
+    const agniMandalaSideGeo = pm.registerSharedGeometry(new THREE.PlaneGeometry(1.75, 1.75));
+    const agniCoreMat = pm.registerSharedMaterial(
+      new THREE.MeshBasicMaterial({
+        color: 0xfff3c4,
+        transparent: true,
+        opacity: 0.96,
+      })
+    );
+
     const buildAstraArrow = (astraId: AstraId): THREE.Group => {
       const cfg = ASTRA_CONFIG[astraId];
       const g = new THREE.Group();
@@ -613,7 +889,27 @@ export class AstraVfxManager {
       tip.position.z = 0.66;
       g.add(tip);
 
-      if (astraId === 'NAGASTRA') {
+      if (astraId === 'AGNEYASTRA') {
+        const coreSphere = new THREE.Mesh(agniCoreGeo, agniCoreMat);
+        coreSphere.position.z = 0.24;
+        g.add(coreSphere);
+
+        const mandalaMatMain = createAgniMandalaMaterial(false, this.shaderQualityFactor);
+        const mandalaMatInner = createAgniMandalaMaterial(false, this.shaderQualityFactor);
+        const mandalaMain = new THREE.Mesh(agniMandalaMainGeo, mandalaMatMain);
+        mandalaMain.position.z = 0.22;
+        const mandalaInner = new THREE.Mesh(agniMandalaInnerGeo, mandalaMatInner);
+        mandalaInner.position.z = -0.14;
+        const mandalaSide = new THREE.Mesh(agniMandalaSideGeo, mandalaMatInner);
+        mandalaSide.rotation.y = Math.PI / 2;
+        mandalaSide.position.z = 0.16;
+
+        g.add(mandalaMain, mandalaInner, mandalaSide);
+        g.userData.mandalaMain = mandalaMain;
+        g.userData.mandalaInner = mandalaInner;
+        g.userData.mandalaSide = mandalaSide;
+        g.userData.mandalaMats = [mandalaMatMain, mandalaMatInner];
+      } else if (astraId === 'NAGASTRA') {
         // Double glowing emerald coils wrapped around arrow shaft
         const coil = new THREE.Mesh(
           pm.registerSharedGeometry(new THREE.TorusKnotGeometry(0.09, 0.016, 20, 6, 2, 3)),
@@ -661,7 +957,7 @@ export class AstraVfxManager {
       });
     });
 
-    // 2. Pooled Scorch Mark Disc
+    // 2. Pooled Scorch Mark Disc & Agneyastra Fiery Circular Mandala Vortex Field
     const scorchGeo = pm.registerSharedGeometry(new THREE.CircleGeometry(1, 24));
     pm.registerPool<THREE.Mesh>({
       key: 'astra_scorch',
@@ -688,6 +984,60 @@ export class AstraVfxManager {
         m.visible = false;
       },
       onDispose: (m) => pm.disposeObject3DResources(m),
+    });
+
+    const mandalaFieldGroundGeo = pm.registerSharedGeometry(new THREE.PlaneGeometry(2.0, 2.0));
+    const mandalaFieldHaloGeo = pm.registerSharedGeometry(new THREE.PlaneGeometry(1.48, 1.48));
+    const mandalaHeatRimGeo = pm.registerSharedGeometry(
+      new THREE.CylinderGeometry(0.86, 0.98, 0.95, 24, 1, true)
+    );
+    pm.registerPool<THREE.Group>({
+      key: 'astra_agni_mandala',
+      prewarmCount: 3,
+      maxSize: 8,
+      factory: () => {
+        const grp = new THREE.Group();
+        const groundMat = createAgniMandalaMaterial(true, this.shaderQualityFactor);
+        const haloMat = createAgniMandalaMaterial(true, this.shaderQualityFactor);
+        const rimMat = new THREE.MeshBasicMaterial({
+          color: 0xff7b1c,
+          transparent: true,
+          opacity: 0.34,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+
+        const groundDisc = new THREE.Mesh(mandalaFieldGroundGeo, groundMat);
+        groundDisc.rotation.x = -Math.PI / 2;
+        groundDisc.position.y = 0.14;
+
+        const haloDisc = new THREE.Mesh(mandalaFieldHaloGeo, haloMat);
+        haloDisc.rotation.x = -Math.PI / 2;
+        haloDisc.position.y = 0.42;
+
+        const heatRim = new THREE.Mesh(mandalaHeatRimGeo, rimMat);
+        heatRim.position.y = 0.48;
+
+        grp.add(groundDisc, haloDisc, heatRim);
+        grp.userData.groundDisc = groundDisc;
+        grp.userData.haloDisc = haloDisc;
+        grp.userData.heatRim = heatRim;
+        grp.userData.groundMat = groundMat;
+        grp.userData.haloMat = haloMat;
+        grp.userData.rimMat = rimMat;
+        grp.visible = false;
+        pm.poolRoot.add(grp);
+        return grp;
+      },
+      onAcquire: (g) => {
+        g.scale.setScalar(1);
+        g.visible = true;
+      },
+      onRelease: (g) => {
+        g.visible = false;
+      },
+      onDispose: (g) => pm.disposeObject3DResources(g),
     });
 
     // 3. Pooled Water Wave Dome + Ring
@@ -1062,12 +1412,31 @@ export class AstraVfxManager {
     this.astraFlashLight.intensity = intensity;
   }
 
+  public updateAgniHeatLight(
+    x: number,
+    y: number,
+    z: number,
+    elapsed: number,
+    intensityBase: number,
+    tier: QualityTier
+  ): void {
+    if (tier === 'LOW') {
+      this.astraFlashLight.intensity = 0;
+      return;
+    }
+    this.agniHeatHoldTimer = 0.08;
+    const flicker = 0.88 + 0.14 * Math.sin(elapsed * 24.0) + 0.06 * Math.cos(elapsed * 37.0);
+    this.astraFlashLight.color.setHex(0xff7218);
+    this.astraFlashLight.position.set(x, y + 0.8, z);
+    this.astraFlashLight.intensity = intensityBase * flicker;
+  }
+
   public spawnSpriteBurst(
     x: number,
     y: number,
     z: number,
     count: number,
-    kind: 'EMBER' | 'SMOKE' | 'MIST' | 'GOLD' | 'WIND',
+    kind: 'EMBER' | 'SMOKE' | 'MIST' | 'GOLD' | 'WIND' | 'ASH',
     speedMin: number,
     speedMax: number,
     baseScale: number,
@@ -1083,6 +1452,11 @@ export class AstraVfxManager {
         mat.blending = THREE.NormalBlending;
         mat.color.setHex(0x2d2624);
         mat.opacity = 0.72;
+      } else if (kind === 'ASH') {
+        mat.map = i % 3 === 0 ? this.emberTex : this.smokeTex;
+        mat.blending = i % 3 === 0 ? THREE.AdditiveBlending : THREE.NormalBlending;
+        mat.color.setHex(i % 3 === 0 ? 0xff7b24 : 0x524946);
+        mat.opacity = i % 3 === 0 ? 0.88 : 0.72;
       } else if (kind === 'MIST') {
         mat.map = this.mistTex;
         mat.blending = THREE.AdditiveBlending;
@@ -1118,15 +1492,36 @@ export class AstraVfxManager {
         y,
         z,
         vx: Math.cos(ang) * Math.cos(elev) * spd,
-        vy: Math.abs(Math.sin(elev)) * spd + (kind === 'SMOKE' ? 1.8 : 0.8),
+        vy: Math.abs(Math.sin(elev)) * spd + (kind === 'SMOKE' || kind === 'ASH' ? 1.9 : 0.8),
         vz: Math.sin(ang) * Math.cos(elev) * spd,
         life: lifeSec * (0.7 + Math.random() * 0.6),
         maxLife: lifeSec,
         baseScale,
-        gravity: kind === 'SMOKE' ? -0.4 : kind === 'MIST' ? 2.5 : 8.5,
-        drag: kind === 'SMOKE' ? 1.8 : 2.6,
+        gravity: kind === 'SMOKE' ? -0.4 : kind === 'ASH' ? -1.85 : kind === 'MIST' ? 2.5 : 8.5,
+        drag: kind === 'SMOKE' ? 1.8 : kind === 'ASH' ? 1.5 : 2.6,
       });
     }
+  }
+
+  public spawnAshIncinerationBurst(
+    x: number,
+    y: number,
+    z: number,
+    scale: number,
+    particleScale: number
+  ): void {
+    this.spawnSpriteBurst(
+      x + (Math.random() - 0.5) * 0.55 * scale,
+      y + 0.4 + Math.random() * 1.1 * scale,
+      z + (Math.random() - 0.5) * 0.55 * scale,
+      3,
+      'ASH',
+      0.35,
+      1.6,
+      0.46 * scale,
+      0.85,
+      particleScale
+    );
   }
 
   public spawnFireScorch(x: number, y: number, z: number, radius: number, particleScale: number, tier: QualityTier): void {
@@ -1136,7 +1531,53 @@ export class AstraVfxManager {
     (m.material as THREE.MeshBasicMaterial).opacity = 0.88;
     this.scorches.push({ mesh: m, life: 6.0, maxLife: 6.0 });
     this.spawnSpriteBurst(x, y + 0.5, z, 22, 'EMBER', 3.5, 11.5, 0.95, 0.85, particleScale);
-    this.triggerFlashLight(x, y + 1.5, z, 0xff6b1a, 14, tier);
+    this.triggerFlashLight(x, y + 1.5, z, 0xff6b1a, 16, tier);
+  }
+
+  public spawnAgniMandalaField(
+    x: number,
+    y: number,
+    z: number,
+    radius: number,
+    durationSec: number,
+    dps: number,
+    particleScale: number,
+    tier: QualityTier
+  ): void {
+    const grp = this.poolManager.acquire<THREE.Group>('astra_agni_mandala');
+    grp.position.set(x, y, z);
+    grp.scale.setScalar(0.25);
+
+    const groundDisc = grp.userData.groundDisc as THREE.Mesh;
+    const haloDisc = grp.userData.haloDisc as THREE.Mesh;
+    const heatRim = grp.userData.heatRim as THREE.Mesh;
+    const groundMat = grp.userData.groundMat as THREE.ShaderMaterial;
+    const haloMat = grp.userData.haloMat as THREE.ShaderMaterial;
+    const rimMat = grp.userData.rimMat as THREE.MeshBasicMaterial;
+
+    groundMat.uniforms.uIntensity.value = 1.25;
+    haloMat.uniforms.uIntensity.value = 0.95;
+    rimMat.opacity = 0.34;
+
+    this.agniMandalas.push({
+      x,
+      y,
+      z,
+      group: grp,
+      groundDisc,
+      haloDisc,
+      heatRim,
+      groundMat,
+      haloMat,
+      rimMat,
+      life: durationSec,
+      maxLife: durationSec,
+      radius,
+      pullRadius: radius * 1.28,
+      dps,
+    });
+    this.spawnFireScorch(x, y, z, radius * 0.92, particleScale, tier);
+    this.updateAgniHeatLight(x, y + 1.2, z, 0, 22, tier);
   }
 
   public spawnWaterWave(x: number, y: number, z: number, maxRadius: number, particleScale: number, tier: QualityTier): void {
@@ -1334,8 +1775,9 @@ export class AstraVfxManager {
       this.objectiveBeamMat.opacity = 0.22 + Math.sin(elapsed * 3.0) * 0.08;
     }
 
-    // 1. Flash light rapid decay
-    if (this.astraFlashLight.intensity > 0.01) {
+    // 1. Flash light rapid decay (held smoothly when Agniastra projectile or mandala heat is active)
+    this.agniHeatHoldTimer = Math.max(0, this.agniHeatHoldTimer - dt);
+    if (this.agniHeatHoldTimer <= 0 && this.astraFlashLight.intensity > 0.01) {
       this.astraFlashLight.intensity = THREE.MathUtils.damp(
         this.astraFlashLight.intensity,
         0,
@@ -1366,7 +1808,54 @@ export class AstraVfxManager {
       }
     }
 
-    // 4. Fire Scorch Decals
+    // 4. Fire Scorch Decals & Active Agneyastra Fiery Circular Mandala Vortex Fields
+    for (let i = this.agniMandalas.length - 1; i >= 0; i--) {
+      const am = this.agniMandalas[i];
+      am.life -= dt;
+      const age = am.maxLife - am.life;
+      const openFrac = Math.min(1, age / 0.22);
+      const easeOpen = 1 - (1 - openFrac) * (1 - openFrac);
+      const fadeFrac = Math.min(1, Math.max(0, am.life / 0.6));
+      const curRadius = am.radius * (0.28 + 0.72 * easeOpen);
+
+      am.group.scale.set(curRadius, 0.75 + 0.35 * Math.sin(elapsed * 7.5 + i), curRadius);
+      am.groundDisc.rotation.z += dt * 1.15;
+      am.haloDisc.rotation.z -= dt * 1.65;
+      am.haloDisc.position.y = 0.38 + Math.sin(elapsed * 6.0 + i) * 0.14;
+      am.heatRim.rotation.y += dt * 2.4;
+
+      am.groundMat.uniforms.uTime.value = elapsed;
+      am.groundMat.uniforms.uIntensity.value = 1.28 * fadeFrac;
+      am.groundMat.uniforms.uShaderQuality.value = this.shaderQualityFactor;
+      am.haloMat.uniforms.uTime.value = elapsed + 1.4;
+      am.haloMat.uniforms.uIntensity.value = 0.96 * fadeFrac;
+      am.haloMat.uniforms.uShaderQuality.value = this.shaderQualityFactor;
+      am.rimMat.opacity = 0.32 * fadeFrac;
+
+      if (Math.random() < dt * 10 * particleScale) {
+        const ang = Math.random() * Math.PI * 2;
+        const rr = Math.random() * curRadius * 0.85;
+        this.spawnSpriteBurst(
+          am.x + Math.cos(ang) * rr,
+          am.y + 0.35,
+          am.z + Math.sin(ang) * rr,
+          1,
+          Math.random() < 0.35 ? 'ASH' : 'EMBER',
+          1.2,
+          4.2,
+          0.62,
+          0.72,
+          1
+        );
+      }
+
+      if (am.life <= 0) {
+        this.poolManager.release('astra_agni_mandala', am.group);
+        this.agniMandalas[i] = this.agniMandalas[this.agniMandalas.length - 1];
+        this.agniMandalas.pop();
+      }
+    }
+
     for (let i = this.scorches.length - 1; i >= 0; i--) {
       const sc = this.scorches[i];
       sc.life -= dt;
@@ -1527,6 +2016,34 @@ export class AstraVfxManager {
     }
   }
 
+  public setShaderQuality(level: ShaderComplexityLevel): void {
+    const q = level === 'FULL' ? 1.0 : level === 'BALANCED' ? 0.5 : 0.0;
+    this.shaderQualityFactor = q;
+    this.cycloneUniforms.uShaderQuality.value = q;
+    for (let i = 0; i < this.agniMandalas.length; i++) {
+      this.agniMandalas[i].groundMat.uniforms.uShaderQuality.value = q;
+      this.agniMandalas[i].haloMat.uniforms.uShaderQuality.value = q;
+    }
+  }
+
+  public getEstimatedVramBytes(): number {
+    const list = [
+      this.emberTex,
+      this.smokeTex,
+      this.mistTex,
+      this.lotusTex,
+      this.craterTex,
+    ];
+    let bytes = 0;
+    for (let i = 0; i < list.length; i++) {
+      const img = list[i].image as HTMLCanvasElement | undefined;
+      if (img && img.width > 0 && img.height > 0) {
+        bytes += img.width * img.height * 4;
+      }
+    }
+    return bytes;
+  }
+
   public reuploadGpuResources(): void {
     this.emberTex.needsUpdate = true;
     this.smokeTex.needsUpdate = true;
@@ -1536,6 +2053,11 @@ export class AstraVfxManager {
     this.cycloneMat.needsUpdate = true;
     this.objectiveBeamMat.needsUpdate = true;
     this.objectiveRingMat.needsUpdate = true;
+    for (let i = 0; i < this.agniMandalas.length; i++) {
+      this.agniMandalas[i].groundMat.needsUpdate = true;
+      this.agniMandalas[i].haloMat.needsUpdate = true;
+      this.agniMandalas[i].rimMat.needsUpdate = true;
+    }
     this.handLotusRig.group.traverse((obj) => {
       const m = (obj as THREE.Mesh).material;
       if (Array.isArray(m)) {
