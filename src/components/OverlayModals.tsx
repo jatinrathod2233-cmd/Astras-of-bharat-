@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { BookOpen, CheckCircle2, Lock, Play, RotateCcw, Settings, SlidersHorizontal, Wifi } from 'lucide-react';
+import { BookOpen, CheckCircle2, Lock, Play, RotateCcw, Settings, SlidersHorizontal, Users, Wifi } from 'lucide-react';
 import { ASTRA_CONFIG } from '../engine/astraConfig';
+import { HERO_PROFILES } from '../engine/heroProfiles';
 import type { LanSessionSnapshot } from '../engine/LanMultiplayerClient';
 import { PlayMode, QualityMode, WorldHudSnapshot } from '../types/world';
 import { AstraIconBadge } from './AstraIcons';
@@ -19,6 +20,7 @@ interface OverlayModalsProps {
   onTogglePerfStats: () => void;
   onOpenControlCustomizer: () => void;
   onOpenLanMultiplayer: () => void;
+  onOpenHeroSwitcher: () => void;
   onDismissStoryIntro: () => void;
   onDismissUnlockPopup: () => void;
 }
@@ -44,6 +46,7 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
   onTogglePerfStats,
   onOpenControlCustomizer,
   onOpenLanMultiplayer,
+  onOpenHeroSwitcher,
   onDismissStoryIntro,
   onDismissUnlockPopup,
 }) => {
@@ -180,6 +183,23 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
                 : 'Offline Hotspot Co-op (2–6)'}
             </span>
           </button>
+
+          <button
+            type="button"
+            disabled={!hud.assetsReady}
+            onClick={onOpenHeroSwitcher}
+            aria-label="Select Deity Hero"
+            className={`pointer-events-auto inline-flex min-w-[200px] items-center justify-center gap-2 rounded-lg border px-5 py-2 text-xs font-semibold tracking-wide transition-all duration-200 ${
+              hud.assetsReady
+                ? 'border-orange-300/65 bg-[#0D1016]/90 text-orange-200 opacity-100 hover:border-orange-300 hover:bg-[#1B1618] cursor-pointer shadow-md'
+                : 'border-amber-200/15 bg-[#0D1016]/55 text-amber-200/50 opacity-40 cursor-not-allowed'
+            }`}
+          >
+            <Users className="h-3.5 w-3.5 text-orange-300" aria-hidden="true" />
+            <span>
+              Hero: {HERO_PROFILES[hud.activeHeroId].name} (H)
+            </span>
+          </button>
         </div>
 
         {/* Bottom-Docked Loading Bar */}
@@ -266,8 +286,9 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
                   Missions: {hud.completedMissions}/{hud.totalMissions}
                 </p>
                 <p className="text-[11px] text-[#9B9384]">
-                  Q (Hold): Divyastra Wheel · X: Shoot Astra · R: Chakra · F: Bow · E:
-                  Interact · C: Stealth · V: Auto-Drive
+                  H: Switch Hero · B: Hero Power · U: Hanuman Fly · Q (Hold): Divyastra
+                  Wheel · X: Shoot Astra · R: Chakra · F: Bow · E: Interact · C: Stealth ·
+                  V: Auto-Drive
                 </p>
               </div>
 
@@ -345,6 +366,15 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
                 </div>
 
                 <div className="pt-2 border-t border-amber-200/10 space-y-2">
+                  <button
+                    type="button"
+                    onClick={onOpenHeroSwitcher}
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-md border border-orange-300/60 bg-[#221713] px-4 py-2 text-xs font-semibold tracking-wider text-orange-200 hover:border-orange-300 hover:bg-[#2C1D18] cursor-pointer transition-colors"
+                  >
+                    <Users className="h-3.5 w-3.5 text-orange-300" aria-hidden="true" />
+                    <span>SWITCH HERO · {HERO_PROFILES[hud.activeHeroId].name.toUpperCase()} (H)</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={onOpenControlCustomizer}

@@ -10,9 +10,17 @@ import {
   Compass,
   Crown,
   Sparkles,
+  Swords,
+  Wind,
 } from 'lucide-react';
 import { ASTRA_CONFIG } from '../engine/astraConfig';
-import { AstraId, AstraStatusEntry, MountKind } from '../types/world';
+import { HERO_PROFILES } from '../engine/heroProfiles';
+import {
+  AstraId,
+  AstraStatusEntry,
+  MountKind,
+  PlayableHeroId,
+} from '../types/world';
 import { soundEngine } from '../utils/audio';
 import {
   computeControlPixelRect,
@@ -48,6 +56,10 @@ interface TouchActionPadProps {
   astraCooldowns: Record<AstraId, number>;
   brahmastraAimReady: boolean;
   brahmastraSummoning: boolean;
+  activeHeroId: PlayableHeroId;
+  isFlying: boolean;
+  heroAbilityCooldown: number;
+  heroAbilityMaxCooldown: number;
   controlLayout: ControlLayoutMap;
   viewport: { w: number; h: number };
   stageRef?: React.RefObject<HTMLDivElement | null>;
@@ -56,6 +68,8 @@ interface TouchActionPadProps {
   onAstra: () => void;
   onSelectAstra: (id: AstraId) => void;
   onShootAstra: () => void;
+  onHeroSpecial: () => void;
+  onToggleFly: () => void;
   onJump: () => void;
   onToggleSprint: () => void;
   onInteract: () => void;
@@ -86,6 +100,10 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
     astraCooldowns,
     brahmastraAimReady,
     brahmastraSummoning,
+    activeHeroId,
+    isFlying,
+    heroAbilityCooldown,
+    heroAbilityMaxCooldown,
     controlLayout,
     viewport,
     stageRef,
@@ -94,6 +112,8 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
     onAstra,
     onSelectAstra,
     onShootAstra,
+    onHeroSpecial,
+    onToggleFly,
     onJump,
     onToggleSprint,
     onInteract,
@@ -134,6 +154,14 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
       !brahmastraSummoning &&
       Boolean(selectedAstra) &&
       (brahmastraAimReady || (activeCd <= 0.05 && hasEnergy));
+
+    const heroCfg = HERO_PROFILES[activeHeroId];
+    const canHeroSpecial = heroAbilityCooldown <= 0.05;
+    const heroSpecMaxCd = Math.max(1, heroAbilityMaxCooldown);
+    const heroSpecChargePct = Math.max(
+      0,
+      Math.min(100, Math.round((1 - heroAbilityCooldown / heroSpecMaxCd) * 100))
+    );
 
     const getWrapperStyle = (id: ControlId): React.CSSProperties => {
       const meta = CONTROL_META[id];
@@ -515,6 +543,80 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
               </button>
             </div>
           </>
+        )}
+
+        {/* Hero Signature Power Button (B) */}
+        <div
+          style={getWrapperStyle('HERO_SPECIAL')}
+          className="absolute z-20 select-none pointer-events-auto"
+        >
+          <button
+            type="button"
+            disabled={!canHeroSpecial}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              if (canHeroSpecial) onHeroSpecial();
+            }}
+            aria-label={
+              canHeroSpecial
+                ? `Activate ${heroCfg.specialName}`
+                : `${heroCfg.specialName} recharging, ${Math.ceil(heroAbilityCooldown)} seconds remaining`
+            }
+            style={
+              canHeroSpecial
+                ? { borderColor: heroCfg.accentHex }
+                : undefined
+            }
+            className={`relative overflow-hidden flex h-full w-full flex-col items-center justify-center gap-0.5 rounded-md border px-1.5 transition-colors ${
+              canHeroSpecial
+                ? 'bg-[#251713]/80 text-[#F5EEDF] active:brightness-125 cursor-pointer'
+                : 'border-amber-200/15 bg-[#10131A]/55 text-[#9B9384] cursor-not-allowed'
+            }`}
+          >
+            <Swords
+              className="h-3.5 w-3.5"
+              style={{ color: canHeroSpecial ? heroCfg.accentHex : '#7A7468' }}
+              aria-hidden="true"
+            />
+            <span className="font-mono-tabular text-[8.5px] font-semibold leading-none whitespace-nowrap">
+              {canHeroSpecial
+                ? `${heroCfg.specialShort} (B)`
+                : `${Math.ceil(heroAbilityCooldown)}s`}
+            </span>
+            <span
+              className="absolute bottom-0 left-0 h-0.5 transition-all duration-150"
+              style={{
+                width: `${heroSpecChargePct}%`,
+                backgroundColor: heroCfg.accentHex,
+              }}
+            />
+          </button>
+        </div>
+
+        {/* Hanuman Aerial Flight Toggle (U) */}
+        {heroCfg.canFly && mountKind === 'NONE' && !onThrone && (
+          <div
+            style={getWrapperStyle('FLY_TOGGLE')}
+            className="absolute z-20 select-none pointer-events-auto"
+          >
+            <button
+              type="button"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onToggleFly();
+              }}
+              className={`flex h-full w-full items-center justify-center gap-1 rounded-md border px-2 cursor-pointer transition-colors whitespace-nowrap ${
+                isFlying
+                  ? 'border-sky-300/90 bg-sky-500/35 text-sky-100'
+                  : 'border-amber-300/45 bg-[#12161F]/70 text-[#EFE9DC]'
+              }`}
+            >
+              <Wind className="h-3 w-3 text-sky-300 shrink-0" aria-hidden="true" />
+              <span className="text-[9px] font-semibold">
+                {isFlying ? 'Land (U)' : 'Fly (U)'}
+              </span>
+            </button>
+          </div>
         )}
 
         {/* Universal Stealth Toggle */}

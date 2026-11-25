@@ -8,7 +8,9 @@ export type ControlId =
   | 'SPRINT'
   | 'STEALTH'
   | 'INTERACT'
-  | 'AUTO_DRIVE';
+  | 'AUTO_DRIVE'
+  | 'HERO_SPECIAL'
+  | 'FLY_TOGGLE';
 
 export interface ControlPlacement {
   /** Normalized center X coordinate (0..1 of viewport width) */
@@ -54,6 +56,8 @@ export const CONTROL_ORDER: readonly ControlId[] = [
   'STEALTH',
   'INTERACT',
   'AUTO_DRIVE',
+  'HERO_SPECIAL',
+  'FLY_TOGGLE',
 ] as const;
 
 export const CONTROL_META: Record<ControlId, ControlMeta> = {
@@ -156,6 +160,26 @@ export const CONTROL_META: Record<ControlId, ControlMeta> = {
     isCircle: false,
     minScale: 0.7,
     maxScale: 1.7,
+  },
+  HERO_SPECIAL: {
+    id: 'HERO_SPECIAL',
+    label: 'Hero Power (B)',
+    shortLabel: 'Power',
+    baseWidth: 62,
+    baseHeight: 40,
+    isCircle: false,
+    minScale: 0.7,
+    maxScale: 1.85,
+  },
+  FLY_TOGGLE: {
+    id: 'FLY_TOGGLE',
+    label: 'Hanuman Flight (U)',
+    shortLabel: 'Fly',
+    baseWidth: 62,
+    baseHeight: 36,
+    isCircle: false,
+    minScale: 0.7,
+    maxScale: 1.85,
   },
 };
 
@@ -298,6 +322,10 @@ export function getDefaultControlLayout(
   const wheelShootY = bowChakraY - bowHalfH - rowGap - wheelHalfH;
   const autoDriveX = col1X - colWidth * 0.5 - 10 - autoHalfW;
   const autoDriveY = vh - bottomMargin - autoHalfH;
+  const heroSpecialHalfW = 31 * padScale;
+  const heroSpecialX = col1X - colWidth * 0.5 - colGap - heroSpecialHalfW;
+  const heroSpecialY = bowChakraY;
+  const flyToggleY = wheelShootY;
 
   return resolveControlOverlaps(
     {
@@ -311,6 +339,8 @@ export function getDefaultControlLayout(
       ASTRA_WHEEL: toPlacement('ASTRA_WHEEL', col1X, wheelShootY, padScale),
       SHOOT_ASTRA: toPlacement('SHOOT_ASTRA', col2X, wheelShootY, padScale),
       AUTO_DRIVE: toPlacement('AUTO_DRIVE', autoDriveX, autoDriveY, utilityScale),
+      HERO_SPECIAL: toPlacement('HERO_SPECIAL', heroSpecialX, heroSpecialY, padScale),
+      FLY_TOGGLE: toPlacement('FLY_TOGGLE', heroSpecialX, flyToggleY, padScale),
     },
     null,
     vw,

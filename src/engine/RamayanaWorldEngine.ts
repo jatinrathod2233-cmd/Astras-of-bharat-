@@ -12,12 +12,14 @@ import {
   InputState,
   MountKind,
   NpcRole,
+  PlayableHeroId,
   PlayMode,
   QualityMode,
   QualityTier,
   RadarBlip,
   WorldHudSnapshot,
 } from '../types/world';
+import { HERO_PROFILES, normalizeHeroId, PLAYABLE_HERO_ORDER } from './heroProfiles';
 import { soundEngine } from '../utils/audio';
 import {
   ASTRA_CONFIG,
@@ -93,13 +95,16 @@ import {
   SabhaSeatDef,
   createBlackMountainModel,
   createCitizenModel,
+  createColossalGoldenArcherMonument,
   createCrocodileModel,
   createDemonModel,
   createDemonStructureModel,
   createDolphinModel,
   createElephantStableModel,
   createFishSchoolGeometry,
+  createFloatingCelestialIsland,
   createGiantTurtleModel,
+  createHeroModel,
   createHorseStableModel,
   createJellyfishModel,
   createLordRamModel,
@@ -707,6 +712,7 @@ interface EnemyEntity {
 interface RemotePlayerEntity {
   id: string;
   name: string;
+  heroId: string;
   accentHex: string;
   rig: CharacterRig;
   auraRing: THREE.Mesh;
@@ -1066,6 +1072,14 @@ export class RamayanaWorldEngine {
   private mountedChariotIndex: number | null = null;
   private mountedAnimalIndex: number | null = null;
   private mountedSeatIndex: LanVehicleSeatIndex | null = null;
+  private activeHeroId: PlayableHeroId = 'RAM';
+  private heroRigs = new Map<PlayableHeroId, CharacterRig>();
+  private isFlying = false;
+  private heroAbilityCooldown = 0;
+  private heroAbilityMaxCooldown = HERO_PROFILES.RAM.specialCooldownSec;
+  private flyWindAccum = 0;
+  private floatingIslands: THREE.Group[] = [];
+  private floatingIslandWfUniforms: Array<{ uTime: { value: number } }> = [];
   private composer: EffectComposer | null = null;
   private composerRenderTarget: THREE.WebGLRenderTarget | null = null;
   private bloomPass: UnrealBloomPass | null = null;
@@ -1251,6 +1265,8 @@ export class RamayanaWorldEngine {
     switchSeatPressed: false,
     stealthTogglePressed: false,
     autoDriveTogglePressed: false,
+    flyTogglePressed: false,
+    heroSpecialPressed: false,
   };
 
   constructor(container: HTMLElement, callbacks: EngineCallbacks) {
@@ -2142,12 +2158,18 @@ export class RamayanaWorldEngine {
 
       if (!(await reportStage(87, 'Indexing spatial colliders & hero rig'))) return;
       this.colliderGrid = new StaticColliderSpatialGrid(this.colliders, this.circleColliders);
-      this.ramRig = createLordRamModel(this.textures);
-      // Strict First-Person occlusion safety: hide local skull/crown/hair/cape/back-bow so internal meshes never block eye view
-      if (this.ramRig.headGroup) this.ramRig.headGroup.visible = false;
-      if (this.ramRig.backBowGroup) this.ramRig.backBowGroup.visible = false;
-      if (this.ramRig.capePivot) this.ramRig.capePivot.visible = false;
-      this.scene.add(this.ramRig.root);
+      this.heroRigs.clear();
+      for (const hId of PLAYABLE_HERO_ORDER) {
+        const hRig = createHeroModel(hId, this.textures);
+        // Strict First-Person occlusion safety: hide local skull/crown/hair/cape/back-bow so internal meshes never block eye view
+        if (hRig.headGroup) hRig.headGroup.visible = false;
+        if (hRig.backBowGroup) hRig.backBowGroup.visible = false;
+        if (hRig.capePivot) hRig.capePivot.visible = false;
+        hRig.root.visible = hId === this.activeHeroId;
+        this.scene.add(hRig.root);
+        this.heroRigs.set(hId, hRig);
+      }
+      this.ramRig = this.heroRigs.get(this.activeHeroId) ?? createLordRamModel(this.textures);
       this.beaconGroup = this.createWaypointBeacon();
       this.scene.add(this.beaconGroup);
       this.enforcePbrAndAnisotropy(this.scene);
@@ -4407,6 +4429,48 @@ export class RamayanaWorldEngine {
         onVisible: () => lod.update(this.camera),
       });
     });
+
+    // Colossal Golden Warrior-Archer Monument framing Ayodhya & floating celestial temple islands
+    const archerX = -56;
+    const archerZ = -34;
+    const archerY = groundHeightAt(archerX, archerZ);
+    const archerMonument = createColossalGoldenArcherMonument(textures);
+    archerMonument.position.set(archerX, archerY, archerZ);
+    archerMonument.rotation.y = Math.PI * 0.16;
+    this.scene.add(archerMonument);
+    this.lockStaticHierarchy(archerMonument);
+    this.occlusionManager.registerFromObject(archerMonument, {
+      alwaysKeepWithinDist: 220,
+      skipFogCull: true,
+    });
+    this.colliders.push({
+      x: archerX,
+      z: archerZ,
+      halfW: 7.6,
+      halfD: 7.6,
+      height: 11.0,
+      rotY: Math.PI * 0.16,
+      baseY: archerY,
+    });
+
+    const islandSpecs: Array<[number, number, number, number]> = [
+      [92, 64, -135, 1.35],
+      [-108, 72, -198, 1.08],
+      [154, 78, 92, 1.15],
+    ];
+    islandSpecs.forEach(([ix, iy, iz, iScale], idx) => {
+      const built = createFloatingCelestialIsland(textures, iScale);
+      built.group.position.set(ix, iy, iz);
+      built.group.userData.baseY = iy;
+      built.group.userData.phase = idx * 1.9;
+      this.scene.add(built.group);
+      this.floatingIslands.push(built.group);
+      this.floatingIslandWfUniforms.push(built.waterfallUniforms);
+      this.occlusionManager.registerFromObject(built.group, {
+        alwaysKeepWithinDist: 290,
+        skipFogCull: true,
+      });
+    });
   }
 
   private buildAquaticEcosystem(): void {
@@ -5662,6 +5726,8 @@ export class RamayanaWorldEngine {
     this.input.switchSeatPressed = false;
     this.input.stealthTogglePressed = false;
     this.input.autoDriveTogglePressed = false;
+    this.input.flyTogglePressed = false;
+    this.input.heroSpecialPressed = false;
     this.playerHorizSpeed = 0;
     this.playerTurnRate = 0;
     this.lastResolvedMoveSpeed = 0;
@@ -5733,7 +5799,10 @@ export class RamayanaWorldEngine {
     this.ramRig.root.rotation.set(0, this.playerYaw, 0);
     this.camYaw = 0;
     this.camPitch = 0.02;
-    this.hp = 100;
+    this.isFlying = false;
+    this.heroAbilityCooldown = 0;
+    this.maxHp = HERO_PROFILES[this.activeHeroId].maxHp;
+    this.hp = this.maxHp;
     this.prana = 100;
     this.karma = 0;
     this.wantedLevel = 0;
@@ -6185,11 +6254,68 @@ export class RamayanaWorldEngine {
       this.input.switchSeatPressed = false;
       this.input.stealthTogglePressed = false;
       this.input.autoDriveTogglePressed = false;
+      this.input.flyTogglePressed = false;
+      this.input.heroSpecialPressed = false;
       this.input.fireHeld = false;
       this.qualityManager.resetFrameMetrics(2.5);
     }
     this.mode = nextMode;
     this.callbacks.onModeChange(nextMode);
+    this.emitHud();
+  }
+
+  public getActiveHeroId(): PlayableHeroId {
+    return this.activeHeroId;
+  }
+
+  public setActiveHero(nextHeroId: string): void {
+    const targetId = normalizeHeroId(nextHeroId);
+    const profile = HERO_PROFILES[targetId];
+    this.lanLocalHeroId = targetId;
+
+    if (targetId === this.activeHeroId) {
+      this.emitHud();
+      return;
+    }
+
+    const hpRatio = this.maxHp > 0 ? THREE.MathUtils.clamp(this.hp / this.maxHp, 0.08, 1.0) : 1.0;
+    this.activeHeroId = targetId;
+    this.maxHp = profile.maxHp;
+    this.hp = Math.max(1, Math.round(this.maxHp * hpRatio));
+    this.heroAbilityMaxCooldown = profile.specialCooldownSec;
+    this.heroAbilityCooldown = Math.min(this.heroAbilityCooldown, profile.specialCooldownSec);
+    if (!profile.canFly && this.isFlying) {
+      this.isFlying = false;
+    }
+
+    const targetRig = this.heroRigs.get(targetId);
+    if (targetRig) {
+      this.heroRigs.forEach((rig) => {
+        rig.root.visible = false;
+      });
+      targetRig.root.position.set(this.playerX, this.playerY, this.playerZ);
+      targetRig.root.rotation.order = 'YXZ';
+      targetRig.root.rotation.set(0, this.playerYaw, 0);
+      if (targetRig.headGroup) targetRig.headGroup.visible = false;
+      if (targetRig.backBowGroup) targetRig.backBowGroup.visible = false;
+      if (targetRig.capePivot) targetRig.capePivot.visible = false;
+      targetRig.root.visible = true;
+      this.ramRig = targetRig;
+      this.restoreRamStandingClothes();
+      if (this.stealthActive) {
+        this.setStealthMode(true);
+      }
+    }
+
+    if (this.worldReady) {
+      this.spawnBlast(
+        this.playerX,
+        this.playerY + 1.05,
+        this.playerZ,
+        targetId === 'HANUMAN' ? 0xff7a1a : targetId === 'LAKSHMAN' ? 0x38bdf8 : targetId === 'BHARAT' ? 0x34d399 : 0xf6c343
+      );
+      soundEngine.playMissionChime();
+    }
     this.emitHud();
   }
 
@@ -6915,7 +7041,7 @@ export class RamayanaWorldEngine {
 
     let rp = this.remotePlayers.get(st.id);
     if (!rp) {
-      const rig = createLordRamModel(this.textures);
+      const rig = createHeroModel(st.heroId, this.textures);
       const ringGeo = new THREE.RingGeometry(0.55, 0.72, 24);
       ringGeo.rotateX(-Math.PI / 2);
       const accent = st.accentHex || getHeroPreset(st.heroId).accentHex;
@@ -6940,6 +7066,7 @@ export class RamayanaWorldEngine {
       rp = {
         id: st.id,
         name: st.name,
+        heroId: st.heroId,
         accentHex: accent,
         rig,
         auraRing,
@@ -6981,6 +7108,20 @@ export class RamayanaWorldEngine {
         rp.lastSeq - st.seq < 120
       ) {
         return;
+      }
+      if (rp.heroId !== st.heroId) {
+        const oldRig = rp.rig;
+        const nextRig = createHeroModel(st.heroId, this.textures);
+        nextRig.root.add(rp.auraRing);
+        nextRig.root.add(rp.nameplate);
+        nextRig.root.position.copy(oldRig.root.position);
+        nextRig.root.rotation.order = 'YXZ';
+        nextRig.root.rotation.copy(oldRig.root.rotation);
+        this.scene.remove(oldRig.root);
+        this.poolManager.disposeObject3DResources(oldRig.root);
+        this.scene.add(nextRig.root);
+        rp.rig = nextRig;
+        rp.heroId = st.heroId;
       }
       rp.lastSeq = st.seq ?? rp.lastSeq;
       rp.targetX = st.x;
@@ -9924,6 +10065,23 @@ export class RamayanaWorldEngine {
         );
       }
     }
+
+    if (this.ramRig.tailSegments && this.ramRig.tailSegments.length > 0) {
+      const segs = this.ramRig.tailSegments;
+      const tailWaveFreq = this.isFlying ? 6.2 : 2.6 + speedFactor * 3.8;
+      for (let i = 0; i < segs.length; i++) {
+        const basePitch = i === 0 ? 0.72 + speedFactor * 0.25 : i < 3 ? 0.32 : -0.3;
+        segs[i].rotation.x =
+          basePitch + Math.sin(elapsed * tailWaveFreq - i * 0.55) * (0.08 + speedFactor * 0.1);
+        segs[i].rotation.z = Math.cos(elapsed * (tailWaveFreq * 0.7) - i * 0.6) * 0.14;
+      }
+    }
+
+    if (this.ramRig.heroAuraMesh) {
+      this.ramRig.heroAuraMesh.rotation.z = elapsed * 0.55;
+      const pulse = 1 + Math.sin(elapsed * 3.2) * 0.04;
+      this.ramRig.heroAuraMesh.scale.setScalar(pulse);
+    }
   }
 
   private setStealthMode(enabled: boolean): void {
@@ -10868,6 +11026,15 @@ export class RamayanaWorldEngine {
         this.shivlingWaterUniforms.uTime.value = elapsed;
       }
     }
+    for (let i = 0; i < this.floatingIslandWfUniforms.length; i++) {
+      this.floatingIslandWfUniforms[i].uTime.value = elapsed;
+    }
+    for (let i = 0; i < this.floatingIslands.length; i++) {
+      const isl = this.floatingIslands[i];
+      const baseY = typeof isl.userData.baseY === 'number' ? isl.userData.baseY : isl.position.y;
+      const phase = typeof isl.userData.phase === 'number' ? isl.userData.phase : i;
+      isl.position.y = baseY + Math.sin(elapsed * 0.65 + phase) * 1.1;
+    }
 
     // Animate Mountable Sacred Elephants & Royal Ashvas (visibility culled after camera lookAt)
     const pxIdle = this.playerX;
@@ -11389,15 +11556,30 @@ export class RamayanaWorldEngine {
         dt
       );
     } else {
-      this.ramRig.contactShadow.visible = true;
+      const activeProfile = HERO_PROFILES[this.activeHeroId];
+      if (this.input.flyTogglePressed) {
+        this.input.flyTogglePressed = false;
+        if (activeProfile.canFly && !this.isRamSwimming) {
+          this.isFlying = !this.isFlying;
+          if (this.isFlying && this.grounded) {
+            this.playerY += 1.15;
+            this.playerVelY = 4.2;
+            this.grounded = false;
+          }
+          soundEngine.playAstraRelease('VAYAVYASTRA');
+          this.emitHud();
+        }
+      }
+
+      this.ramRig.contactShadow.visible = !this.isFlying;
       this.restoreRamStandingClothes();
       this.ramRig.root.rotation.order = 'YXZ';
-      this.ramRig.root.rotation.x = 0;
+      this.ramRig.root.rotation.x = this.isFlying ? THREE.MathUtils.clamp(-my * 0.28, -0.35, 0.35) : 0;
 
       const preGroundY = this.surfaceHeightAt(this.playerX, this.playerZ);
       const waterSurf = waterSurfaceAt(this.playerX, this.playerZ);
       const waterDepth = waterSurf !== null ? waterSurf - preGroundY : 0;
-      const swimming = waterSurf !== null && waterDepth > 0.95;
+      const swimming = !this.isFlying && waterSurf !== null && waterDepth > 0.95;
       this.isRamSwimming = swimming;
 
       _forward.set(-Math.sin(this.camYaw), 0, -Math.cos(this.camYaw));
@@ -11410,30 +11592,48 @@ export class RamayanaWorldEngine {
       let resolvedDist = 0;
       if (mag > 0.08 && _v1.lengthSq() > 0.001) {
         _v1.normalize();
-        const moveSpeed = swimming
+        const moveSpeed = this.isFlying
+          ? this.input.sprint
+            ? activeProfile.flySpeed * 1.45
+            : activeProfile.flySpeed
+          : swimming
           ? this.input.sprint
             ? 8.8
             : 5.8
           : this.stealthActive
           ? 6.0
           : this.input.sprint
-          ? 14.5
-          : 9.4;
+          ? activeProfile.sprintSpeed
+          : activeProfile.walkSpeed;
         const nextX = this.playerX + _v1.x * moveSpeed * mag * dt;
         const nextZ = this.playerZ + _v1.z * moveSpeed * mag * dt;
-        const resolved = this.moveSweptWithStaticCCD(
-          this.playerX,
-          this.playerZ,
-          nextX,
-          nextZ,
-          0.58,
-          this.playerY,
-          false,
-          true
-        );
-        resolvedDist = Math.hypot(resolved.x - this.playerX, resolved.z - this.playerZ);
-        this.playerX = resolved.x;
-        this.playerZ = resolved.z;
+        if (this.isFlying && this.playerY > preGroundY + 5.5) {
+          this.playerX = THREE.MathUtils.clamp(
+            nextX,
+            WORLD_BOUNDS.minX + 1.5,
+            WORLD_BOUNDS.maxX - 1.5
+          );
+          this.playerZ = THREE.MathUtils.clamp(
+            nextZ,
+            WORLD_BOUNDS.minZ + 1.5,
+            WORLD_BOUNDS.maxZ - 1.5
+          );
+          resolvedDist = Math.hypot(this.playerX - prevX, this.playerZ - prevZ);
+        } else {
+          const resolved = this.moveSweptWithStaticCCD(
+            this.playerX,
+            this.playerZ,
+            nextX,
+            nextZ,
+            0.58,
+            this.playerY,
+            false,
+            true
+          );
+          resolvedDist = Math.hypot(resolved.x - this.playerX, resolved.z - this.playerZ);
+          this.playerX = resolved.x;
+          this.playerZ = resolved.z;
+        }
 
         const targetYaw = this.camYaw + Math.PI;
         let diff = targetYaw - this.playerYaw;
@@ -11462,10 +11662,62 @@ export class RamayanaWorldEngine {
       const groundY = this.surfaceHeightAt(this.playerX, this.playerZ);
       const postWaterSurf = waterSurfaceAt(this.playerX, this.playerZ);
       const postWaterDepth = postWaterSurf !== null ? postWaterSurf - groundY : 0;
-      const activeSwim = postWaterSurf !== null && postWaterDepth > 0.95;
+      const activeSwim = !this.isFlying && postWaterSurf !== null && postWaterDepth > 0.95;
       this.isRamSwimming = activeSwim;
 
-      if (activeSwim && postWaterSurf !== null) {
+      if (this.isFlying) {
+        const pitchClimb = my * -Math.sin(this.camPitch) * (this.input.sprint ? 22 : 14);
+        const jumpSurge = this.input.jumpPressed ? 11.5 : 0;
+        const diveDrop = this.stealthActive ? -9.5 : 0;
+        const targetFlyVelY = jumpSurge !== 0 ? jumpSurge : diveDrop !== 0 ? diveDrop : pitchClimb;
+        this.input.jumpPressed = false;
+        this.playerVelY = THREE.MathUtils.damp(this.playerVelY, targetFlyVelY, 8.0, dt);
+        this.playerY = THREE.MathUtils.clamp(
+          this.playerY + this.playerVelY * dt,
+          groundY,
+          215
+        );
+        if (this.playerY <= groundY + 0.05 && this.playerVelY <= -1.2 && !this.input.sprint) {
+          this.playerY = groundY;
+          this.playerVelY = 0;
+          this.grounded = true;
+          this.isFlying = false;
+        } else {
+          this.grounded = false;
+        }
+        this.flyWindAccum += dt;
+        if (this.flyWindAccum >= 0.16 && (this.lastResolvedMoveSpeed > 8 || Math.abs(this.playerVelY) > 2)) {
+          this.flyWindAccum = 0;
+          this.astraVfx?.spawnSpriteBurst(
+            this.playerX,
+            this.playerY + 0.4,
+            this.playerZ,
+            4,
+            'GOLD',
+            0.9,
+            3.5,
+            0.35,
+            0.45,
+            this.qualityManager.getProfile().particleScale
+          );
+        }
+        this.ramRig.root.position.set(this.playerX, this.playerY, this.playerZ);
+        this.ramRig.root.rotation.y = this.playerYaw;
+        this.applyArticulatedLocomotion(
+          this.ramRig,
+          this.walkPhase,
+          0.18,
+          false,
+          false,
+          isDrawingBow,
+          false,
+          0.93,
+          elapsed,
+          dt,
+          this.ramPose,
+          0.18
+        );
+      } else if (activeSwim && postWaterSurf !== null) {
         const surfaceSwimY = postWaterSurf - 1.16 + Math.sin(elapsed * 2.4) * 0.04;
         const wantsDive = this.stealthActive || (my > 0.15 && this.camPitch > 0.22);
         const diveVel = wantsDive
@@ -11509,9 +11761,15 @@ export class RamayanaWorldEngine {
       } else {
         this.swimCamTorsoPitch = THREE.MathUtils.damp(this.swimCamTorsoPitch, 0.25, 10, dt);
         if (this.input.jumpPressed && this.grounded) {
-          this.playerVelY = 9.2;
+          this.playerVelY = activeProfile.jumpVelocity;
           this.grounded = false;
           soundEngine.playMountChariot();
+        } else if (this.input.jumpPressed && !this.grounded && activeProfile.canFly && !activeSwim) {
+          // Double-jump in mid-air seamlessly ignites Hanuman Flight
+          this.isFlying = true;
+          this.playerVelY = 4.6;
+          soundEngine.playAstraRelease('VAYAVYASTRA');
+          this.emitHud();
         } else if (this.grounded && groundY < this.playerY - 0.55) {
           this.grounded = false;
           this.playerVelY = 0;
@@ -11778,6 +12036,14 @@ export class RamayanaWorldEngine {
         if (this.stealthActive) {
           this.setStealthMode(false);
         }
+      }
+    }
+
+    this.heroAbilityCooldown = Math.max(0, this.heroAbilityCooldown - dt);
+    if (!summonLocked && this.input.heroSpecialPressed) {
+      this.input.heroSpecialPressed = false;
+      if (this.heroAbilityCooldown <= 0) {
+        this.executeHeroSpecialAbility();
       }
     }
 
@@ -14606,6 +14872,156 @@ export class RamayanaWorldEngine {
     }
   }
 
+  private executeHeroSpecialAbility(): void {
+    const hero = HERO_PROFILES[this.activeHeroId];
+    this.heroAbilityMaxCooldown = hero.specialCooldownSec;
+    this.heroAbilityCooldown = hero.specialCooldownSec;
+    const profile = this.qualityManager.getProfile();
+    if (this.stealthActive) {
+      this.setStealthMode(false);
+    }
+
+    if (this.activeHeroId === 'HANUMAN') {
+      // Vajra-Gada Meteor Slam: crashes down from sky with massive AoE shockwave launching demons airborne
+      const gY = this.surfaceHeightAt(this.playerX, this.playerZ);
+      const dropHeight = Math.max(0, this.playerY - gY);
+      if (dropHeight > 1.2) {
+        this.playerY = gY;
+        this.playerVelY = 0;
+        this.grounded = true;
+        this.isFlying = false;
+        this.ramRig.root.position.set(this.playerX, this.playerY, this.playerZ);
+        this.ramRig.root.rotation.x = 0;
+      }
+      const radius = dropHeight > 3.5 ? 14.5 : 11.5;
+      const slamDmg = Math.round(hero.specialDamage * (dropHeight > 3.5 ? 1.45 : 1.0));
+      this.astraVfx?.spawnWaterWave(this.playerX, gY, this.playerZ, radius, profile.particleScale, profile.tier);
+      this.astraVfx?.spawnSpriteBurst(
+        this.playerX,
+        gY + 0.8,
+        this.playerZ,
+        28,
+        'GOLD',
+        2.8,
+        14.0,
+        0.75,
+        0.9,
+        profile.particleScale
+      );
+      this.spawnBlast(this.playerX, gY + 1.0, this.playerZ, 0xff7b1c);
+      this.cameraShakeAmount = Math.max(this.cameraShakeAmount, dropHeight > 3.5 ? 1.15 : 0.85);
+      soundEngine.playAstraImpact('BRAHMASTRA');
+
+      const rSq = radius * radius;
+      for (let i = 0; i < this.enemies.length; i++) {
+        const e = this.enemies[i];
+        if (!e.alive) continue;
+        const dx = e.x - this.playerX;
+        const dz = e.z - this.playerZ;
+        const dSq = dx * dx + dz * dz;
+        if (dSq <= rSq) {
+          const dist = Math.max(0.5, Math.sqrt(dSq));
+          const push = 9.5 * (1 - dist / (radius + 1.5));
+          const res = this.moveSweptWithStaticCCD(
+            e.x,
+            e.z,
+            e.x + (dx / dist) * push,
+            e.z + (dz / dist) * push,
+            e.isCommander ? 0.92 : 0.68,
+            e.y,
+            true
+          );
+          e.x = res.x;
+          e.z = res.z;
+          e.liftOffset = Math.max(e.liftOffset, dropHeight > 3.5 ? 4.2 : 2.6);
+          e.stunTimer = Math.max(e.stunTimer, 2.4);
+          e.abilityState = 'IDLE';
+          this.damageEnemy(e, slamDmg, 'CHAKRA');
+        }
+      }
+      this.mountNoticeText =
+        dropHeight > 3.5 ? 'Vajra-Gada Meteor Slam! Massive AoE Destruction!' : 'Vajra-Gada Seismic Slam!';
+      this.mountNoticeExpiresMs = performance.now() + 2600;
+    } else if (this.activeHeroId === 'RAM') {
+      // Surya Blade Wave: Golden Solar Cleave + Ignite
+      const gY = this.surfaceHeightAt(this.playerX, this.playerZ);
+      const radius = 9.2;
+      this.astraVfx?.spawnAgniMandalaField(
+        this.playerX,
+        gY,
+        this.playerZ,
+        radius,
+        2.5,
+        10,
+        profile.particleScale,
+        profile.tier
+      );
+      this.spawnBlast(this.playerX, this.playerY + 1.1, this.playerZ, 0xf6c343);
+      this.cameraShakeAmount = Math.max(this.cameraShakeAmount, 0.55);
+      soundEngine.playAstraImpact('AGNEYASTRA');
+
+      const rSq = radius * radius;
+      for (let i = 0; i < this.enemies.length; i++) {
+        const e = this.enemies[i];
+        if (!e.alive) continue;
+        const dSq = (e.x - this.playerX) * (e.x - this.playerX) + (e.z - this.playerZ) * (e.z - this.playerZ);
+        if (dSq <= rSq) {
+          e.burnTimer = Math.max(e.burnTimer, 3.5);
+          e.burnDps = Math.max(e.burnDps, 16);
+          this.damageEnemy(e, hero.specialDamage, 'AGNEYASTRA');
+        }
+      }
+      this.mountNoticeText = 'Surya Blade Wave unleashed!';
+      this.mountNoticeExpiresMs = performance.now() + 2200;
+    } else if (this.activeHeroId === 'LAKSHMAN') {
+      // Seshanaga 3x Piercing Serpent Volley
+      const baseYaw = this.camYaw;
+      for (let s = -1; s <= 1; s++) {
+        this.camYaw = baseYaw + s * 0.11;
+        this.fireArrow(false, 'NAGASTRA');
+      }
+      this.camYaw = baseYaw;
+      this.mountNoticeText = 'Seshanaga Triple Serpent Volley!';
+      this.mountNoticeExpiresMs = performance.now() + 2200;
+    } else {
+      // Bharat: Dharma Aegis Cleave + Sanctuary Heal
+      const gY = this.surfaceHeightAt(this.playerX, this.playerZ);
+      const radius = 9.8;
+      this.astraVfx?.spawnWaterWave(this.playerX, gY, this.playerZ, radius, profile.particleScale, profile.tier);
+      this.spawnBlast(this.playerX, this.playerY + 1.0, this.playerZ, 0x34d399);
+      this.hp = Math.min(this.maxHp, this.hp + Math.round(this.maxHp * 0.22));
+      this.prana = Math.min(this.maxPrana, this.prana + 25);
+      soundEngine.playMissionChime();
+      const rSq = radius * radius;
+      for (let i = 0; i < this.enemies.length; i++) {
+        const e = this.enemies[i];
+        if (!e.alive) continue;
+        const dx = e.x - this.playerX;
+        const dz = e.z - this.playerZ;
+        const dSq = dx * dx + dz * dz;
+        if (dSq <= rSq) {
+          const dist = Math.max(0.5, Math.sqrt(dSq));
+          const res = this.moveSweptWithStaticCCD(
+            e.x,
+            e.z,
+            e.x + (dx / dist) * 7.2,
+            e.z + (dz / dist) * 7.2,
+            e.isCommander ? 0.92 : 0.68,
+            e.y,
+            true
+          );
+          e.x = res.x;
+          e.z = res.z;
+          e.stunTimer = Math.max(e.stunTimer, 1.8);
+          this.damageEnemy(e, hero.specialDamage, 'CHAKRA');
+        }
+      }
+      this.mountNoticeText = 'Dharma Aegis Cleave — Vitals Restored!';
+      this.mountNoticeExpiresMs = performance.now() + 2400;
+    }
+    this.emitHud();
+  }
+
   private emitHud(): void {
     const activeMission = MISSIONS[this.missionIdx];
     const nearMount = this.findNearestMount();
@@ -14813,7 +15229,8 @@ export class RamayanaWorldEngine {
 
     const resPct = Math.round(resScaleVal * 100);
     const benchKey = benchSummary ? `${benchSummary.compositeScore}:${benchSummary.lockedTier}` : '0';
-    const hudKey = `${hpVal}|${pranaVal}|${this.karma}|${this.wantedLevel}|${mountKind}|${nearMount?.label ?? ''}|${nearMountFull ? 1 : 0}|${mountedSeatIndex ?? ''}|${mountedOccupantCount}|${mountedPartnerName ?? ''}|${canSwitchSeat ? 1 : 0}|${nearThrone ? 1 : 0}|${this.seatedOnThrone ? 1 : 0}|${this.autoDriveActive ? 1 : 0}|${mountSpeedKmh}|${this.stealthActive ? 1 : 0}|${this.stealthSpotted ? 1 : 0}|${chakraCd}|${district.label}|${pX}|${pZ}|${pYaw}|${this.missionIdx}|${this.missionProgress}|${this.completedMissions}|${demonVillageDistanceM}|${this.ascensionActive ? 1 : 0}|${ascElapsed}|${councilSeated}|${this.worldReady ? 1 : 0}|${roundedProgress}|${this.assetStage}|${this.webglError ?? ''}|${qMode}|${qTier}|${fpsVal}|${targetFpsVal}|${resPct}|${benchKey}|${selAstra ?? ''}|${aEnergy}|${cdKey}|${this.brahmaSummonPhase}|${fAlpha}|${dAlpha}|${questHud.unlockedCount}|${questHud.challengeSubProgress ?? ''}|${questHud.challengeTimerSec ?? ''}|${questHud.underwaterBreath ?? ''}|${questHud.brahmaTrialStage}|${enemySummonWarning?.remainingSec ?? ''}|${unlockPopup?.id ?? ''}|${this.showStoryIntro ? 1 : 0}|${promptHint ?? ''}`;
+    const heroAbCd = Number(this.heroAbilityCooldown.toFixed(1));
+    const hudKey = `${hpVal}|${pranaVal}|${this.karma}|${this.wantedLevel}|${mountKind}|${nearMount?.label ?? ''}|${nearMountFull ? 1 : 0}|${mountedSeatIndex ?? ''}|${mountedOccupantCount}|${mountedPartnerName ?? ''}|${canSwitchSeat ? 1 : 0}|${nearThrone ? 1 : 0}|${this.seatedOnThrone ? 1 : 0}|${this.autoDriveActive ? 1 : 0}|${mountSpeedKmh}|${this.stealthActive ? 1 : 0}|${this.stealthSpotted ? 1 : 0}|${chakraCd}|${district.label}|${pX}|${pZ}|${pYaw}|${this.missionIdx}|${this.missionProgress}|${this.completedMissions}|${demonVillageDistanceM}|${this.ascensionActive ? 1 : 0}|${ascElapsed}|${councilSeated}|${this.worldReady ? 1 : 0}|${roundedProgress}|${this.assetStage}|${this.webglError ?? ''}|${qMode}|${qTier}|${fpsVal}|${targetFpsVal}|${resPct}|${benchKey}|${selAstra ?? ''}|${aEnergy}|${cdKey}|${this.brahmaSummonPhase}|${fAlpha}|${dAlpha}|${questHud.unlockedCount}|${questHud.challengeSubProgress ?? ''}|${questHud.challengeTimerSec ?? ''}|${questHud.underwaterBreath ?? ''}|${questHud.brahmaTrialStage}|${enemySummonWarning?.remainingSec ?? ''}|${unlockPopup?.id ?? ''}|${this.showStoryIntro ? 1 : 0}|${this.activeHeroId}|${this.isFlying ? 1 : 0}|${heroAbCd}|${promptHint ?? ''}`;
     if (hudKey === this.lastHudKey) {
       return;
     }
@@ -14904,6 +15321,10 @@ export class RamayanaWorldEngine {
       astraUnlockPopup: unlockPopup,
       enemySummonWarning,
       showStoryIntro: this.showStoryIntro,
+      activeHeroId: this.activeHeroId,
+      isFlying: this.isFlying,
+      heroAbilityCooldown: heroAbCd,
+      heroAbilityMaxCooldown: this.heroAbilityMaxCooldown,
     });
   }
 
@@ -15018,6 +15439,15 @@ export class RamayanaWorldEngine {
         if (this.torchFlameUniforms) this.torchFlameUniforms.uFlameTime.value = elapsed;
         if (this.shivlingWaterUniforms) {
           this.shivlingWaterUniforms.uTime.value = elapsed;
+        }
+        for (let i = 0; i < this.floatingIslandWfUniforms.length; i++) {
+          this.floatingIslandWfUniforms[i].uTime.value = elapsed;
+        }
+        for (let i = 0; i < this.floatingIslands.length; i++) {
+          const isl = this.floatingIslands[i];
+          const baseY = typeof isl.userData.baseY === 'number' ? isl.userData.baseY : isl.position.y;
+          const phase = typeof isl.userData.phase === 'number' ? isl.userData.phase : i;
+          isl.position.y = baseY + Math.sin(elapsed * 0.65 + phase) * 1.1;
         }
         this.playerHorizSpeed = 0;
         this.playerTurnRate = 0;

@@ -82,6 +82,8 @@ export type NpcRole =
 
 export type MountKind = 'NONE' | 'RATHA' | 'HORSE' | 'ELEPHANT';
 
+export type PlayableHeroId = 'RAM' | 'HANUMAN' | 'LAKSHMAN' | 'BHARAT';
+
 export type QualityTier = 'HIGH' | 'MEDIUM' | 'LOW';
 export type QualityMode = 'AUTO' | QualityTier;
 
@@ -101,6 +103,10 @@ export interface HardwareBenchmarkSummary {
 }
 
 export interface WorldHudSnapshot {
+  activeHeroId: PlayableHeroId;
+  isFlying: boolean;
+  heroAbilityCooldown: number;
+  heroAbilityMaxCooldown: number;
   hp: number;
   maxHp: number;
   prana: number;
@@ -187,4 +193,6 @@ export interface InputState {
   switchSeatPressed: boolean;
   stealthTogglePressed: boolean;
   autoDriveTogglePressed: boolean;
+  flyTogglePressed: boolean;
+  heroSpecialPressed: boolean;
 }

@@ -12,6 +12,8 @@ import {
   Plus,
   RotateCcw,
   Sparkles,
+  Swords,
+  Wind,
   Zap,
 } from 'lucide-react';
 import {
@@ -296,6 +298,20 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
             <div className="flex h-full w-full items-center justify-center gap-1 rounded-md border border-amber-200/45 bg-[#12161F]/80 px-2 text-[9.5px] font-semibold text-[#EFE9DC]">
               <Compass className="h-3 w-3 text-amber-300 shrink-0" aria-hidden="true" />
               <span className="truncate">Auto-Drive (V)</span>
+            </div>
+          );
+        case 'HERO_SPECIAL':
+          return (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-0.5 rounded-md border border-orange-300/75 bg-[#2A1812]/85 text-[#F5EEDF]">
+              <Swords className="h-3.5 w-3.5 text-orange-300" aria-hidden="true" />
+              <span className="text-[9px] font-semibold">Power (B)</span>
+            </div>
+          );
+        case 'FLY_TOGGLE':
+          return (
+            <div className="flex h-full w-full items-center justify-center gap-1 rounded-md border border-sky-300/65 bg-[#0F1F2E]/85 px-1.5 text-[#EFE9DC]">
+              <Wind className="h-3 w-3 text-sky-300 shrink-0" aria-hidden="true" />
+              <span className="text-[9px] font-semibold">Fly (U)</span>
             </div>
           );
       }

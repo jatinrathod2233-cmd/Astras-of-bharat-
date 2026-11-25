@@ -5,6 +5,7 @@ import {
   getHoveredAstraFromPoint,
 } from './components/DivyastraRadialWheel';
 import { GameHUD } from './components/GameHUD';
+import { HeroSwitcherModal } from './components/HeroSwitcherModal';
 import {
   LanLocalProfile,
   LanMultiplayerModal,
@@ -15,12 +16,19 @@ import {
   ASTRA_MAX_ENERGY,
   ASTRA_ORDER,
 } from './engine/astraConfig';
+import { HERO_PROFILES, normalizeHeroId } from './engine/heroProfiles';
 import {
   LanMultiplayerClient,
   LanSessionSnapshot,
 } from './engine/LanMultiplayerClient';
 import { RamayanaWorldEngine } from './engine/RamayanaWorldEngine';
-import { AstraId, PlayMode, QualityMode, WorldHudSnapshot } from './types/world';
+import {
+  AstraId,
+  PlayableHeroId,
+  PlayMode,
+  QualityMode,
+  WorldHudSnapshot,
+} from './types/world';
 import { soundEngine } from './utils/audio';
 import {
   ControlLayoutMap,
@@ -115,6 +123,10 @@ const INITIAL_HUD: WorldHudSnapshot = {
   astraUnlockPopup: null,
   enemySummonWarning: null,
   showStoryIntro: false,
+  activeHeroId: 'RAM',
+  isFlying: false,
+  heroAbilityCooldown: 0,
+  heroAbilityMaxCooldown: HERO_PROFILES.RAM.specialCooldownSec,
 };
 
 const SHOW_FPS_STORAGE_KEY = 'astras_show_fps_v1';
@@ -173,6 +185,9 @@ export default function App() {
   const [lanModalOpen, setLanModalOpen] = useState(false);
   const lanModalOpenRef = useRef(false);
   lanModalOpenRef.current = lanModalOpen;
+  const [heroSwitcherOpen, setHeroSwitcherOpen] = useState(false);
+  const heroSwitcherOpenRef = useRef(false);
+  heroSwitcherOpenRef.current = heroSwitcherOpen;
   const [muted, setMuted] = useState<boolean>(() => soundEngine.isMuted());
   const [touchSprint, setTouchSprint] = useState(false);
   const [viewport, setViewport] = useState<{ w: number; h: number }>(() =>
@@ -415,6 +430,10 @@ export default function App() {
       if (!engine) return;
 
       if (e.code === 'Escape') {
+        if (heroSwitcherOpenRef.current) {
+          setHeroSwitcherOpen(false);
+          return;
+        }
         if (lanModalOpenRef.current) {
           setLanModalOpen(false);
           return;
@@ -436,7 +455,12 @@ export default function App() {
         return;
       }
 
-      if (modeRef.current !== 'PLAYING') return;
+      if (e.code === 'KeyH' && !e.repeat && hudRef.current.assetsReady) {
+        setHeroSwitcherOpen((prev) => !prev);
+        return;
+      }
+
+      if (modeRef.current !== 'PLAYING' || heroSwitcherOpenRef.current) return;
 
       keysDownRef.current[e.code] = true;
       recomputeKeyVector();
@@ -492,6 +516,10 @@ export default function App() {
         engine.input.autoDriveTogglePressed = true;
       } else if (e.code === 'KeyC') {
         engine.input.stealthTogglePressed = true;
+      } else if (e.code === 'KeyB' && !e.repeat) {
+        engine.input.heroSpecialPressed = true;
+      } else if (e.code === 'KeyU' && !e.repeat) {
+        engine.input.flyTogglePressed = true;
       }
     };
 
@@ -651,6 +679,21 @@ export default function App() {
   const handleToggleAutoDrive = useCallback(() => {
     if (engineRef.current) engineRef.current.input.autoDriveTogglePressed = true;
   }, []);
+  const handleHeroSpecial = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.heroSpecialPressed = true;
+  }, []);
+  const handleToggleFly = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.flyTogglePressed = true;
+  }, []);
+  const handleSelectHero = useCallback((heroId: PlayableHeroId) => {
+    const normalized = normalizeHeroId(heroId);
+    engineRef.current?.setActiveHero(normalized);
+    setLanProfile((prev) => ({
+      ...prev,
+      heroId: normalized,
+    }));
+    setHeroSwitcherOpen(false);
+  }, []);
 
   const handleStartGame = useCallback(() => {
     if (!engineRef.current) return;
@@ -735,6 +778,9 @@ export default function App() {
             onAstra={handleAstra}
             onSelectAstra={handleSelectAstra}
             onShootAstra={handleShootAstra}
+            onOpenHeroSwitcher={() => setHeroSwitcherOpen(true)}
+            onHeroSpecial={handleHeroSpecial}
+            onToggleFly={handleToggleFly}
             onJump={handleJump}
             onToggleSprint={handleToggleSprint}
             onInteract={handleInteract}
@@ -759,9 +805,19 @@ export default function App() {
           onTogglePerfStats={handleTogglePerfStats}
           onOpenControlCustomizer={() => setCustomizingControls(true)}
           onOpenLanMultiplayer={() => setLanModalOpen(true)}
+          onOpenHeroSwitcher={() => setHeroSwitcherOpen(true)}
           onDismissStoryIntro={handleDismissStoryIntro}
           onDismissUnlockPopup={handleDismissUnlockPopup}
         />
+
+        {/* Dynamic Playable Deity Hero Switcher Modal */}
+        {heroSwitcherOpen && (
+          <HeroSwitcherModal
+            activeHeroId={hud.activeHeroId}
+            onSelectHero={handleSelectHero}
+            onClose={() => setHeroSwitcherOpen(false)}
+          />
+        )}
 
         {/* Interactive Touch Control Layout & Size Editor */}
         {mode === 'PAUSED' && customizingControls && (

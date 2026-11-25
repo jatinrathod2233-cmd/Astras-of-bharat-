@@ -111,6 +111,12 @@ void AAstrasPlayerCharacter::ApplyDeityProfile(const FHeroDeityProfile& Profile)
 	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
 	{
 		MoveComp->JumpZVelocity = Profile.JumpZVelocity;
+		MoveComp->MaxFlySpeed = SprintSpeed * 1.35f;
+		if (DeityId != EHeroDeityId::WarriorHanuman && bIsFlying)
+		{
+			bIsFlying = false;
+			MoveComp->SetMovementMode(MOVE_Walking);
+		}
 		SetSprinting(bIsSprinting);
 	}
 
@@ -245,6 +251,28 @@ void AAstrasPlayerCharacter::ToggleStealth()
 {
 	bStealthActive = !bStealthActive;
 	SetSprinting(bIsSprinting);
+}
+
+void AAstrasPlayerCharacter::ToggleHanumanFlight()
+{
+	if (DeityId != EHeroDeityId::WarriorHanuman || MountedVehicle.IsValid())
+	{
+		return;
+	}
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!MoveComp) return;
+
+	bIsFlying = !bIsFlying;
+	if (bIsFlying)
+	{
+		MoveComp->MaxFlySpeed = SprintSpeed * 1.35f;
+		MoveComp->SetMovementMode(MOVE_Flying);
+		LaunchCharacter(FVector(0.0f, 0.0f, 480.0f), false, true);
+	}
+	else
+	{
+		MoveComp->SetMovementMode(MOVE_Walking);
+	}
 }
 
 void AAstrasPlayerCharacter::RestoreFullVitals()

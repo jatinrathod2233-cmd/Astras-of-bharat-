@@ -71,6 +71,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Astras|Movement")
 	void ToggleStealth();
 
+	UFUNCTION(BlueprintCallable, Category = "Astras|Movement")
+	void ToggleHanumanFlight();
+
 	UFUNCTION(BlueprintCallable, Category = "Astras|Stats")
 	void RestoreFullVitals();
 
@@ -168,6 +171,7 @@ private:
 	EVehicleSeatIndex CurrentSeat = EVehicleSeatIndex::Unseated;
 	bool bIsSprinting = false;
 	bool bStealthActive = false;
+	bool bIsFlying = false;
 	TMap<EAstraId, float> AstraCooldownRemaining;
 	float ChakraCooldownRemaining = 0.0f;
 	float PrimaryCooldownRemaining = 0.0f;

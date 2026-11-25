@@ -8,12 +8,14 @@ import {
   Pause,
   Sparkles,
   Star,
+  Users,
   Volume2,
   VolumeX,
   Waves,
   Wifi,
 } from 'lucide-react';
 import { ASTRA_CONFIG } from '../engine/astraConfig';
+import { HERO_PROFILES } from '../engine/heroProfiles';
 import type { LanSessionSnapshot } from '../engine/LanMultiplayerClient';
 import { AstraId, WorldHudSnapshot } from '../types/world';
 import { ControlLayoutMap } from '../utils/controlLayout';
@@ -43,6 +45,9 @@ interface GameHUDProps {
   onAstra: () => void;
   onSelectAstra: (id: AstraId) => void;
   onShootAstra: () => void;
+  onOpenHeroSwitcher: () => void;
+  onHeroSpecial: () => void;
+  onToggleFly: () => void;
   onJump: () => void;
   onToggleSprint: () => void;
   onInteract: () => void;
@@ -73,6 +78,9 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   onAstra,
   onSelectAstra,
   onShootAstra,
+  onOpenHeroSwitcher,
+  onHeroSpecial,
+  onToggleFly,
   onJump,
   onToggleSprint,
   onInteract,
@@ -104,6 +112,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   );
 
   const activeAstraCfg = hud.selectedAstra ? ASTRA_CONFIG[hud.selectedAstra] : null;
+  const activeHeroCfg = HERO_PROFILES[hud.activeHeroId];
   const quest = hud.astraQuest;
   const breathPct =
     quest.underwaterBreath !== null
@@ -158,6 +167,33 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
           />
 
           <div className="w-[156px] sm:w-[186px] flex flex-col gap-1">
+            {/* Active Hero Plate + Quick Switch Trigger (H) */}
+            <button
+              type="button"
+              onClick={onOpenHeroSwitcher}
+              aria-label={`Active hero ${activeHeroCfg.name}. Click to switch hero.`}
+              className="pointer-events-auto flex items-center justify-between gap-1.5 rounded-md border border-amber-300/35 bg-[#0D1016]/75 px-2 py-1 text-left hover:border-amber-300 cursor-pointer transition-colors"
+            >
+              <span className="inline-flex items-center gap-1 min-w-0">
+                <Users
+                  className="h-3 w-3 shrink-0"
+                  style={{ color: activeHeroCfg.accentHex }}
+                  aria-hidden="true"
+                />
+                <span className="truncate text-[10px] font-semibold text-[#F7F1E3]">
+                  {activeHeroCfg.name}
+                </span>
+                {hud.isFlying && (
+                  <span className="text-[8.5px] font-semibold text-sky-300 shrink-0">
+                    · Fly
+                  </span>
+                )}
+              </span>
+              <span className="text-[8.5px] font-semibold text-amber-300 shrink-0 whitespace-nowrap">
+                Switch (H)
+              </span>
+            </button>
+
             {/* HP & Alert Stars */}
             <div className="rounded-md border border-amber-200/15 bg-[#0D1016]/60 px-2 py-1 space-y-0.5">
               <div className="flex items-center justify-between gap-1">
@@ -552,6 +588,10 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         astraCooldowns={hud.astraCooldowns}
         brahmastraAimReady={hud.brahmastraAimReady}
         brahmastraSummoning={hud.brahmastraSummoning}
+        activeHeroId={hud.activeHeroId}
+        isFlying={hud.isFlying}
+        heroAbilityCooldown={hud.heroAbilityCooldown}
+        heroAbilityMaxCooldown={hud.heroAbilityMaxCooldown}
         controlLayout={controlLayout}
         viewport={viewport}
         stageRef={stageRef}
@@ -560,6 +600,8 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         onAstra={onAstra}
         onSelectAstra={onSelectAstra}
         onShootAstra={onShootAstra}
+        onHeroSpecial={onHeroSpecial}
+        onToggleFly={onToggleFly}
         onJump={onJump}
         onToggleSprint={onToggleSprint}
         onInteract={onInteract}

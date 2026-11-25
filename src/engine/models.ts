@@ -46,6 +46,9 @@ export interface CharacterRig {
   waistWrap?: THREE.Mesh;
   hairStrands?: HairStrandChain[];
   capePivot?: THREE.Group;
+  tailSegments?: THREE.Group[];
+  meleeWeaponGroup?: THREE.Group;
+  heroAuraMesh?: THREE.Mesh;
   ghostOverlayMat?: THREE.MeshStandardMaterial;
   customParts?: THREE.Group;
   contactShadow: THREE.Mesh;
@@ -9185,4 +9188,1090 @@ export function createFishSchoolGeometry(): THREE.BufferGeometry {
   body.scale(0.62, 1.0, 1.2);
   return body;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HERO DEITIES: LORD HANUMAN (Hyper-Muscular Vanara + Tail + Vajra Gada),
+// LAKSHMAN (Serpent-Crest Royal Archer) & BHARAT (Dharma Sovereign Guardian)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function createHanumanTorsoGeometry(): THREE.BufferGeometry {
+  // Powerful V-tapered divine Vanara warrior torso from pelvis crest (y=0.0) to upper neck (y=0.71)
+  const stacks = 48;
+  const slices = 48;
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  const smoothstep = (e0: number, e1: number, x: number) => {
+    const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
+  const gauss = (d: number, sigma: number) => Math.exp(-(d * d) / (2 * sigma * sigma));
+
+  const profileSamples: Array<[number, number, number, number]> = [
+    [0.0, 0.0, 0.0, 0.0],
+    [0.02, 0.145, 0.105, -0.004],
+    [0.11, 0.14, 0.1, 0.0],
+    [0.2, 0.132, 0.098, 0.004], // tight athletic waist
+    [0.33, 0.168, 0.122, 0.008], // sweeping lats & ribcage
+    [0.46, 0.212, 0.142, 0.012], // massive barrel chest
+    [0.545, 0.228, 0.136, 0.006], // broad upper shoulders / traps
+    [0.59, 0.148, 0.105, -0.002], // thick trapezius slope
+    [0.625, 0.072, 0.072, -0.006], // muscular bull neck base
+    [0.68, 0.066, 0.066, -0.004],
+    [0.71, 0.0, 0.0, 0.0],
+  ];
+
+  const sampleProfile = (y: number) => {
+    for (let k = 0; k < profileSamples.length - 1; k++) {
+      const a = profileSamples[k];
+      const b = profileSamples[k + 1];
+      if (y >= a[0] && y <= b[0]) {
+        const t = (y - a[0]) / Math.max(0.0001, b[0] - a[0]);
+        const s = t * t * (3 - 2 * t);
+        return {
+          rx: a[1] + (b[1] - a[1]) * s,
+          rz: a[2] + (b[2] - a[2]) * s,
+          zOff: a[3] + (b[3] - a[3]) * s,
+        };
+      }
+    }
+    return { rx: 0, rz: 0, zOff: 0 };
+  };
+
+  for (let i = 0; i <= stacks; i++) {
+    const v = i / stacks;
+    const y = v * 0.71;
+    const { rx, rz, zOff } = sampleProfile(y);
+
+    for (let j = 0; j <= slices; j++) {
+      const u = j / slices;
+      const theta = (u - 0.5) * Math.PI * 2;
+      const sinT = Math.sin(theta);
+      const cosT = Math.cos(theta);
+      const absT = Math.abs(theta);
+
+      let px = rx * sinT;
+      let pz = rz * cosT + zOff;
+      const py = y;
+
+      if (rx > 0.01) {
+        // Massive Pectoral Plates & Deep Sternal Cleft
+        const pecSide = gauss(absT - 0.45, 0.34) * smoothstep(0.04, 0.14, absT);
+        const pecVert = gauss(y - 0.465, 0.065) * smoothstep(0.36, 0.42, y);
+        pz += 0.028 * pecSide * pecVert;
+
+        const sternalCleft = gauss(absT, 0.085) * gauss(y - 0.47, 0.075);
+        pz -= 0.011 * sternalCleft;
+
+        // Carved 6-pack Rectus Abdominis & Oblique V-taper
+        const abMask =
+          smoothstep(0.04, 0.14, absT) *
+          smoothstep(0.54, 0.34, absT) *
+          smoothstep(0.11, 0.16, y) *
+          smoothstep(0.4, 0.34, y);
+        const abWave = Math.max(0, Math.sin(((y - 0.13) / 0.25) * Math.PI * 3));
+        const lineaAlba = gauss(absT, 0.07) * smoothstep(0.1, 0.38, y) * smoothstep(0.42, 0.35, y);
+        pz += 0.012 * abMask * abWave - 0.008 * lineaAlba;
+
+        // Heavy Latissimus Dorsi & Back Traps
+        const backMask = smoothstep(1.55, 2.35, absT);
+        if (backMask > 0.001) {
+          const spineDist = Math.abs(Math.PI - absT);
+          const spinalFurrow = gauss(spineDist, 0.12) * smoothstep(0.08, 0.22, y) * smoothstep(0.62, 0.52, y);
+          const erectorRidge = gauss(spineDist - 0.32, 0.22) * smoothstep(0.16, 0.55, y);
+          pz += 0.014 * spinalFurrow;
+          pz -= 0.013 * erectorRidge * backMask;
+        }
+      }
+
+      positions.push(px, py, pz);
+      uvs.push(u, v);
+    }
+  }
+
+  const rowLen = slices + 1;
+  for (let i = 0; i < stacks; i++) {
+    for (let j = 0; j < slices; j++) {
+      const a = i * rowLen + j;
+      const b = a + 1;
+      const c = (i + 1) * rowLen + j;
+      const d = c + 1;
+      indices.push(a, c, b);
+      indices.push(b, c, d);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function createVajraGadaMace(
+  goldMat: THREE.Material,
+  rubyMat: THREE.Material,
+  emberMat: THREE.Material
+): THREE.Group {
+  const gada = new THREE.Group();
+
+  // Heavy engraved golden shaft held from grip at y=0 extending down/forward
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.024, 0.018, 0.96, 14),
+    goldMat
+  );
+  shaft.position.set(0, 0.18, 0);
+  shaft.castShadow = true;
+  gada.add(shaft);
+
+  // Pommel spike
+  const pommel = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.1, 8), goldMat);
+  pommel.rotation.x = Math.PI;
+  pommel.position.set(0, -0.34, 0);
+  gada.add(pommel);
+
+  // Fluted lotus neck collar
+  const neckCollar = new THREE.Mesh(new THREE.TorusGeometry(0.044, 0.012, 8, 16), rubyMat);
+  neckCollar.rotation.x = Math.PI / 2;
+  neckCollar.position.set(0, 0.62, 0);
+  gada.add(neckCollar);
+
+  // Massive fluted golden sphere head (sculpted Gada crown)
+  const headSphere = new THREE.Mesh(new THREE.SphereGeometry(0.185, 18, 14), goldMat);
+  headSphere.scale.set(1.0, 1.12, 1.0);
+  headSphere.position.set(0, 0.82, 0);
+  headSphere.castShadow = true;
+  gada.add(headSphere);
+
+  // Glowing core band & sunburst ribs around the Gada head
+  const glowBand = new THREE.Mesh(new THREE.TorusGeometry(0.182, 0.018, 8, 22), emberMat);
+  glowBand.rotation.x = Math.PI / 2;
+  glowBand.position.set(0, 0.82, 0);
+  gada.add(glowBand);
+
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const rib = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.28, 6), goldMat);
+    rib.position.set(Math.sin(a) * 0.17, 0.82, Math.cos(a) * 0.17);
+    gada.add(rib);
+
+    const stud = new THREE.Mesh(new THREE.OctahedronGeometry(0.022, 0), emberMat);
+    stud.position.set(Math.sin(a) * 0.2, 0.82, Math.cos(a) * 0.2);
+    gada.add(stud);
+  }
+
+  const spire = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.18, 10), goldMat);
+  spire.position.set(0, 1.08, 0);
+  spire.castShadow = true;
+  gada.add(spire);
+
+  return gada;
+}
+
+export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
+  const root = new THREE.Group();
+
+  // Warm burnished saffron-bronze heroic skin with divine rim glow
+  const skinMat = new THREE.MeshPhysicalMaterial({
+    map: textures.royalSkin,
+    normalMap: textures.royalSkinNormal,
+    normalScale: new THREE.Vector2(0.24, 0.24),
+    color: 0xe39e68,
+    roughness: 0.44,
+    metalness: 0.04,
+    clearcoat: 0.12,
+    sheen: 0.42,
+    sheenRoughness: 0.45,
+    sheenColor: new THREE.Color(0xffb454),
+  });
+  const furTrimMat = new THREE.MeshPhysicalMaterial({
+    color: 0xf4a852,
+    roughness: 0.68,
+    sheen: 0.72,
+    sheenColor: new THREE.Color(0xffe09a),
+  });
+  const dhotiMat = new THREE.MeshPhysicalMaterial({
+    map: textures.silkGold,
+    normalMap: textures.silkNormal,
+    roughnessMap: textures.silkRoughness,
+    color: 0xe64a19,
+    roughness: 0.62,
+    metalness: 0.12,
+    sheen: 0.75,
+    sheenColor: new THREE.Color(0xffd268),
+  });
+  const capeMat = new THREE.MeshPhysicalMaterial({
+    map: textures.silkGold,
+    normalMap: textures.silkNormal,
+    color: 0xc92a18,
+    roughness: 0.64,
+    sheen: 0.8,
+    sheenColor: new THREE.Color(0xffbd4a),
+  });
+  const goldMat = new THREE.MeshPhysicalMaterial({
+    map: textures.armorMetal,
+    normalMap: textures.armorNormal,
+    roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
+    color: 0xf2c249,
+    roughness: 0.26,
+    metalness: 0.94,
+    clearcoat: 0.35,
+  });
+  const rubyMat = new THREE.MeshPhysicalMaterial({
+    color: 0xe5243b,
+    emissive: 0x6e0814,
+    emissiveIntensity: 0.45,
+    roughness: 0.1,
+    clearcoat: 1.0,
+  });
+  const emberMat = new THREE.MeshStandardMaterial({
+    color: 0xffaa2b,
+    emissive: 0xff7700,
+    emissiveIntensity: 2.2,
+    roughness: 0.25,
+  });
+  const sindoorMat = new THREE.MeshStandardMaterial({
+    color: 0xff4500,
+    emissive: 0xd93000,
+    emissiveIntensity: 0.55,
+    roughness: 0.5,
+  });
+  const hairMat = new THREE.MeshStandardMaterial({
+    color: 0x161214,
+    roughness: 0.48,
+  });
+  const eyeWhiteMat = new THREE.MeshPhysicalMaterial({
+    color: 0xfaf5e8,
+    roughness: 0.12,
+    clearcoat: 0.95,
+  });
+  const irisMat = new THREE.MeshPhysicalMaterial({
+    color: 0xd96b18,
+    emissive: 0x662200,
+    emissiveIntensity: 0.45,
+    roughness: 0.1,
+    clearcoat: 1.0,
+  });
+  const leatherMat = new THREE.MeshStandardMaterial({
+    map: textures.bark,
+    color: 0x66361c,
+    roughness: 0.78,
+  });
+
+  const contactShadow = createContactShadowMesh(textures.contactShadow, 0.92, 0.92);
+  root.add(contactShadow);
+
+  // Heavy Muscular Warrior Legs
+  const makeLeg = (xOffset: number, isLeft: boolean) => {
+    const legPivot = new THREE.Group();
+    legPivot.position.set(xOffset, 0.94, 0);
+
+    const hipBall = new THREE.Mesh(new THREE.SphereGeometry(0.105, 14, 12), dhotiMat);
+    legPivot.add(hipBall);
+
+    const thighGeo = createRamAnatomicalLimbGeometry(
+      0.45,
+      [
+        [0.0, 0.102, 0.108, 0, 0],
+        [0.35, 0.098, 0.106, 0, 0.005],
+        [0.72, 0.082, 0.088, 0, 0.004],
+        [1.0, 0.062, 0.066, 0, 0],
+      ],
+      16,
+      18
+    );
+    const upperThigh = new THREE.Mesh(
+      createRamAnatomicalLimbGeometry(
+        0.29,
+        [
+          [0.0, 0.106, 0.112, 0, 0],
+          [0.65, 0.098, 0.105, 0, 0.003],
+          [1.0, 0.0, 0.0, 0, 0],
+        ],
+        12,
+        16
+      ),
+      dhotiMat
+    );
+    upperThigh.castShadow = true;
+    legPivot.add(upperThigh);
+
+    const thighMesh = new THREE.Mesh(thighGeo, skinMat);
+    thighMesh.castShadow = true;
+    legPivot.add(thighMesh);
+
+    const kneePivot = new THREE.Group();
+    kneePivot.position.set(0, -0.445, 0);
+    legPivot.add(kneePivot);
+
+    const kneeCap = new THREE.Mesh(new THREE.SphereGeometry(0.062, 14, 10), goldMat);
+    kneeCap.scale.set(1.0, 0.9, 0.85);
+    kneeCap.position.set(0, 0, 0.025);
+    kneePivot.add(kneeCap);
+
+    const shinGeo = createRamAnatomicalLimbGeometry(
+      0.42,
+      [
+        [0.0, 0.058, 0.062, 0, 0],
+        [0.32, 0.072, 0.082, 0, -0.012],
+        [0.7, 0.048, 0.056, 0, -0.006],
+        [1.0, 0.038, 0.042, 0, 0],
+      ],
+      16,
+      18
+    );
+    const shin = new THREE.Mesh(shinGeo, skinMat);
+    shin.position.y = 0.012;
+    shin.castShadow = true;
+    kneePivot.add(shin);
+
+    const anklet = new THREE.Mesh(new THREE.TorusGeometry(0.046, 0.01, 8, 18), goldMat);
+    anklet.rotation.x = Math.PI / 2;
+    anklet.position.y = -0.38;
+    kneePivot.add(anklet);
+
+    const anklePivot = new THREE.Group();
+    anklePivot.position.set(0, -0.405, 0);
+    kneePivot.add(anklePivot);
+
+    const foot = createRamDetailedFoot(isLeft, skinMat, leatherMat, goldMat);
+    foot.scale.set(1.18, 1.1, 1.15);
+    foot.position.set(0, -0.072, 0);
+    anklePivot.add(foot);
+
+    return { legPivot, kneePivot, anklePivot };
+  };
+
+  const leftLegRig = makeLeg(-0.118, true);
+  const rightLegRig = makeLeg(0.118, false);
+  const leftLeg = leftLegRig.legPivot;
+  const rightLeg = rightLegRig.legPivot;
+  const leftKnee = leftLegRig.kneePivot;
+  const rightKnee = rightLegRig.kneePivot;
+  const leftAnkle = leftLegRig.anklePivot;
+  const rightAnkle = rightLegRig.anklePivot;
+  root.add(leftLeg, rightLeg);
+
+  // Massive V-Tapered Hero Torso
+  const torso = new THREE.Group();
+  torso.position.y = 0.94;
+  root.add(torso);
+
+  const waistWrap = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.148, 0.175, 0.25, 22),
+    dhotiMat
+  );
+  waistWrap.position.y = -0.02;
+  waistWrap.scale.set(1.12, 1.0, 0.84);
+  waistWrap.castShadow = true;
+  torso.add(waistWrap);
+
+  const centerPleatGeo = new THREE.CylinderGeometry(0.058, 0.075, 0.46, 10);
+  centerPleatGeo.translate(0, -0.22, 0.01);
+  const centerPleat = new THREE.Mesh(centerPleatGeo, dhotiMat);
+  centerPleat.scale.set(1.18, 1.0, 0.36);
+  centerPleat.position.set(0, 0.02, 0.112);
+  centerPleat.rotation.x = -0.045;
+  torso.add(centerPleat);
+
+  // Heavy Golden Kamarbandh Belt + Sun Medallion
+  const belt = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.158, 0.105, 22), goldMat);
+  belt.position.y = 0.11;
+  belt.scale.set(1.12, 1.0, 0.85);
+  torso.add(belt);
+
+  const beltRuby = new THREE.Mesh(new THREE.OctahedronGeometry(0.026, 0), rubyMat);
+  beltRuby.position.set(0, 0.11, 0.142);
+  torso.add(beltRuby);
+
+  const torsoMesh = new THREE.Mesh(createHanumanTorsoGeometry(), skinMat);
+  torsoMesh.position.y = 0.095;
+  torsoMesh.castShadow = true;
+  torsoMesh.receiveShadow = true;
+  torso.add(torsoMesh);
+
+  // Golden Cross-Chest Kavacha Harness + Central Surya/Vajra Medallion
+  [-1, 1].forEach((s) => {
+    const strapCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(s * 0.18, 0.61, 0.03),
+      new THREE.Vector3(s * 0.1, 0.52, 0.145),
+      new THREE.Vector3(0, 0.44, 0.165),
+      new THREE.Vector3(-s * 0.12, 0.3, 0.12),
+      new THREE.Vector3(-s * 0.14, 0.25, -0.09),
+      new THREE.Vector3(s * 0.02, 0.44, -0.145),
+      new THREE.Vector3(s * 0.16, 0.59, -0.05),
+    ]);
+    const strap = new THREE.Mesh(new THREE.TubeGeometry(strapCurve, 32, 0.015, 8, false), goldMat);
+    strap.castShadow = true;
+    torso.add(strap);
+  });
+
+  const chestMedallion = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.052, 0.022, 16), goldMat);
+  chestMedallion.rotation.x = Math.PI / 2;
+  chestMedallion.position.set(0, 0.44, 0.166);
+  torso.add(chestMedallion);
+
+  const chestCore = new THREE.Mesh(new THREE.SphereGeometry(0.028, 12, 10), emberMat);
+  chestCore.position.set(0, 0.44, 0.175);
+  torso.add(chestCore);
+
+  // Heavy Golden Pauldrons / Shoulder Armor
+  [-1, 1].forEach((s) => {
+    const pauldron = new THREE.Mesh(
+      new THREE.SphereGeometry(0.095, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.58),
+      goldMat
+    );
+    pauldron.position.set(s * 0.235, 0.565, 0.0);
+    pauldron.rotation.z = -s * 0.42;
+    pauldron.castShadow = true;
+    torso.add(pauldron);
+
+    const pauldronGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.016, 0), rubyMat);
+    pauldronGem.position.set(s * 0.275, 0.57, 0.032);
+    torso.add(pauldronGem);
+  });
+
+  // Rudraksha & Golden Pearl Garland
+  const malaCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(-0.085, 0.63, 0.03),
+    new THREE.Vector3(-0.075, 0.55, 0.12),
+    new THREE.Vector3(0, 0.49, 0.16),
+    new THREE.Vector3(0.075, 0.55, 0.12),
+    new THREE.Vector3(0.085, 0.63, 0.03),
+  ]);
+  for (let b = 0; b < 15; b++) {
+    const pt = malaCurve.getPoint(b / 14);
+    const bead = new THREE.Mesh(
+      new THREE.SphereGeometry(b === 7 ? 0.018 : 0.011, 8, 8),
+      b % 2 === 0 ? goldMat : leatherMat
+    );
+    bead.position.copy(pt);
+    torso.add(bead);
+  }
+
+  // Flowing Heroic Crimson-Saffron Cape
+  const capePivot = new THREE.Group();
+  capePivot.position.set(0, 0.61, -0.14);
+  const drapeShape = new THREE.Shape();
+  drapeShape.moveTo(-0.145, 0.01);
+  drapeShape.lineTo(0.145, 0.01);
+  drapeShape.quadraticCurveTo(0.21, -0.45, 0.16, -0.92);
+  drapeShape.lineTo(-0.16, -0.92);
+  drapeShape.quadraticCurveTo(-0.21, -0.45, -0.145, 0.01);
+  const drapeGeo = new THREE.ExtrudeGeometry(drapeShape, {
+    depth: 0.016,
+    bevelEnabled: true,
+    bevelThickness: 0.005,
+    bevelSize: 0.005,
+    bevelSegments: 2,
+  });
+  const cape = new THREE.Mesh(drapeGeo, capeMat);
+  cape.rotation.x = 0.14;
+  cape.castShadow = true;
+  capePivot.add(cape);
+  torso.add(capePivot);
+
+  // Articulated 6-Segment Golden-Furred Vanara Tail
+  const tailSegments: THREE.Group[] = [];
+  let tailParent: THREE.Object3D = torso;
+  const tailLengths = [0.22, 0.22, 0.22, 0.21, 0.2, 0.18];
+  tailLengths.forEach((tLen, idx) => {
+    const tp = new THREE.Group();
+    if (idx === 0) {
+      tp.position.set(0, 0.03, -0.125);
+      tp.rotation.x = 0.72;
+    } else {
+      tp.position.set(0, tLen, 0);
+      tp.rotation.x = idx < 3 ? 0.34 : -0.32;
+    }
+    const r0 = 0.026 * (1 - idx * 0.1);
+    const r1 = 0.022 * (1 - idx * 0.1);
+    const segGeo = new THREE.CylinderGeometry(r1, r0, tLen, 10);
+    segGeo.translate(0, tLen * 0.5, 0);
+    const segMesh = new THREE.Mesh(segGeo, furTrimMat);
+    segMesh.castShadow = true;
+    tp.add(segMesh);
+
+    if (idx === tailLengths.length - 1) {
+      const tuft = new THREE.Mesh(new THREE.SphereGeometry(0.038, 10, 8), goldMat);
+      tuft.scale.set(0.9, 1.4, 0.9);
+      tuft.position.y = tLen + 0.02;
+      tp.add(tuft);
+    }
+    tailParent.add(tp);
+    tailSegments.push(tp);
+    tailParent = tp;
+  });
+
+  // Subtle Divine Saffron Shoulder Halo Aura
+  const heroAuraMesh = new THREE.Mesh(
+    new THREE.TorusGeometry(0.46, 0.012, 8, 32),
+    emberMat
+  );
+  heroAuraMesh.position.set(0, 0.58, -0.16);
+  torso.add(heroAuraMesh);
+
+  // Fiercely Noble Sculpted Vanara Head + Sindoor Tilak + Kireeta Mukut Crown
+  const headGroup = new THREE.Group();
+  headGroup.position.set(0, 0.805, 0.01);
+  torso.add(headGroup);
+
+  const cranium = new THREE.Mesh(createRamAnatomicalHeadGeometry(), skinMat);
+  cranium.scale.set(1.12, 1.06, 1.08);
+  cranium.castShadow = true;
+  headGroup.add(cranium);
+
+  // Characteristic strong Vanara lower muzzle/jaw contour & mane cheek sideburns
+  const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.056, 16, 12), furTrimMat);
+  muzzle.scale.set(1.06, 0.72, 0.92);
+  muzzle.position.set(0, -0.036, 0.072);
+  headGroup.add(muzzle);
+
+  [-1, 1].forEach((side) => {
+    const eyeWhite = new THREE.Mesh(new THREE.SphereGeometry(0.016, 12, 10), eyeWhiteMat);
+    eyeWhite.scale.set(1.1, 0.8, 0.7);
+    eyeWhite.position.set(side * 0.035, 0.016, 0.088);
+    headGroup.add(eyeWhite);
+
+    const iris = new THREE.Mesh(new THREE.SphereGeometry(0.0085, 10, 10), irisMat);
+    iris.position.set(side * 0.035, 0.016, 0.098);
+    headGroup.add(iris);
+
+    // Expressive Furrowed Warrior Brow
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.01, 0.016), hairMat);
+    brow.position.set(side * 0.034, 0.034, 0.094);
+    brow.rotation.z = -side * 0.22;
+    headGroup.add(brow);
+
+    // Vanara Ear + Large Golden Kundala Ring
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.026, 10, 8), skinMat);
+    ear.scale.set(0.42, 1.18, 0.82);
+    ear.position.set(side * 0.095, 0.005, -0.006);
+    headGroup.add(ear);
+
+    const kundala = new THREE.Mesh(new THREE.TorusGeometry(0.022, 0.0055, 8, 18), goldMat);
+    kundala.rotation.y = Math.PI / 2;
+    kundala.position.set(side * 0.1, -0.042, -0.006);
+    headGroup.add(kundala);
+
+    // Thick flowing mane sideburn whiskers
+    const sideburn = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.09, 6), furTrimMat);
+    sideburn.rotation.x = Math.PI;
+    sideburn.rotation.z = side * 0.22;
+    sideburn.position.set(side * 0.086, -0.028, 0.018);
+    headGroup.add(sideburn);
+  });
+
+  // Glowing Saffron-Vermilion Sindoor Tilak
+  const tilak = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.042, 0.012), sindoorMat);
+  tilak.position.set(0, 0.056, 0.098);
+  headGroup.add(tilak);
+
+  // Flowing Lion-like Back Mane
+  const mane = new THREE.Mesh(new THREE.SphereGeometry(0.096, 16, 14), furTrimMat);
+  mane.scale.set(1.06, 1.15, 0.96);
+  mane.position.set(0, 0.01, -0.035);
+  headGroup.add(mane);
+
+  // Ornate Golden Bajrangbali Ratna-Mukut Crown
+  const crownBase = new THREE.Mesh(new THREE.CylinderGeometry(0.098, 0.106, 0.072, 22), goldMat);
+  crownBase.position.set(0, 0.104, -0.006);
+  headGroup.add(crownBase);
+
+  const crownSpire = new THREE.Mesh(new THREE.ConeGeometry(0.068, 0.22, 14), goldMat);
+  crownSpire.position.set(0, 0.245, -0.006);
+  crownSpire.castShadow = true;
+  headGroup.add(crownSpire);
+
+  const crownRuby = new THREE.Mesh(new THREE.OctahedronGeometry(0.024, 0), rubyMat);
+  crownRuby.position.set(0, 0.115, 0.108);
+  headGroup.add(crownRuby);
+
+  // Massive Muscular Arms with Keyura Armlets & Kankana Bracers
+  const makeArm = (xOffset: number, isLeft: boolean) => {
+    const armPivot = new THREE.Group();
+    armPivot.position.set(xOffset, 0.545, 0);
+    const sideSign = isLeft ? -1 : 1;
+
+    const shoulderCap = new THREE.Mesh(new THREE.SphereGeometry(0.068, 14, 12), skinMat);
+    shoulderCap.position.set(-sideSign * 0.008, -0.006, 0);
+    shoulderCap.castShadow = true;
+    armPivot.add(shoulderCap);
+
+    const upperArmGeo = createRamAnatomicalLimbGeometry(
+      0.305,
+      [
+        [0.0, 0.058, 0.064, 0, 0],
+        [0.18, 0.068, 0.074, sideSign * 0.006, 0.002], // massive deltoid
+        [0.58, 0.064, 0.072, 0, 0.005], // bulging bicep peak
+        [1.0, 0.044, 0.048, 0, 0],
+      ],
+      16,
+      18
+    );
+    const upperArm = new THREE.Mesh(upperArmGeo, skinMat);
+    upperArm.castShadow = true;
+    armPivot.add(upperArm);
+
+    const keyura = new THREE.Mesh(new THREE.TorusGeometry(0.066, 0.011, 8, 18), goldMat);
+    keyura.rotation.x = Math.PI / 2;
+    keyura.position.y = -0.12;
+    armPivot.add(keyura);
+
+    const elbowPivot = new THREE.Group();
+    elbowPivot.position.set(0, -0.295, 0);
+    armPivot.add(elbowPivot);
+
+    const elbowCap = new THREE.Mesh(new THREE.SphereGeometry(0.046, 12, 10), skinMat);
+    elbowPivot.add(elbowCap);
+
+    const forearmGeo = createRamAnatomicalLimbGeometry(
+      0.278,
+      [
+        [0.0, 0.044, 0.048, 0, 0],
+        [0.28, 0.056, 0.062, 0, 0.004], // thick powerhouse forearm
+        [0.85, 0.036, 0.039, 0, 0],
+        [1.0, 0.034, 0.036, 0, 0],
+      ],
+      14,
+      16
+    );
+    const forearm = new THREE.Mesh(forearmGeo, skinMat);
+    forearm.position.y = 0.01;
+    forearm.castShadow = true;
+    elbowPivot.add(forearm);
+
+    const bracer = new THREE.Mesh(new THREE.CylinderGeometry(0.044, 0.038, 0.082, 16), goldMat);
+    bracer.position.y = -0.22;
+    elbowPivot.add(bracer);
+
+    const hand = createRamDetailedHand(isLeft, skinMat);
+    hand.scale.set(1.22, 1.15, 1.2);
+    hand.position.y = -0.268;
+    elbowPivot.add(hand);
+
+    const handAnchor = new THREE.Object3D();
+    handAnchor.position.set(isLeft ? 0.01 : -0.01, -0.295, 0.035);
+    elbowPivot.add(handAnchor);
+
+    return { armPivot, elbowPivot, handAnchor };
+  };
+
+  const leftArmRig = makeArm(-0.245, true);
+  const rightArmRig = makeArm(0.245, false);
+  torso.add(leftArmRig.armPivot, rightArmRig.armPivot);
+
+  // Colossal Embossed Vajra Gada Mace gripped firmly in right hand
+  const meleeWeaponGroup = createVajraGadaMace(goldMat, rubyMat, emberMat);
+  meleeWeaponGroup.position.set(-0.01, -0.29, 0.04);
+  meleeWeaponGroup.rotation.x = Math.PI * 0.44;
+  rightArmRig.elbowPivot.add(meleeWeaponGroup);
+
+  // Keep overall heroic stature imposing (1.24x human scale)
+  root.scale.setScalar(1.24);
+
+  return {
+    root,
+    leftLeg,
+    rightLeg,
+    leftKnee,
+    rightKnee,
+    leftAnkle,
+    rightAnkle,
+    leftArm: leftArmRig.armPivot,
+    rightArm: rightArmRig.armPivot,
+    leftElbow: leftArmRig.elbowPivot,
+    rightElbow: rightArmRig.elbowPivot,
+    torso,
+    headGroup,
+    leftHandAnchor: leftArmRig.handAnchor,
+    rightHandAnchor: rightArmRig.handAnchor,
+    centerPleat,
+    waistWrap,
+    capePivot,
+    tailSegments,
+    meleeWeaponGroup,
+    heroAuraMesh,
+    contactShadow,
+  };
+}
+
+export function createLakshmanModel(textures: ProceduralTextures): CharacterRig {
+  const rig = createLordRamModel(textures);
+
+  // Custom royal golden-wheat complexion & emerald-silver Seshanaga armor accents for Lakshman
+  const fairSkinMat = new THREE.MeshPhysicalMaterial({
+    map: textures.royalSkin,
+    normalMap: textures.royalSkinNormal,
+    normalScale: new THREE.Vector2(0.15, 0.15),
+    color: 0xf4cfa8,
+    roughness: 0.42,
+    metalness: 0.02,
+    sheen: 0.34,
+    sheenColor: new THREE.Color(0x8ee8ff),
+  });
+  const silverGoldMat = new THREE.MeshPhysicalMaterial({
+    map: textures.armorMetal,
+    normalMap: textures.armorNormal,
+    color: 0xdbe6f0,
+    roughness: 0.24,
+    metalness: 0.95,
+    clearcoat: 0.42,
+  });
+  const emeraldSilkMat = new THREE.MeshPhysicalMaterial({
+    map: textures.silkGold,
+    normalMap: textures.silkNormal,
+    color: 0x0f6e5c,
+    roughness: 0.62,
+    metalness: 0.14,
+    sheen: 0.72,
+    sheenColor: new THREE.Color(0x66f5d5),
+  });
+
+  // Retint Ram's Shyam-Varna skin & red sash to Lakshman's golden complexion + emerald-azure silk
+  const origMats = new Set<THREE.Material>();
+  rig.root.traverse((obj) => {
+    const m = obj as THREE.Mesh;
+    if (!m.isMesh) return;
+    const mat = m.material as THREE.MeshPhysicalMaterial;
+    if (!mat) return;
+    origMats.add(mat);
+    if (mat.map === textures.royalSkin && mat.color.getHex() === 0xffffff) {
+      m.material = fairSkinMat;
+    } else if (mat.map === textures.silkGold && mat.color.getHex() === 0xb83524) {
+      m.material = emeraldSilkMat;
+    }
+  });
+
+  // Add Seshanaga Five-Hooded Silver-Gold Serpent Crest onto Lakshman's crown
+  if (rig.headGroup) {
+    for (let s = -2; s <= 2; s++) {
+      const hood = new THREE.Mesh(
+        new THREE.ConeGeometry(0.018, 0.075, 6),
+        silverGoldMat
+      );
+      hood.position.set(s * 0.024, 0.215 - Math.abs(s) * 0.012, 0.088 - Math.abs(s) * 0.01);
+      hood.rotation.x = 0.25;
+      hood.rotation.z = -s * 0.14;
+      rig.headGroup.add(hood);
+    }
+  }
+
+  // Add Gleaming Curved Celestial Khadga Sword in Lakshman's right hand
+  const sword = new THREE.Group();
+  const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.016, 0.16, 8), silverGoldMat);
+  sword.add(hilt);
+  const guard = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.018, 0.025), silverGoldMat);
+  guard.position.y = 0.08;
+  sword.add(guard);
+  const blade = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.72, 0.008), silverGoldMat);
+  blade.position.y = 0.45;
+  blade.castShadow = true;
+  sword.add(blade);
+  sword.position.set(-0.008, -0.28, 0.035);
+  sword.rotation.x = Math.PI * 0.46;
+  rig.rightElbow.add(sword);
+  rig.meleeWeaponGroup = sword;
+
+  rig.root.scale.setScalar(0.99);
+  return rig;
+}
+
+export function createBharatModel(textures: ProceduralTextures): CharacterRig {
+  const rig = createLordRamModel(textures);
+
+  const bronzeSkinMat = new THREE.MeshPhysicalMaterial({
+    map: textures.royalSkin,
+    normalMap: textures.royalSkinNormal,
+    normalScale: new THREE.Vector2(0.16, 0.16),
+    color: 0xd9b086,
+    roughness: 0.43,
+    metalness: 0.02,
+    sheen: 0.32,
+    sheenColor: new THREE.Color(0x9ff6c8),
+  });
+  const jadeMat = new THREE.MeshPhysicalMaterial({
+    map: textures.silkGold,
+    normalMap: textures.silkNormal,
+    color: 0x165e44,
+    roughness: 0.58,
+    metalness: 0.16,
+    sheen: 0.7,
+    sheenColor: new THREE.Color(0xffe082),
+  });
+  const burnishedGoldMat = new THREE.MeshPhysicalMaterial({
+    map: textures.armorMetal,
+    normalMap: textures.armorNormal,
+    color: 0xebb944,
+    roughness: 0.25,
+    metalness: 0.94,
+    clearcoat: 0.4,
+  });
+
+  rig.root.traverse((obj) => {
+    const m = obj as THREE.Mesh;
+    if (!m.isMesh) return;
+    const mat = m.material as THREE.MeshPhysicalMaterial;
+    if (!mat) return;
+    if (mat.map === textures.royalSkin && mat.color.getHex() === 0xffffff) {
+      m.material = bronzeSkinMat;
+    } else if (mat.map === textures.silkGold && mat.color.getHex() === 0xb83524) {
+      m.material = jadeMat;
+    }
+  });
+
+  // Royal Sculpted Breastplate & Shoulder Pauldrons for Bharat
+  const breastplate = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.168, 0.132, 0.34, 18),
+    burnishedGoldMat
+  );
+  breastplate.scale.set(1.04, 1.0, 0.72);
+  breastplate.position.set(0, 0.43, 0.008);
+  breastplate.castShadow = true;
+  rig.torso.add(breastplate);
+
+  // Dharma-Chakra Halberd in Right Hand + Embossed Sun Shield on Left Forearm
+  const halberd = new THREE.Group();
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 1.45, 10), burnishedGoldMat);
+  pole.position.y = 0.38;
+  halberd.add(pole);
+  const axeHead = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.26, 6), burnishedGoldMat);
+  axeHead.rotation.z = -Math.PI / 2;
+  axeHead.position.set(0.08, 0.98, 0);
+  halberd.add(axeHead);
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(0.036, 0.22, 6), burnishedGoldMat);
+  tip.position.y = 1.18;
+  halberd.add(tip);
+  halberd.position.set(-0.008, -0.28, 0.035);
+  halberd.rotation.x = Math.PI * 0.42;
+  rig.rightElbow.add(halberd);
+  rig.meleeWeaponGroup = halberd;
+
+  const shield = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.025, 20), burnishedGoldMat);
+  shield.rotation.z = Math.PI / 2;
+  shield.position.set(-0.06, -0.18, 0.02);
+  shield.castShadow = true;
+  rig.leftElbow.add(shield);
+
+  rig.root.scale.setScalar(1.04);
+  return rig;
+}
+
+export function createHeroModel(heroId: string, textures: ProceduralTextures): CharacterRig {
+  const upper = (heroId || 'RAM').toUpperCase();
+  if (upper === 'HANUMAN' || upper === 'ANGAD') {
+    return createHanumanModel(textures);
+  }
+  if (upper === 'LAKSHMAN' || upper === 'SHATRUGHNA') {
+    return createLakshmanModel(textures);
+  }
+  if (upper === 'BHARAT') {
+    return createBharatModel(textures);
+  }
+  return createLordRamModel(textures);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REFERENCE-TARGET HD WORLD LANDMARKS: COLOSSAL GOLDEN ARCHER STATUE & FLOATING
+// CELESTIAL SANCTUARY ISLANDS WITH CASCADING WATERFALLS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export function createColossalGoldenArcherMonument(
+  textures: ProceduralTextures
+): THREE.Group {
+  const root = new THREE.Group();
+
+  const sandstoneMat = new THREE.MeshStandardMaterial({
+    map: textures.sandstone,
+    normalMap: textures.sandstoneNormal,
+    color: 0xd8b27c,
+    roughness: 0.78,
+    metalness: 0.06,
+  });
+  const gildedBronzeMat = new THREE.MeshPhysicalMaterial({
+    map: textures.armorMetal,
+    normalMap: textures.armorNormal,
+    roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
+    color: 0xf4c450,
+    roughness: 0.28,
+    metalness: 0.88,
+    clearcoat: 0.25,
+  });
+
+  // Grand tiered carved sandstone colonnade plinth (16m base -> 9m tall)
+  const baseStep1 = new THREE.Mesh(new THREE.BoxGeometry(15.5, 2.2, 15.5), sandstoneMat);
+  baseStep1.position.y = 1.1;
+  baseStep1.castShadow = true;
+  baseStep1.receiveShadow = true;
+  root.add(baseStep1);
+
+  const baseStep2 = new THREE.Mesh(new THREE.BoxGeometry(12.2, 2.4, 12.2), sandstoneMat);
+  baseStep2.position.y = 3.4;
+  baseStep2.castShadow = true;
+  baseStep2.receiveShadow = true;
+  root.add(baseStep2);
+
+  // Carved perimeter pillars supporting the upper statue dais
+  for (let i = -1; i <= 1; i += 2) {
+    for (let j = -1; j <= 1; j += 2) {
+      const col = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.72, 4.6, 12), sandstoneMat);
+      col.position.set(i * 4.6, 6.8, j * 4.6);
+      col.castShadow = true;
+      root.add(col);
+    }
+  }
+
+  const statuePlinth = new THREE.Mesh(new THREE.CylinderGeometry(4.4, 5.2, 1.8, 16), sandstoneMat);
+  statuePlinth.position.y = 9.6;
+  statuePlinth.castShadow = true;
+  root.add(statuePlinth);
+
+  // Colossal 24-meter Gilded Warrior Archer Hero Figure aiming toward the horizon
+  const hero = createLordRamModel(textures);
+  hero.root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.material = gildedBronzeMat;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+  });
+  if (hero.contactShadow) hero.contactShadow.visible = false;
+  if (hero.bowGroup) hero.bowGroup.visible = true;
+  if (hero.backBowGroup) hero.backBowGroup.visible = false;
+  // Heroic drawn-bow stance
+  hero.leftArm.rotation.set(-1.32, 0, 0.14);
+  hero.leftElbow.rotation.x = -0.22;
+  hero.rightArm.rotation.set(-0.92, 0, -0.18);
+  hero.rightElbow.rotation.x = -1.28;
+  hero.leftLeg.rotation.set(-0.24, 0, -0.08);
+  hero.rightLeg.rotation.set(0.22, 0, 0.08);
+  hero.rightKnee.rotation.x = 0.22;
+
+  hero.root.position.set(0, 10.5, 0);
+  hero.root.scale.setScalar(11.5);
+  root.add(hero.root);
+
+  return root;
+}
+
+export function createFloatingCelestialIsland(
+  textures: ProceduralTextures,
+  scale = 1.0
+): { group: THREE.Group; waterfallUniforms: { uTime: { value: number } } } {
+  const group = new THREE.Group();
+
+  const cliffMat = new THREE.MeshStandardMaterial({
+    map: textures.rockCliff,
+    normalMap: textures.rockCliffNormal,
+    color: 0x69706a,
+    roughness: 0.88,
+    metalness: 0.06,
+  });
+  const mossCapMat = new THREE.MeshStandardMaterial({
+    map: textures.foliage,
+    color: 0x2f7036,
+    roughness: 0.78,
+  });
+  const goldMat = new THREE.MeshPhysicalMaterial({
+    map: textures.armorMetal,
+    color: 0xf4c44e,
+    roughness: 0.28,
+    metalness: 0.9,
+  });
+  const sandstoneMat = new THREE.MeshStandardMaterial({
+    map: textures.sandstone,
+    normalMap: textures.sandstoneNormal,
+    color: 0xe2bc84,
+    roughness: 0.72,
+  });
+
+  // Inverted faceted rock spire underside
+  const underside = new THREE.Mesh(new THREE.ConeGeometry(16 * scale, 28 * scale, 10), cliffMat);
+  underside.rotation.x = Math.PI;
+  underside.position.y = -14 * scale;
+  group.add(underside);
+
+  const subSpire1 = new THREE.Mesh(new THREE.ConeGeometry(7 * scale, 18 * scale, 8), cliffMat);
+  subSpire1.rotation.x = Math.PI;
+  subSpire1.position.set(8.5 * scale, -11 * scale, -4 * scale);
+  group.add(subSpire1);
+
+  const subSpire2 = new THREE.Mesh(new THREE.ConeGeometry(6 * scale, 15 * scale, 8), cliffMat);
+  subSpire2.rotation.x = Math.PI;
+  subSpire2.position.set(-7.5 * scale, -10 * scale, 5.5 * scale);
+  group.add(subSpire2);
+
+  // Verdant Top Meadow Crown
+  const topDisc = new THREE.Mesh(new THREE.CylinderGeometry(16.5 * scale, 14.8 * scale, 2.8 * scale, 14), mossCapMat);
+  topDisc.position.y = 0;
+  group.add(topDisc);
+
+  // Celestial Gilded Temple Citadel atop Floating Island
+  const templeBase = new THREE.Mesh(new THREE.BoxGeometry(12 * scale, 3.6 * scale, 12 * scale), sandstoneMat);
+  templeBase.position.y = 3.0 * scale;
+  group.add(templeBase);
+
+  const centralShikhara = new THREE.Mesh(new THREE.ConeGeometry(4.4 * scale, 12.5 * scale, 8), goldMat);
+  centralShikhara.position.y = 11.0 * scale;
+  group.add(centralShikhara);
+
+  const cornerOffsets = [
+    [-4.4, -4.4],
+    [4.4, -4.4],
+    [-4.4, 4.4],
+    [4.4, 4.4],
+  ];
+  cornerOffsets.forEach(([ox, oz]) => {
+    const tower = new THREE.Mesh(new THREE.CylinderGeometry(1.1 * scale, 1.3 * scale, 5.5 * scale, 8), sandstoneMat);
+    tower.position.set(ox * scale, 5.5 * scale, oz * scale);
+    group.add(tower);
+
+    const spire = new THREE.Mesh(new THREE.ConeGeometry(1.45 * scale, 3.4 * scale, 8), goldMat);
+    spire.position.set(ox * scale, 9.8 * scale, oz * scale);
+    group.add(spire);
+  });
+
+  // Animated Glowing Celestial Waterfall plunging from the island edge
+  const waterfallUniforms = { uTime: { value: 0 } };
+  const wfMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: waterfallUniforms.uTime,
+      tFoam: { value: textures.waterfallFoam },
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform sampler2D tFoam;
+      varying vec2 vUv;
+      void main() {
+        float streak = texture2D(tFoam, vec2(vUv.x * 2.0, vUv.y * 3.5 + uTime * 1.4)).r;
+        float edge = smoothstep(0.0, 0.2, vUv.x) * (1.0 - smoothstep(0.8, 1.0, vUv.x));
+        float botFade = smoothstep(0.0, 0.25, vUv.y);
+        vec3 col = mix(vec3(0.42, 0.80, 0.98), vec3(0.95, 0.99, 1.0), streak);
+        float a = edge * botFade * (0.45 + 0.45 * streak);
+        gl_FragColor = vec4(col, a);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+
+  const wfRibbon = new THREE.Mesh(new THREE.PlaneGeometry(4.2 * scale, 48 * scale), wfMat);
+  wfRibbon.position.set(0, -24 * scale, 13.8 * scale);
+  group.add(wfRibbon);
+
+  return { group, waterfallUniforms };
+}
+
 
