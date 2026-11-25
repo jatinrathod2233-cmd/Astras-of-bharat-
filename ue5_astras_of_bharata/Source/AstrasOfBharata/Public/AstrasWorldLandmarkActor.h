@@ -20,10 +20,10 @@ enum class EAstrasLandmarkKind : uint8
 
 /**
  * Modular Landmark Actor representing signature visual elements from the reference art:
- * colossal golden archer monument, tiered Indian palace spires, glowing fire braziers,
- * fluttering sun banners, and cascading mountain waterfalls.
+ * modular sandstone temples, gilded golden domes, single-layer waterfall plunge pool,
+ * Niagara waterfall mist/cascades, colossal archer monument, and platform-enforced poly/imposter budgets.
  */
-UCLASS()
+UCLASS(Blueprintable)
 class ASTRASOFBHARATA_API AAstrasWorldLandmarkActor : public AActor
 {
 	GENERATED_BODY()
@@ -31,15 +31,26 @@ class ASTRASOFBHARATA_API AAstrasWorldLandmarkActor : public AActor
 public:
 	AAstrasWorldLandmarkActor();
 
+	UFUNCTION(BlueprintCallable, Category = "Landmark|Pipeline")
+	void ApplyModularArchitecturePipeline(bool bIsBackgroundAsset);
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Landmark")
 	EAstrasLandmarkKind LandmarkKind = EAstrasLandmarkKind::SevenStoryCitadelSpire;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Landmark|Budget")
+	bool bTreatAsBackgroundProp = false;
+
 protected:
+	virtual void BeginPlay() override;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> BaseStructureMesh;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> OrnamentCrownMesh;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UStaticMeshComponent> SingleLayerWaterPoolMesh;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UNiagaraComponent> AmbientEffectVfx;

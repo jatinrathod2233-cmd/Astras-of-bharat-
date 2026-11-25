@@ -105,6 +105,9 @@ void UAstrasQualitySubsystem::ApplyTierConsoleVariables(EAstrasQualityTier Tier)
 		SetCVarFloat(TEXT("r.ScreenPercentage"), 75.0f);
 		SetCVarInt(TEXT("r.ShadowQuality"), 0);
 		SetCVarInt(TEXT("r.Shadow.CSM.MaxMobileCascades"), 1);
+		SetCVarInt(TEXT("r.Shadow.MaxResolution"), 512);
+		SetCVarFloat(TEXT("r.StaticMeshLODDistanceScale"), 1.75f);
+		SetCVarInt(TEXT("r.SkeletalMeshLODBias"), 2);
 		SetCVarInt(TEXT("r.BloomQuality"), 0);
 		SetCVarInt(TEXT("r.AmbientOcclusionLevels"), 0);
 		SetCVarFloat(TEXT("fx.Niagara.Scalability.TotalConcurrentEffectsScale"), 0.45f);
@@ -114,6 +117,9 @@ void UAstrasQualitySubsystem::ApplyTierConsoleVariables(EAstrasQualityTier Tier)
 		SetCVarFloat(TEXT("r.ScreenPercentage"), 85.0f);
 		SetCVarInt(TEXT("r.ShadowQuality"), 1);
 		SetCVarInt(TEXT("r.Shadow.CSM.MaxMobileCascades"), 2);
+		SetCVarInt(TEXT("r.Shadow.MaxResolution"), 1024);
+		SetCVarFloat(TEXT("r.StaticMeshLODDistanceScale"), 1.35f);
+		SetCVarInt(TEXT("r.SkeletalMeshLODBias"), 1);
 		SetCVarInt(TEXT("r.BloomQuality"), 1);
 		SetCVarInt(TEXT("r.AmbientOcclusionLevels"), 1);
 		SetCVarFloat(TEXT("fx.Niagara.Scalability.TotalConcurrentEffectsScale"), 0.75f);
@@ -123,6 +129,9 @@ void UAstrasQualitySubsystem::ApplyTierConsoleVariables(EAstrasQualityTier Tier)
 		SetCVarFloat(TEXT("r.ScreenPercentage"), 100.0f);
 		SetCVarInt(TEXT("r.ShadowQuality"), 2);
 		SetCVarInt(TEXT("r.Shadow.CSM.MaxMobileCascades"), 3);
+		SetCVarInt(TEXT("r.Shadow.MaxResolution"), 2048);
+		SetCVarFloat(TEXT("r.StaticMeshLODDistanceScale"), 1.0f);
+		SetCVarInt(TEXT("r.SkeletalMeshLODBias"), 0);
 		SetCVarInt(TEXT("r.BloomQuality"), 2);
 		SetCVarInt(TEXT("r.AmbientOcclusionLevels"), 2);
 		SetCVarFloat(TEXT("fx.Niagara.Scalability.TotalConcurrentEffectsScale"), 1.0f);

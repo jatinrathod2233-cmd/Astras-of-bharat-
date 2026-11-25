@@ -1,4 +1,5 @@
 #include "AstrasFloatingIslandActor.h"
+#include "AstrasRenderingDirector.h"
 #include "Components/StaticMeshComponent.h"
 #include "NiagaraComponent.h"
 
@@ -27,6 +28,11 @@ void AAstrasFloatingIslandActor::BeginPlay()
 	Super::BeginPlay();
 	BaseLocationCm = GetActorLocation();
 	PhaseOffset = FMath::FRandRange(0.0f, PI * 2.0f);
+
+	UAstrasMaterialPipelineLibrary::EnforceMeshPlatformBudget(CraggyRockBaseMesh, EAssetBudgetCategory::BackgroundCliffAndProp);
+	UAstrasMaterialPipelineLibrary::EnforceMeshPlatformBudget(TempleCitadelCrownMesh, EAssetBudgetCategory::ModularTempleAndDome);
+	UAstrasMaterialPipelineLibrary::ApplyPainterlySandstonePbr(TempleCitadelCrownMesh, 0, 0.35f);
+	UAstrasMaterialPipelineLibrary::ApplyGildedDomeGoldPbr(TempleCitadelCrownMesh, 1);
 }
 
 void AAstrasFloatingIslandActor::Tick(float DeltaSeconds)

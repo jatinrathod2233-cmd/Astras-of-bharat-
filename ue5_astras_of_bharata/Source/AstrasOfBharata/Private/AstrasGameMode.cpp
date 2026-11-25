@@ -5,7 +5,9 @@
 #include "AstrasPlayerCharacter.h"
 #include "AstrasPlayerController.h"
 #include "AstrasQualitySubsystem.h"
+#include "AstrasRenderingDirector.h"
 #include "HeroDeityDataAsset.h"
+#include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 
@@ -19,6 +21,15 @@ AAstrasGameMode::AAstrasGameMode()
 void AAstrasGameMode::BeginPlay()
 {
 	Super::BeginPlay();
+
+	if (UWorld* World = GetWorld())
+	{
+		TActorIterator<AAstrasRenderingDirector> DirIt(World);
+		if (!DirIt)
+		{
+			World->SpawnActor<AAstrasRenderingDirector>(AAstrasRenderingDirector::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator);
+		}
+	}
 
 	if (UGameInstance* GI = GetGameInstance())
 	{
