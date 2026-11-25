@@ -8,11 +8,20 @@ import {
   LanPlayerInfo,
   LanPlayerState,
   LanShotEvent,
+  LanVehicleActionAckMessage,
+  LanVehicleActionMessage,
   LanWireMessage,
   LanWorldSnapshot,
   sanitizeLanName,
   sanitizeRoomCode,
 } from '../shared/lanMultiplayer';
+
+export interface LanNetworkMetrics {
+  rttMs: number;
+  jitterMs: number;
+  clockOffsetMs: number;
+  oneWayLatencySec: number;
+}
 
 export type LanTransportKind = 'NATIVE_ANDROID_HOTSPOT' | 'LOCAL_WS';
 
@@ -74,6 +83,8 @@ export interface LanEngineHandlers {
     source: AstraId | 'STANDARD' | 'CHAKRA',
     shotId: string
   ) => void;
+  onVehicleAction?: (action: LanVehicleActionMessage) => void;
+  onVehicleActionAck?: (ack: LanVehicleActionAckMessage) => void;
   onPeerListChanged?: (activeIds: Set<string>) => void;
   onSessionClosed?: () => void;
 }
@@ -113,6 +124,10 @@ export class LanMultiplayerClient {
     port: typeof window !== 'undefined' && window.location.port ? Number(window.location.port) : 3000,
   };
   private pingMs: number | null = null;
+  private smoothedRttMs = 24;
+  private jitterMs = 6;
+  private clockOffsetMs = 0;
+  private hasClockSync = false;
   private error: string | null = null;
 
   constructor() {
@@ -422,6 +437,38 @@ export class LanMultiplayerClient {
     });
   }
 
+  public sendVehicleAction(
+    action: Omit<LanVehicleActionMessage, 'type' | 'playerId'>
+  ): void {
+    if (!this.active || !this.sessionStarted || !this.localPlayerId) return;
+    this.sendWire({
+      type: 'VEHICLE_ACTION',
+      ...action,
+      playerId: this.localPlayerId,
+    });
+  }
+
+  public sendVehicleActionAck(
+    ack: Omit<LanVehicleActionAckMessage, 'type'>
+  ): void {
+    if (!this.active || !this.isHost || !this.sessionStarted) return;
+    this.sendWire({
+      type: 'VEHICLE_ACTION_ACK',
+      ...ack,
+    });
+  }
+
+  public getNetworkMetrics(): LanNetworkMetrics {
+    const rttMs = this.pingMs !== null ? this.smoothedRttMs : 24;
+    const jitter = this.jitterMs;
+    return {
+      rttMs,
+      jitterMs: jitter,
+      clockOffsetMs: this.clockOffsetMs,
+      oneWayLatencySec: Math.min(0.18, Math.max(0, (rttMs * 0.5 + jitter * 0.5) * 0.001)),
+    };
+  }
+
   public getLocalPlayerId(): string {
     return this.localPlayerId;
   }
@@ -578,6 +625,9 @@ export class LanMultiplayerClient {
         this.sessionStarted = true;
         this.emit();
         this.engineHandlers.onMatchStarted?.();
+        if (this.active) {
+          this.sendWire({ type: 'PING', ts: Date.now() });
+        }
         return;
       }
       case 'PLAYER_STATE': {
@@ -607,8 +657,35 @@ export class LanMultiplayerClient {
         }
         return;
       }
+      case 'VEHICLE_ACTION': {
+        if (this.isHost) {
+          this.engineHandlers.onVehicleAction?.(msg);
+        }
+        return;
+      }
+      case 'VEHICLE_ACTION_ACK': {
+        this.engineHandlers.onVehicleActionAck?.(msg);
+        return;
+      }
       case 'PONG': {
-        this.pingMs = Math.max(1, Math.round(Date.now() - msg.ts));
+        const now = Date.now();
+        const rawRtt = Math.max(1, Math.min(800, now - msg.ts));
+        if (this.pingMs === null) {
+          this.smoothedRttMs = rawRtt;
+          this.jitterMs = Math.min(25, rawRtt * 0.25);
+        } else {
+          const delta = Math.abs(rawRtt - this.smoothedRttMs);
+          this.jitterMs = this.jitterMs * 0.8 + delta * 0.2;
+          this.smoothedRttMs = this.smoothedRttMs * 0.78 + rawRtt * 0.22;
+        }
+        if (typeof msg.serverTimeMs === 'number' && Number.isFinite(msg.serverTimeMs)) {
+          const sampleOffset = msg.serverTimeMs + rawRtt * 0.5 - now;
+          this.clockOffsetMs = this.hasClockSync
+            ? this.clockOffsetMs * 0.8 + sampleOffset * 0.2
+            : sampleOffset;
+          this.hasClockSync = true;
+        }
+        this.pingMs = Math.round(this.smoothedRttMs);
         this.emit();
         return;
       }
@@ -640,11 +717,13 @@ export class LanMultiplayerClient {
   private startPingLoop(): void {
     this.stopPingLoop();
     if (typeof window === 'undefined') return;
+    this.hasClockSync = false;
+    this.sendWire({ type: 'PING', ts: Date.now() });
     this.pingTimer = window.setInterval(() => {
       if (this.active) {
         this.sendWire({ type: 'PING', ts: Date.now() });
       }
-    }, 2500);
+    }, 1200);
   }
 
   private stopPingLoop(): void {

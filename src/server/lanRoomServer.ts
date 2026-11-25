@@ -304,7 +304,7 @@ export class LanRoomServer {
 
   private handleMessage(client: WsClient, msg: LanWireMessage): void {
     if (msg.type === 'PING') {
-      sendWsText(client, { type: 'PONG', ts: msg.ts });
+      sendWsText(client, { type: 'PONG', ts: msg.ts, serverTimeMs: Date.now() });
       return;
     }
 
@@ -499,6 +499,26 @@ export class LanRoomServer {
       const hostEntry = room.clients.get(room.hostId);
       if (hostEntry && hostEntry.ws.id !== client.id) {
         sendWsText(hostEntry.ws, msg);
+      }
+      return;
+    }
+
+    if (msg.type === 'VEHICLE_ACTION') {
+      const hostEntry = room.clients.get(room.hostId);
+      if (hostEntry) {
+        sendWsText(hostEntry.ws, {
+          ...msg,
+          playerId: client.id,
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'VEHICLE_ACTION_ACK') {
+      if (client.id !== room.hostId) return;
+      const target = room.clients.get(msg.targetPlayerId);
+      if (target) {
+        sendWsText(target.ws, msg);
       }
     }
   }

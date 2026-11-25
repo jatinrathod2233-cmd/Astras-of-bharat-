@@ -32,6 +32,43 @@ export interface LanPlayerInfo {
   slotIndex: number;
 }
 
+export type LanVehicleKind = 'RATHA' | 'HORSE' | 'ELEPHANT';
+export type LanVehicleSeatIndex = 0 | 1;
+export type LanVehicleActionKind = 'BOARD' | 'DISMOUNT' | 'SWITCH_SEAT';
+
+export interface LanDriverVehicleReport {
+  vehicleId: string;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+  speed: number;
+  vx: number;
+  vz: number;
+  gaitPhase: number;
+  seq: number;
+  epoch: number;
+}
+
+export interface LanVehicleSyncState {
+  id: string;
+  kind: LanVehicleKind;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+  speed: number;
+  vx: number;
+  vz: number;
+  gaitPhase: number;
+  driverId: string | null;
+  passengerId: string | null;
+  epoch: number;
+  seq: number;
+}
+
 export interface LanPlayerState {
   id: string;
   name: string;
@@ -48,6 +85,12 @@ export interface LanPlayerState {
   stealth: boolean;
   sprint: boolean;
   mountKind: MountKind;
+  mountedVehicleId: string | null;
+  seatIndex: LanVehicleSeatIndex | null;
+  vx?: number;
+  vz?: number;
+  sentAtMs?: number;
+  driverVehicle?: LanDriverVehicleReport;
   hp: number;
   maxHp: number;
   selectedAstra: AstraId | null;
@@ -95,13 +138,41 @@ export interface LanShotEvent {
 }
 
 export interface LanWorldSnapshot {
+  snapshotSeq: number;
   serverTimeMs: number;
   dayTime: number;
   missionIdx: number;
   missionProgress: number;
   completedMissions: number;
   players: LanPlayerState[];
+  vehicles: LanVehicleSyncState[];
   enemies: LanEnemySyncState[];
+}
+
+export interface LanVehicleActionMessage {
+  type: 'VEHICLE_ACTION';
+  actionId: string;
+  playerId: string;
+  vehicleId: string;
+  action: LanVehicleActionKind;
+  preferredSeat?: LanVehicleSeatIndex;
+  seq: number;
+  clientTsMs: number;
+}
+
+export interface LanVehicleActionAckMessage {
+  type: 'VEHICLE_ACTION_ACK';
+  actionId: string;
+  targetPlayerId: string;
+  vehicleId: string;
+  action: LanVehicleActionKind;
+  accepted: boolean;
+  reason?: 'FULL' | 'NOT_FOUND' | 'NOT_OCCUPANT' | 'SEAT_TAKEN' | 'INVALID';
+  assignedSeat: LanVehicleSeatIndex | null;
+  driverId: string | null;
+  passengerId: string | null;
+  epoch: number;
+  serverTimeMs: number;
 }
 
 export type LanWireMessage =
@@ -170,6 +241,8 @@ export type LanWireMessage =
       source: AstraId | 'STANDARD' | 'CHAKRA';
       shotId: string;
     }
+  | LanVehicleActionMessage
+  | LanVehicleActionAckMessage
   | {
       type: 'PING';
       ts: number;
@@ -177,6 +250,7 @@ export type LanWireMessage =
   | {
       type: 'PONG';
       ts: number;
+      serverTimeMs?: number;
     }
   | {
       type: 'LEAVE';

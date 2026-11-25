@@ -39,6 +39,11 @@ const INITIAL_HUD: WorldHudSnapshot = {
   nearChariot: false,
   mountKind: 'NONE',
   nearMountLabel: null,
+  nearMountFull: false,
+  mountedSeatIndex: null,
+  mountedPartnerName: null,
+  mountedOccupantCount: 0,
+  canSwitchSeat: false,
   nearThrone: false,
   onThrone: false,
   chariotSpeedKmh: 0,
@@ -193,7 +198,6 @@ export default function App() {
   const joyMoveRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const keysDownRef = useRef<Record<string, boolean>>({});
   const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
-  const pinchDistRef = useRef<number | null>(null);
   const lookPointerRef = useRef<{
     id: number | null;
     lastX: number;
@@ -221,7 +225,6 @@ export default function App() {
     joyMoveRef.current = { x: 0, y: 0 };
     lookPointerRef.current = { id: null, lastX: 0, lastY: 0 };
     activePointersRef.current.clear();
-    pinchDistRef.current = null;
     desktopWheelOpenRef.current = false;
     desktopHoveredRef.current = null;
     setDesktopWheelOpen(false);
@@ -446,6 +449,8 @@ export default function App() {
         }
       } else if (e.code === 'KeyE') {
         engine.input.interactPressed = true;
+      } else if (e.code === 'KeyG' && !e.repeat) {
+        engine.input.switchSeatPressed = true;
       } else if (e.code === 'KeyV') {
         engine.input.autoDriveTogglePressed = true;
       } else if (e.code === 'KeyC') {
@@ -499,7 +504,7 @@ export default function App() {
     };
   }, [syncCombinedMovement, touchSprint]);
 
-  // Camera drag orbit & two-finger pinch zoom on the 3D canvas (zero-allocation pointer handling)
+  // First-person look drag on the 3D canvas (zero-allocation pointer handling; zoom/perspective switching disabled)
   const handleCanvasPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (modeRef.current !== 'PLAYING') return;
     activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -511,12 +516,7 @@ export default function App() {
         lastX: e.clientX,
         lastY: e.clientY,
       };
-      pinchDistRef.current = null;
-    } else if (activePointersRef.current.size === 2) {
-      const it = activePointersRef.current.values();
-      const p0 = it.next().value!;
-      const p1 = it.next().value!;
-      pinchDistRef.current = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+    } else {
       lookPointerRef.current.id = null;
     }
   }, []);
@@ -527,20 +527,7 @@ export default function App() {
     ptr.x = e.clientX;
     ptr.y = e.clientY;
 
-    if (activePointersRef.current.size === 2 && engineRef.current) {
-      const it = activePointersRef.current.values();
-      const p0 = it.next().value!;
-      const p1 = it.next().value!;
-      const dist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
-      if (pinchDistRef.current !== null) {
-        const dPinch = dist - pinchDistRef.current;
-        engineRef.current.input.zoomDelta -= dPinch * 0.035;
-      }
-      pinchDistRef.current = dist;
-      return;
-    }
-
-    if (lookPointerRef.current.id !== e.pointerId) return;
+    if (activePointersRef.current.size !== 1 || lookPointerRef.current.id !== e.pointerId) return;
     const dx = e.clientX - lookPointerRef.current.lastX;
     const dy = e.clientY - lookPointerRef.current.lastY;
     lookPointerRef.current.lastX = e.clientX;
@@ -556,20 +543,12 @@ export default function App() {
     if (lookPointerRef.current.id === e.pointerId) {
       lookPointerRef.current.id = null;
     }
-    if (activePointersRef.current.size < 2) {
-      pinchDistRef.current = null;
-    }
     if (activePointersRef.current.size === 1) {
       const first = activePointersRef.current.entries().next().value;
       if (first) {
         lookPointerRef.current = { id: first[0], lastX: first[1].x, lastY: first[1].y };
       }
     }
-  }, []);
-
-  const handleCanvasWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
-    if (modeRef.current !== 'PLAYING' || !engineRef.current) return;
-    engineRef.current.input.zoomDelta += e.deltaY * 0.01;
   }, []);
 
   const handleJoystickMove = useCallback(
@@ -593,18 +572,6 @@ export default function App() {
 
   const handleToggleMute = useCallback(() => {
     setMuted(soundEngine.toggleMute());
-  }, []);
-
-  const handleZoomIn = useCallback(() => {
-    if (modeRef.current === 'PLAYING' && engineRef.current) {
-      engineRef.current.input.zoomDelta -= 1.4;
-    }
-  }, []);
-
-  const handleZoomOut = useCallback(() => {
-    if (modeRef.current === 'PLAYING' && engineRef.current) {
-      engineRef.current.input.zoomDelta += 1.4;
-    }
   }, []);
 
   const handlePause = useCallback(() => engineRef.current?.setMode('PAUSED'), []);
@@ -634,6 +601,9 @@ export default function App() {
   }, []);
   const handleInteract = useCallback(() => {
     if (engineRef.current) engineRef.current.input.interactPressed = true;
+  }, []);
+  const handleSwitchSeat = useCallback(() => {
+    if (engineRef.current) engineRef.current.input.switchSeatPressed = true;
   }, []);
   const handleToggleStealth = useCallback(() => {
     if (engineRef.current) engineRef.current.input.stealthTogglePressed = true;
@@ -694,7 +664,6 @@ export default function App() {
         onPointerMove={handleCanvasPointerMove}
         onPointerUp={handleCanvasPointerUp}
         onPointerCancel={handleCanvasPointerUp}
-        onWheel={handleCanvasWheel}
         style={{ touchAction: 'none' }}
         className="fixed inset-0 z-0 h-full w-full"
       />
@@ -713,8 +682,6 @@ export default function App() {
           controlLayout={controlLayout}
           viewport={viewport}
           onToggleMute={handleToggleMute}
-          onZoomIn={handleZoomIn}
-          onZoomOut={handleZoomOut}
           onPause={handlePause}
           onJoystickMove={handleJoystickMove}
           onFireStart={handleFireStart}
@@ -725,6 +692,7 @@ export default function App() {
           onJump={handleJump}
           onToggleSprint={handleToggleSprint}
           onInteract={handleInteract}
+          onSwitchSeat={handleSwitchSeat}
           onToggleStealth={handleToggleStealth}
           onToggleAutoDrive={handleToggleAutoDrive}
         />

@@ -111,6 +111,11 @@ export interface WorldHudSnapshot {
   nearChariot: boolean;
   mountKind: MountKind;
   nearMountLabel: string | null;
+  nearMountFull?: boolean;
+  mountedSeatIndex: 0 | 1 | null;
+  mountedPartnerName: string | null;
+  mountedOccupantCount: number;
+  canSwitchSeat: boolean;
   nearThrone: boolean;
   onThrone: boolean;
   autoDriveActive: boolean;
@@ -172,7 +177,6 @@ export interface InputState {
   moveY: number; // -1..1 (right joystick or W/S; +1 = forward)
   cameraDeltaX: number;
   cameraDeltaY: number;
-  zoomDelta: number;
   sprint: boolean;
   jumpPressed: boolean;
   fireHeld: boolean;
@@ -180,6 +184,7 @@ export interface InputState {
   shootAstraPressed: boolean; // Non-cancellable Divyastra bow shoot trigger
   selectedAstra: AstraId | null;
   interactPressed: boolean;
+  switchSeatPressed: boolean;
   stealthTogglePressed: boolean;
   autoDriveTogglePressed: boolean;
 }

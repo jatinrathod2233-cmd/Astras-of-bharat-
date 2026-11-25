@@ -12,8 +12,6 @@ import {
   VolumeX,
   Waves,
   Wifi,
-  ZoomIn,
-  ZoomOut,
 } from 'lucide-react';
 import { ASTRA_CONFIG } from '../engine/astraConfig';
 import type { LanSessionSnapshot } from '../engine/LanMultiplayerClient';
@@ -37,8 +35,6 @@ interface GameHUDProps {
   controlLayout: ControlLayoutMap;
   viewport: { w: number; h: number };
   onToggleMute: () => void;
-  onZoomIn: () => void;
-  onZoomOut: () => void;
   onPause: () => void;
   onJoystickMove: (x: number, y: number) => void;
   onFireStart: () => void;
@@ -49,6 +45,7 @@ interface GameHUDProps {
   onJump: () => void;
   onToggleSprint: () => void;
   onInteract: () => void;
+  onSwitchSeat: () => void;
   onToggleStealth: () => void;
   onToggleAutoDrive: () => void;
 }
@@ -67,8 +64,6 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   controlLayout,
   viewport,
   onToggleMute,
-  onZoomIn,
-  onZoomOut,
   onPause,
   onJoystickMove,
   onFireStart,
@@ -79,6 +74,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   onJump,
   onToggleSprint,
   onInteract,
+  onSwitchSeat,
   onToggleStealth,
   onToggleAutoDrive,
 }) => {
@@ -421,6 +417,30 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
                 style={{ width: `${chariotSpeedPct}%` }}
               />
             </div>
+            {lanSession?.active && hud.mountedSeatIndex !== null && (
+              <div className="pt-0.5 border-t border-amber-200/15 space-y-0.5">
+                <div className="flex items-center justify-between gap-1 text-[8.5px] font-medium text-emerald-200">
+                  <span>
+                    {hud.mountedSeatIndex === 0 ? 'Driver' : 'Passenger'} ·{' '}
+                    {hud.mountedOccupantCount}/2
+                  </span>
+                  {hud.canSwitchSeat && (
+                    <button
+                      type="button"
+                      onClick={onSwitchSeat}
+                      className="rounded border border-amber-300/45 bg-amber-500/20 px-1 py-0.5 text-[8px] font-semibold text-amber-200 hover:bg-amber-500/35 cursor-pointer"
+                    >
+                      Swap (G)
+                    </button>
+                  )}
+                </div>
+                {hud.mountedPartnerName && (
+                  <div className="truncate text-[8px] text-[#C9C1B2]">
+                    With {hud.mountedPartnerName}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -447,26 +467,8 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
           </div>
         )}
 
-        {/* Compact Icon-Only Utility & Camera Zoom Buttons */}
+        {/* Compact Icon-Only Utility Buttons */}
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={onZoomIn}
-            aria-label="Zoom camera in"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/55 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer"
-          >
-            <ZoomIn className="h-3.5 w-3.5 text-amber-300" aria-hidden="true" />
-          </button>
-
-          <button
-            type="button"
-            onClick={onZoomOut}
-            aria-label="Zoom camera out"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/55 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer"
-          >
-            <ZoomOut className="h-3.5 w-3.5 text-amber-300" aria-hidden="true" />
-          </button>
-
           <button
             type="button"
             onClick={onToggleMute}
@@ -536,6 +538,10 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         chakraMaxCooldown={hud.chakraMaxCooldown}
         mountKind={hud.mountKind}
         nearMountLabel={hud.nearMountLabel}
+        nearMountFull={Boolean(hud.nearMountFull)}
+        inMultiplayer={Boolean(lanSession?.active)}
+        mountedSeatIndex={hud.mountedSeatIndex ?? null}
+        canSwitchSeat={Boolean(hud.canSwitchSeat)}
         nearThrone={hud.nearThrone}
         onThrone={hud.onThrone}
         sprintActive={sprintActive}
@@ -558,6 +564,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         onJump={onJump}
         onToggleSprint={onToggleSprint}
         onInteract={onInteract}
+        onSwitchSeat={onSwitchSeat}
         onToggleStealth={onToggleStealth}
         onToggleAutoDrive={onToggleAutoDrive}
       />

@@ -14,7 +14,19 @@ import { PROJECTILE_PHYSICS_REGISTRY } from './src/shared/projectilePhysics.ts';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = Number(process.env.PORT) || 3000;
+function resolveServerPort(): number {
+  const portFlagIdx = process.argv.indexOf('--port');
+  if (portFlagIdx !== -1 && process.argv[portFlagIdx + 1]) {
+    const parsed = Number(process.argv[portFlagIdx + 1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  if (process.env.NODE_ENV !== 'production') {
+    return 3000;
+  }
+  return Number(process.env.PORT) || 3000;
+}
+
+const PORT = resolveServerPort();
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{8,64}$/;
 
 export function createApp(lanServer = new LanRoomServer()): express.Express {

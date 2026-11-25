@@ -32,6 +32,10 @@ interface TouchActionPadProps {
   chakraMaxCooldown: number;
   mountKind: MountKind;
   nearMountLabel: string | null;
+  nearMountFull: boolean;
+  inMultiplayer: boolean;
+  mountedSeatIndex: 0 | 1 | null;
+  canSwitchSeat: boolean;
   nearThrone: boolean;
   onThrone: boolean;
   sprintActive: boolean;
@@ -54,6 +58,7 @@ interface TouchActionPadProps {
   onJump: () => void;
   onToggleSprint: () => void;
   onInteract: () => void;
+  onSwitchSeat: () => void;
   onToggleStealth: () => void;
   onToggleAutoDrive: () => void;
 }
@@ -64,6 +69,10 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
     chakraMaxCooldown,
     mountKind,
     nearMountLabel,
+    nearMountFull,
+    inMultiplayer,
+    mountedSeatIndex,
+    canSwitchSeat,
     nearThrone,
     onThrone,
     sprintActive,
@@ -86,6 +95,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
     onJump,
     onToggleSprint,
     onInteract,
+    onSwitchSeat,
     onToggleStealth,
     onToggleAutoDrive,
   }) => {
@@ -240,12 +250,18 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
                   e.stopPropagation();
                   onInteract();
                 }}
-                className="flex h-full w-full items-center justify-center gap-1 rounded-md border border-amber-300/80 bg-[#D99B26]/85 px-2 text-[9.5px] font-semibold text-[#101319] active:scale-95 transition-transform whitespace-nowrap cursor-pointer"
+                className={`flex h-full w-full items-center justify-center gap-1 rounded-md border px-2 text-[9.5px] font-semibold active:scale-95 transition-transform whitespace-nowrap cursor-pointer ${
+                  !isMounted && nearMountFull
+                    ? 'border-rose-400/70 bg-[#2A1015]/85 text-rose-200'
+                    : 'border-amber-300/80 bg-[#D99B26]/85 text-[#101319]'
+                }`}
               >
                 <Navigation className="h-3 w-3 shrink-0" aria-hidden="true" />
                 <span className="truncate">
                   {isMounted
                     ? `Exit ${mountedName} (E)`
+                    : nearMountFull
+                    ? `${nearMountLabel} Full (2/2)`
                     : `Mount ${nearMountLabel} (E)`}
                 </span>
               </button>
@@ -253,29 +269,49 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
           </div>
         )}
 
-        {/* Paved-Path Auto-Drive Toggle when mounted */}
+        {/* Paved-Path Auto-Drive (Driver) or Switch Seat (Passenger in LAN Multiplayer) */}
         {isMounted && (
           <div
             style={getWrapperStyle('AUTO_DRIVE')}
             className="fixed z-20 select-none pointer-events-auto"
           >
-            <button
-              type="button"
-              onPointerDown={(e) => {
-                e.stopPropagation();
-                onToggleAutoDrive();
-              }}
-              className={`flex h-full w-full items-center justify-center gap-1 rounded-md border px-2 text-[9.5px] font-semibold active:scale-95 transition-colors whitespace-nowrap cursor-pointer ${
-                autoDriveActive
-                  ? 'border-emerald-300/85 bg-emerald-600/75 text-[#F7F1E3]'
-                  : 'border-amber-200/35 bg-[#12161F]/70 text-[#EFE9DC]'
-              }`}
-            >
-              <Compass className="h-3 w-3 text-amber-300 shrink-0" aria-hidden="true" />
-              <span className="truncate">
-                {autoDriveActive ? 'Auto-Drive On (V)' : 'Auto-Drive (V)'}
-              </span>
-            </button>
+            {inMultiplayer && mountedSeatIndex === 1 ? (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onSwitchSeat();
+                }}
+                className={`flex h-full w-full items-center justify-center gap-1 rounded-md border px-2 text-[9.5px] font-semibold active:scale-95 transition-colors whitespace-nowrap cursor-pointer ${
+                  canSwitchSeat
+                    ? 'border-amber-300/75 bg-[#D99B26]/85 text-[#101319]'
+                    : 'border-amber-200/25 bg-[#12161F]/70 text-[#C9C1B2]'
+                }`}
+              >
+                <Compass className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <span className="truncate">
+                  {canSwitchSeat ? 'Take Reins (G)' : 'Passenger (2/2)'}
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onToggleAutoDrive();
+                }}
+                className={`flex h-full w-full items-center justify-center gap-1 rounded-md border px-2 text-[9.5px] font-semibold active:scale-95 transition-colors whitespace-nowrap cursor-pointer ${
+                  autoDriveActive
+                    ? 'border-emerald-300/85 bg-emerald-600/75 text-[#F7F1E3]'
+                    : 'border-amber-200/35 bg-[#12161F]/70 text-[#EFE9DC]'
+                }`}
+              >
+                <Compass className="h-3 w-3 text-amber-300 shrink-0" aria-hidden="true" />
+                <span className="truncate">
+                  {autoDriveActive ? 'Auto-Drive On (V)' : 'Auto-Drive (V)'}
+                </span>
+              </button>
+            )}
           </div>
         )}
 

@@ -48,9 +48,16 @@ import {
 import {
   getHeroPreset,
   LAN_SYNC_INTERVAL_MS,
+  LanDriverVehicleReport,
   LanEnemySyncState,
   LanPlayerState,
   LanShotEvent,
+  LanVehicleActionAckMessage,
+  LanVehicleActionKind,
+  LanVehicleActionMessage,
+  LanVehicleKind,
+  LanVehicleSeatIndex,
+  LanVehicleSyncState,
   LanWorldSnapshot,
 } from '../shared/lanMultiplayer';
 import { LanMultiplayerClient } from './LanMultiplayerClient';
@@ -225,8 +232,25 @@ const _camTarget = new THREE.Vector3();
 const _camDesired = new THREE.Vector3();
 const _sunDir = new THREE.Vector3();
 const _moonDir = new THREE.Vector3();
-const _camClipResult = { x: 0, y: 0, z: 0 };
 const _dummy = new THREE.Object3D();
+
+// Strict first-person near clipping plane & anatomical collision solver scratches (Zero GC)
+const FP_CAMERA_NEAR = 0.06;
+const FP_HEAD_NECK_RADIUS = 0.22;
+const _fpFwd = new THREE.Vector3();
+const _fpRight = new THREE.Vector3();
+const _fpUp = new THREE.Vector3();
+const _fpPushBias = new THREE.Vector3();
+const _fpPrimA = new THREE.Vector3();
+const _fpPrimB = new THREE.Vector3();
+const _fpClosest = new THREE.Vector3();
+const _fpDelta = new THREE.Vector3();
+const _fpHeadWorld = new THREE.Vector3();
+const _fpArmL0 = new THREE.Vector3();
+const _fpArmL1 = new THREE.Vector3();
+const _fpArmR0 = new THREE.Vector3();
+const _fpArmR1 = new THREE.Vector3();
+const _fpSpineTop = new THREE.Vector3();
 const _colMist = new THREE.Color(0xc8c2b9);
 const _colSunset = new THREE.Color(0xc96c42);
 const _colNightMist = new THREE.Color(0x040813);
@@ -289,10 +313,78 @@ const _chariotSpheresB = [
   { x: 0, z: 0, r: 0.9 },
 ];
 const _nearestMountOut: {
+  id: string;
   kind: 'RATHA' | 'HORSE' | 'ELEPHANT';
   index: number;
   label: string;
-} = { kind: 'RATHA', index: 0, label: '' };
+  occupiedCount: number;
+  driverId: string | null;
+  passengerId: string | null;
+  isFull: boolean;
+} = {
+  id: '',
+  kind: 'RATHA',
+  index: 0,
+  label: '',
+  occupiedCount: 0,
+  driverId: null,
+  passengerId: null,
+  isFull: false,
+};
+
+function getVehicleSeatLocalOffset(
+  kind: LanVehicleKind,
+  seatIndex: LanVehicleSeatIndex,
+  seatHeightOverride?: number
+): { x: number; y: number; z: number } {
+  if (kind === 'RATHA') {
+    if (seatIndex === 0) {
+      return { x: 0, y: 0.62, z: -0.72 };
+    }
+    // Passenger Seat 1: archer standing cleanly on front-right teak deck inside the golden railing
+    return { x: 0.5, y: 1.12, z: -0.12 };
+  }
+  if (kind === 'ELEPHANT') {
+    const y = seatHeightOverride ?? 2.79;
+    return seatIndex === 0
+      ? { x: 0, y, z: 0.18 }
+      : { x: 0, y, z: -0.34 };
+  }
+  // HORSE (Ashva): Seat 0 saddle center, Seat 1 tandem behind cantle on croup pad
+  const y = seatHeightOverride ?? 0.88;
+  return seatIndex === 0
+    ? { x: 0, y, z: -0.02 }
+    : { x: 0, y, z: -0.48 };
+}
+
+function computeVehicleSeatWorldPosition(
+  vx: number,
+  vy: number,
+  vz: number,
+  yaw: number,
+  pitch: number,
+  kind: LanVehicleKind,
+  seatIndex: LanVehicleSeatIndex,
+  out: { x: number; y: number; z: number },
+  seatHeightOverride?: number
+): void {
+  const local = getVehicleSeatLocalOffset(kind, seatIndex, seatHeightOverride);
+  const sinY = Math.sin(yaw);
+  const cosY = Math.cos(yaw);
+  if (kind === 'RATHA' && pitch !== 0) {
+    const sinP = Math.sin(pitch);
+    const cosP = Math.cos(pitch);
+    const tiltedZ = -local.y * sinP + local.z * cosP;
+    const tiltedY = local.y * cosP + local.z * sinP;
+    out.x = vx + cosY * local.x + sinY * tiltedZ;
+    out.z = vz - sinY * local.x + cosY * tiltedZ;
+    out.y = vy + tiltedY;
+    return;
+  }
+  out.x = vx + cosY * local.x + sinY * local.z;
+  out.z = vz - sinY * local.x + cosY * local.z;
+  out.y = vy + local.y;
+}
 const _topLampIndices = new Int32Array(8);
 const _topLampDistSq = new Float64Array(8);
 const _curseOffsets = [-0.24, 0, 0.24];
@@ -505,8 +597,25 @@ interface ChariotEntity {
   yaw: number;
   pitch: number;
   speed: number;
+  vx: number;
+  vz: number;
   gaitPhase: number;
   steedStates: QuadrupedAnimState[];
+  driverId: string | null;
+  passengerId: string | null;
+  occupancyEpoch: number;
+  netSeq: number;
+  driverSeq: number;
+  hasRemoteSync: boolean;
+  syncTargetX: number;
+  syncTargetY: number;
+  syncTargetZ: number;
+  syncTargetYaw: number;
+  syncTargetPitch: number;
+  syncTargetSpeed: number;
+  syncTargetVx: number;
+  syncTargetVz: number;
+  syncTargetGaitPhase: number;
 }
 
 interface EnemyEntity {
@@ -574,6 +683,8 @@ interface RemotePlayerEntity {
   targetZ: number;
   yaw: number;
   targetYaw: number;
+  vx: number;
+  vz: number;
   horizSpeed: number;
   grounded: boolean;
   walkPhase: number;
@@ -581,8 +692,11 @@ interface RemotePlayerEntity {
   stealth: boolean;
   sprint: boolean;
   mountKind: MountKind;
+  mountedVehicleId: string | null;
+  seatIndex: LanVehicleSeatIndex | null;
   hp: number;
   maxHp: number;
+  lastSeq: number;
   lastUpdateMs: number;
 }
 
@@ -601,8 +715,24 @@ interface AnimalMountEntity {
   z: number;
   yaw: number;
   speed: number;
+  vx: number;
+  vz: number;
   gaitPhase: number;
   animState: QuadrupedAnimState;
+  driverId: string | null;
+  passengerId: string | null;
+  occupancyEpoch: number;
+  netSeq: number;
+  driverSeq: number;
+  hasRemoteSync: boolean;
+  syncTargetX: number;
+  syncTargetY: number;
+  syncTargetZ: number;
+  syncTargetYaw: number;
+  syncTargetSpeed: number;
+  syncTargetVx: number;
+  syncTargetVz: number;
+  syncTargetGaitPhase: number;
 }
 
 interface CitizenEntity {
@@ -788,7 +918,7 @@ export class RamayanaWorldEngine {
   private blasts: BlastEffect[] = [];
   private colliders: BoxCollider[] = [];
   private circleColliders: CircleCollider[] = [];
-  private colliderGrid!: StaticColliderSpatialGrid;
+  private colliderGrid: StaticColliderSpatialGrid | null = null;
   private maxAnisotropy = 1;
   private simFrameCounter = 0;
   private beaconGroup: THREE.Group | null = null;
@@ -896,6 +1026,7 @@ export class RamayanaWorldEngine {
   private readonly chakraMaxCooldown = 10.0;
   private mountedChariotIndex: number | null = null;
   private mountedAnimalIndex: number | null = null;
+  private mountedSeatIndex: LanVehicleSeatIndex | null = null;
   private composer: EffectComposer | null = null;
   private composerRenderTarget: THREE.WebGLRenderTarget | null = null;
   private underwaterPass: ShaderPass | null = null;
@@ -948,15 +1079,14 @@ export class RamayanaWorldEngine {
   private ramLandingImpact = 0;
   private ramPose: CharacterPoseState = createDefaultPoseState(0.93);
 
-  // Camera state (Free 360 horizontal + unrestricted vertical orbit + zoom distance)
+  // Strict First-Person Camera State (Locked to player's eyes; no perspective switching or zoom distance)
   private camYaw = 0;
-  private camPitch = 0.34;
-  private camDistanceFoot = 7.0;
-  private camDistanceChariot = 10.6;
+  private camPitch = 0.02;
   private cameraManualHold = 0;
   private camChariotLockTimer = 0;
-  private camSmoothPos = new THREE.Vector3(0, 6, 22);
-  private camSmoothLook = new THREE.Vector3(0, 1.8, 12);
+  private camSmoothPos = new THREE.Vector3(0, 1.72, 14);
+  private camSmoothLook = new THREE.Vector3(0, 1.72, 2);
+  private swimCamTorsoPitch = 0.25;
 
   // Mission & Divine Astras Quest state
   private missionIdx = 0;
@@ -978,6 +1108,24 @@ export class RamayanaWorldEngine {
   private remotePlayers = new Map<string, RemotePlayerEntity>();
   private lanSyncAccum = 0;
   private lanSnapSeq = 0;
+  private lanWorldSnapshotSeq = 0;
+  private lastAppliedWorldSnapshotSeq = 0;
+  private vehicleActionSeq = 0;
+  private pendingVehicleAction: {
+    actionId: string;
+    vehicleId: string;
+    action: LanVehicleActionKind;
+    preferredSeat?: LanVehicleSeatIndex;
+    seq: number;
+    sentCount: number;
+    nextRetryAtMs: number;
+    startedAtMs: number;
+  } | null = null;
+  private recentHostActionAcks = new Map<string, LanVehicleActionAckMessage>();
+  private mountNoticeText: string | null = null;
+  private mountNoticeExpiresMs = 0;
+  private readonly _seatWorldScratch = { x: 0, y: 0, z: 0 };
+  private readonly _coRiderHeadScratch = new THREE.Vector3();
   private lanLocalPlayerName = 'Lord Ram';
   private lanLocalHeroId = 'RAM';
 
@@ -1031,7 +1179,6 @@ export class RamayanaWorldEngine {
     moveY: 0,
     cameraDeltaX: 0,
     cameraDeltaY: 0,
-    zoomDelta: 0,
     sprint: false,
     jumpPressed: false,
     fireHeld: false,
@@ -1039,6 +1186,7 @@ export class RamayanaWorldEngine {
     shootAstraPressed: false,
     selectedAstra: null,
     interactPressed: false,
+    switchSeatPressed: false,
     stealthTogglePressed: false,
     autoDriveTogglePressed: false,
   };
@@ -1069,10 +1217,10 @@ export class RamayanaWorldEngine {
     this.scene.fog = new THREE.Fog(0xc8c2b9, 44, 340 * initProfile.fogFarScale);
 
     this.camera = new THREE.PerspectiveCamera(
-      58,
+      62,
       (container.clientWidth || window.innerWidth) /
         (container.clientHeight || window.innerHeight),
-      0.5,
+      FP_CAMERA_NEAR,
       initProfile.cameraFar
     );
 
@@ -1632,7 +1780,11 @@ export class RamayanaWorldEngine {
     this.renderer.shadowMap.needsUpdate = shadowsActive;
     this.keyLight.castShadow = shadowsActive;
 
-    if (Math.abs(this.camera.far - profile.cameraFar) > 1) {
+    if (
+      Math.abs(this.camera.far - profile.cameraFar) > 1 ||
+      Math.abs(this.camera.near - FP_CAMERA_NEAR) > 0.001
+    ) {
+      this.camera.near = FP_CAMERA_NEAR;
       this.camera.far = profile.cameraFar;
       this.camera.updateProjectionMatrix();
     }
@@ -1837,6 +1989,10 @@ export class RamayanaWorldEngine {
       if (!(await reportStage(87, 'Indexing spatial colliders & hero rig'))) return;
       this.colliderGrid = new StaticColliderSpatialGrid(this.colliders, this.circleColliders);
       this.ramRig = createLordRamModel(this.textures);
+      // Strict First-Person occlusion safety: hide local skull/crown/hair/cape/back-bow so internal meshes never block eye view
+      if (this.ramRig.headGroup) this.ramRig.headGroup.visible = false;
+      if (this.ramRig.backBowGroup) this.ramRig.backBowGroup.visible = false;
+      if (this.ramRig.capePivot) this.ramRig.capePivot.visible = false;
       this.scene.add(this.ramRig.root);
       this.beaconGroup = this.createWaypointBeacon();
       this.scene.add(this.beaconGroup);
@@ -4812,13 +4968,13 @@ export class RamayanaWorldEngine {
     this.input.moveY = 0;
     this.input.cameraDeltaX = 0;
     this.input.cameraDeltaY = 0;
-    this.input.zoomDelta = 0;
     this.input.sprint = false;
     this.input.jumpPressed = false;
     this.input.fireHeld = false;
     this.input.astraPressed = false;
     this.input.shootAstraPressed = false;
     this.input.interactPressed = false;
+    this.input.switchSeatPressed = false;
     this.input.stealthTogglePressed = false;
     this.input.autoDriveTogglePressed = false;
     this.playerHorizSpeed = 0;
@@ -4891,15 +5047,20 @@ export class RamayanaWorldEngine {
     this.ramRig.root.rotation.order = 'YXZ';
     this.ramRig.root.rotation.set(0, this.playerYaw, 0);
     this.camYaw = 0;
-    this.camPitch = 0.34;
-    this.camDistanceFoot = 7.0;
-    this.camDistanceChariot = 10.6;
+    this.camPitch = 0.02;
     this.hp = 100;
     this.prana = 100;
     this.karma = 0;
     this.wantedLevel = 0;
     this.mountedChariotIndex = null;
     this.mountedAnimalIndex = null;
+    this.mountedSeatIndex = null;
+    this.pendingVehicleAction = null;
+    this.recentHostActionAcks.clear();
+    this.lastAppliedWorldSnapshotSeq = 0;
+    this.lanWorldSnapshotSeq = 0;
+    this.mountNoticeText = null;
+    this.mountNoticeExpiresMs = 0;
     this.seatedOnThrone = false;
     this.isRamSwimming = false;
     this.cameraManualHold = 0;
@@ -4931,8 +5092,24 @@ export class RamayanaWorldEngine {
         z: tpl.homeZ,
         yaw: tpl.homeYaw,
         speed: 0,
+        vx: 0,
+        vz: 0,
         gaitPhase: 0,
         animState: createDefaultQuadrupedState(tpl.homeYaw),
+        driverId: null,
+        passengerId: null,
+        occupancyEpoch: 0,
+        netSeq: 0,
+        driverSeq: 0,
+        hasRemoteSync: false,
+        syncTargetX: tpl.homeX,
+        syncTargetY: tpl.homeY,
+        syncTargetZ: tpl.homeZ,
+        syncTargetYaw: tpl.homeYaw,
+        syncTargetSpeed: 0,
+        syncTargetVx: 0,
+        syncTargetVz: 0,
+        syncTargetGaitPhase: 0,
       };
     });
 
@@ -4957,8 +5134,25 @@ export class RamayanaWorldEngine {
         yaw: sp.yaw,
         pitch: 0,
         speed: 0,
+        vx: 0,
+        vz: 0,
         gaitPhase: 0,
         steedStates: rig.steeds.map(() => createDefaultQuadrupedState(sp.yaw)),
+        driverId: null,
+        passengerId: null,
+        occupancyEpoch: 0,
+        netSeq: 0,
+        driverSeq: 0,
+        hasRemoteSync: false,
+        syncTargetX: sp.x,
+        syncTargetY: y,
+        syncTargetZ: sp.z,
+        syncTargetYaw: sp.yaw,
+        syncTargetPitch: 0,
+        syncTargetSpeed: 0,
+        syncTargetVx: 0,
+        syncTargetVz: 0,
+        syncTargetGaitPhase: 0,
       });
     });
 
@@ -5303,6 +5497,7 @@ export class RamayanaWorldEngine {
       this.input.astraPressed = false;
       this.input.shootAstraPressed = false;
       this.input.interactPressed = false;
+      this.input.switchSeatPressed = false;
       this.input.stealthTogglePressed = false;
       this.input.autoDriveTogglePressed = false;
       this.input.fireHeld = false;
@@ -5323,11 +5518,15 @@ export class RamayanaWorldEngine {
     this.lanLocalHeroId = localHeroId;
     if (!client) {
       this.clearRemotePlayers();
+      this.clearAllMultiplayerVehicleLocks();
       return;
     }
 
     client.setEngineHandlers({
       onMatchStarted: () => {
+        this.lastAppliedWorldSnapshotSeq = 0;
+        this.pendingVehicleAction = null;
+        this.recentHostActionAcks.clear();
         if (this.mode !== 'PLAYING') {
           this.setMode('PLAYING');
         }
@@ -5353,17 +5552,638 @@ export class RamayanaWorldEngine {
           }
         }
       },
+      onVehicleAction: (action) => {
+        this.processHostVehicleAction(action);
+      },
+      onVehicleActionAck: (ack) => {
+        this.handleVehicleActionAck(ack);
+      },
       onPeerListChanged: (activeIds) => {
         for (const id of Array.from(this.remotePlayers.keys())) {
           if (!activeIds.has(id)) {
             this.removeRemotePlayer(id);
+            this.clearPlayerFromAllVehicles(id);
+          }
+        }
+        // Also sweep any vehicle occupant IDs that disappeared before a player state arrived
+        const localId = client.getLocalPlayerId();
+        for (let i = 0; i < this.chariots.length; i++) {
+          const ch = this.chariots[i];
+          if (ch.driverId && ch.driverId !== localId && !activeIds.has(ch.driverId)) {
+            ch.driverId = null;
+            ch.speed = 0;
+            ch.occupancyEpoch++;
+          }
+          if (ch.passengerId && ch.passengerId !== localId && !activeIds.has(ch.passengerId)) {
+            ch.passengerId = null;
+            ch.occupancyEpoch++;
+          }
+        }
+        for (let i = 0; i < this.animals.length; i++) {
+          const an = this.animals[i];
+          if (an.driverId && an.driverId !== localId && !activeIds.has(an.driverId)) {
+            an.driverId = null;
+            an.speed = 0;
+            an.occupancyEpoch++;
+          }
+          if (an.passengerId && an.passengerId !== localId && !activeIds.has(an.passengerId)) {
+            an.passengerId = null;
+            an.occupancyEpoch++;
           }
         }
       },
       onSessionClosed: () => {
         this.clearRemotePlayers();
+        this.clearAllMultiplayerVehicleLocks();
       },
     });
+  }
+
+  private getLocalPlayerSyncId(): string {
+    if (this.lanClient?.isMultiplayerActive()) {
+      return this.lanClient.getLocalPlayerId() || 'local';
+    }
+    return 'local';
+  }
+
+  private clearAllMultiplayerVehicleLocks(): void {
+    this.pendingVehicleAction = null;
+    this.recentHostActionAcks.clear();
+    this.lastAppliedWorldSnapshotSeq = 0;
+    const localId = this.getLocalPlayerSyncId();
+    for (let i = 0; i < this.chariots.length; i++) {
+      const ch = this.chariots[i];
+      ch.driverId = this.mountedChariotIndex === i && this.mountedSeatIndex === 0 ? localId : null;
+      ch.passengerId = this.mountedChariotIndex === i && this.mountedSeatIndex === 1 ? localId : null;
+      ch.hasRemoteSync = false;
+    }
+    for (let i = 0; i < this.animals.length; i++) {
+      const an = this.animals[i];
+      an.driverId = this.mountedAnimalIndex === i && this.mountedSeatIndex === 0 ? localId : null;
+      an.passengerId = this.mountedAnimalIndex === i && this.mountedSeatIndex === 1 ? localId : null;
+      an.hasRemoteSync = false;
+    }
+  }
+
+  private showMountNotice(text: string, durationMs = 2400): void {
+    this.mountNoticeText = text;
+    this.mountNoticeExpiresMs = performance.now() + durationMs;
+    this.emitHud();
+  }
+
+  private findVehicleById(vehicleId: string):
+    | { kind: 'RATHA'; index: number; chariot: ChariotEntity }
+    | { kind: 'HORSE' | 'ELEPHANT'; index: number; animal: AnimalMountEntity }
+    | null {
+    for (let i = 0; i < this.chariots.length; i++) {
+      if (this.chariots[i].id === vehicleId) {
+        return { kind: 'RATHA', index: i, chariot: this.chariots[i] };
+      }
+    }
+    for (let i = 0; i < this.animals.length; i++) {
+      if (this.animals[i].id === vehicleId) {
+        return { kind: this.animals[i].kind, index: i, animal: this.animals[i] };
+      }
+    }
+    return null;
+  }
+
+  private getLocalMountedVehicle():
+    | { kind: 'RATHA'; id: string; index: number; chariot: ChariotEntity }
+    | { kind: 'HORSE' | 'ELEPHANT'; id: string; index: number; animal: AnimalMountEntity }
+    | null {
+    if (this.mountedChariotIndex !== null && this.chariots[this.mountedChariotIndex]) {
+      const ch = this.chariots[this.mountedChariotIndex];
+      return { kind: 'RATHA', id: ch.id, index: this.mountedChariotIndex, chariot: ch };
+    }
+    if (this.mountedAnimalIndex !== null && this.animals[this.mountedAnimalIndex]) {
+      const an = this.animals[this.mountedAnimalIndex];
+      return { kind: an.kind, id: an.id, index: this.mountedAnimalIndex, animal: an };
+    }
+    return null;
+  }
+
+  private clearPlayerFromAllVehicles(playerId: string): boolean {
+    let changed = false;
+    for (let i = 0; i < this.chariots.length; i++) {
+      const ch = this.chariots[i];
+      if (ch.driverId === playerId) {
+        ch.driverId = null;
+        ch.speed = 0;
+        ch.occupancyEpoch++;
+        changed = true;
+      }
+      if (ch.passengerId === playerId) {
+        ch.passengerId = null;
+        ch.occupancyEpoch++;
+        changed = true;
+      }
+    }
+    for (let i = 0; i < this.animals.length; i++) {
+      const an = this.animals[i];
+      if (an.driverId === playerId) {
+        an.driverId = null;
+        an.speed = 0;
+        an.occupancyEpoch++;
+        changed = true;
+      }
+      if (an.passengerId === playerId) {
+        an.passengerId = null;
+        an.occupancyEpoch++;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  private boardVehicleLocal(
+    kind: LanVehicleKind,
+    index: number,
+    seatIndex: LanVehicleSeatIndex
+  ): void {
+    const localId = this.getLocalPlayerSyncId();
+    const wasStealth = this.stealthActive;
+    this.clearPlayerFromAllVehicles(localId);
+    if (kind === 'RATHA') {
+      const ch = this.chariots[index];
+      if (!ch) return;
+      this.mountedChariotIndex = index;
+      this.mountedAnimalIndex = null;
+      this.mountedSeatIndex = seatIndex;
+      if (seatIndex === 0) ch.driverId = localId;
+      else ch.passengerId = localId;
+      ch.occupancyEpoch++;
+    } else {
+      const an = this.animals[index];
+      if (!an) return;
+      this.mountedAnimalIndex = index;
+      this.mountedChariotIndex = null;
+      this.mountedSeatIndex = seatIndex;
+      if (seatIndex === 0) an.driverId = localId;
+      else an.passengerId = localId;
+      an.occupancyEpoch++;
+    }
+    this.autoDriveActive = false;
+    this.isRamSwimming = false;
+    this.setStealthMode(wasStealth);
+    this.cameraManualHold = 0;
+    this.camChariotLockTimer = 0.7;
+    soundEngine.playMountChariot();
+    this.emitHud();
+  }
+
+  private dismountLocalPlayerCleanly(sendNetworkAction: boolean): void {
+    const current = this.getLocalMountedVehicle();
+    if (!current) return;
+    const localId = this.getLocalPlayerSyncId();
+    const wasDriver = this.mountedSeatIndex === 0;
+    const wasStealth = this.stealthActive;
+    this.autoDriveActive = false;
+
+    if (current.kind === 'RATHA') {
+      const ch = current.chariot;
+      if (wasDriver) {
+        ch.speed = 0;
+        if (ch.driverId === localId) ch.driverId = null;
+        if (ch.rig.leftReinMesh && ch.rig.leftBridleHook && ch.rig.leftRailHook) {
+          updateDynamicReinMesh(ch.rig.leftReinMesh, ch.rig.leftBridleHook, ch.rig.leftRailHook, 0.2);
+        }
+        if (ch.rig.rightReinMesh && ch.rig.rightBridleHook && ch.rig.rightRailHook) {
+          updateDynamicReinMesh(ch.rig.rightReinMesh, ch.rig.rightBridleHook, ch.rig.rightRailHook, 0.2);
+        }
+      } else if (ch.passengerId === localId) {
+        ch.passengerId = null;
+      }
+      ch.occupancyEpoch++;
+      this.mountedChariotIndex = null;
+      this.mountedSeatIndex = null;
+      this.restoreRamStandingClothes();
+      this.setStealthMode(wasStealth);
+      this.cameraManualHold = 0;
+      this.camChariotLockTimer = 0;
+
+      const sinChY = Math.sin(ch.yaw);
+      const cosChY = Math.cos(ch.yaw);
+      const sideSign = wasDriver ? 1 : -1;
+      let chosenX = ch.x + cosChY * 2.85 * sideSign;
+      let chosenZ = ch.z - sinChY * 2.85 * sideSign;
+      if (isInRiverWater(chosenX, chosenZ)) {
+        const altX = ch.x - cosChY * 2.85 * sideSign;
+        const altZ = ch.z + sinChY * 2.85 * sideSign;
+        if (!isInRiverWater(altX, altZ)) {
+          chosenX = altX;
+          chosenZ = altZ;
+        } else {
+          const backX = ch.x - sinChY * 2.95;
+          const backZ = ch.z - cosChY * 2.95;
+          if (!isInRiverWater(backX, backZ)) {
+            chosenX = backX;
+            chosenZ = backZ;
+          }
+        }
+      }
+      const safePos = this.resolveStaticColliders(chosenX, chosenZ, 0.58, ch.y);
+      this.playerX = safePos.x;
+      this.playerZ = safePos.z;
+      this.playerY = this.surfaceHeightAt(this.playerX, this.playerZ, ch.y);
+    } else {
+      const an = current.animal;
+      if (wasDriver) {
+        an.speed = 0;
+        if (an.driverId === localId) an.driverId = null;
+        if (an.horseRig?.leftReinMesh && an.horseRig.rightReinMesh && an.horseRig.leftPommelHook && an.horseRig.rightPommelHook) {
+          an.horseRig.group.updateMatrixWorld(true);
+          an.horseRig.leftBitAnchor.getWorldPosition(_v1);
+          an.horseRig.group.worldToLocal(_v1);
+          updateDynamicReinMesh(an.horseRig.leftReinMesh, _v1, an.horseRig.leftPommelHook, 0.18);
+          an.horseRig.rightBitAnchor.getWorldPosition(_v2);
+          an.horseRig.group.worldToLocal(_v2);
+          updateDynamicReinMesh(an.horseRig.rightReinMesh, _v2, an.horseRig.rightPommelHook, 0.18);
+        }
+      } else if (an.passengerId === localId) {
+        an.passengerId = null;
+      }
+      an.occupancyEpoch++;
+      this.mountedAnimalIndex = null;
+      this.mountedSeatIndex = null;
+      this.restoreRamStandingClothes();
+      this.setStealthMode(wasStealth);
+      this.cameraManualHold = 0;
+      this.camChariotLockTimer = 0;
+
+      const offDist = (an.kind === 'ELEPHANT' ? 2.25 : 1.55) * (wasDriver ? 1 : -1);
+      const safePos = this.resolveStaticColliders(
+        an.x + Math.cos(an.yaw) * offDist,
+        an.z - Math.sin(an.yaw) * offDist,
+        0.58,
+        an.y
+      );
+      this.playerX = safePos.x;
+      this.playerZ = safePos.z;
+      this.playerY = this.surfaceHeightAt(this.playerX, this.playerZ, an.y);
+    }
+
+    this.ramRig.root.rotation.order = 'YXZ';
+    this.ramRig.root.rotation.set(0, this.playerYaw, 0);
+    soundEngine.playMountChariot();
+
+    if (sendNetworkAction && this.lanClient?.isClientInMatch()) {
+      this.queueClientVehicleAction(current.id, 'DISMOUNT');
+    } else if (this.lanClient?.isHostingMatch()) {
+      this.lanClient.sendWorldSnapshot(this.buildHostWorldSnapshot());
+    }
+    this.emitHud();
+  }
+
+  private queueClientVehicleAction(
+    vehicleId: string,
+    action: LanVehicleActionKind,
+    preferredSeat?: LanVehicleSeatIndex
+  ): void {
+    if (!this.lanClient?.isClientInMatch()) return;
+    const seq = ++this.vehicleActionSeq;
+    const now = performance.now();
+    const actionId = `va_${this.getLocalPlayerSyncId()}_${seq}_${Math.round(now)}`;
+    this.pendingVehicleAction = {
+      actionId,
+      vehicleId,
+      action,
+      preferredSeat,
+      seq,
+      sentCount: 1,
+      nextRetryAtMs: now + 180,
+      startedAtMs: now,
+    };
+    this.lanClient.sendVehicleAction({
+      actionId,
+      vehicleId,
+      action,
+      preferredSeat,
+      seq,
+      clientTsMs: Date.now(),
+    });
+  }
+
+  private processHostVehicleAction(msg: LanVehicleActionMessage): void {
+    if (!this.lanClient?.isHostingMatch()) return;
+    const cached = this.recentHostActionAcks.get(msg.actionId);
+    if (cached) {
+      this.lanClient.sendVehicleActionAck(cached);
+      return;
+    }
+
+    const sendAndCacheAck = (ack: Omit<LanVehicleActionAckMessage, 'type'>) => {
+      const fullAck: LanVehicleActionAckMessage = { type: 'VEHICLE_ACTION_ACK', ...ack };
+      this.recentHostActionAcks.set(msg.actionId, fullAck);
+      if (this.recentHostActionAcks.size > 128) {
+        const oldestKey = this.recentHostActionAcks.keys().next().value;
+        if (oldestKey) this.recentHostActionAcks.delete(oldestKey);
+      }
+      this.lanClient?.sendVehicleActionAck(ack);
+      this.lanClient?.sendWorldSnapshot(this.buildHostWorldSnapshot());
+    };
+
+    const ref = this.findVehicleById(msg.vehicleId);
+    if (!ref) {
+      sendAndCacheAck({
+        actionId: msg.actionId,
+        targetPlayerId: msg.playerId,
+        vehicleId: msg.vehicleId,
+        action: msg.action,
+        accepted: false,
+        reason: 'NOT_FOUND',
+        assignedSeat: null,
+        driverId: null,
+        passengerId: null,
+        epoch: 0,
+        serverTimeMs: Date.now(),
+      });
+      return;
+    }
+
+    const v = ref.kind === 'RATHA' ? ref.chariot : ref.animal;
+
+    if (msg.action === 'BOARD') {
+      if (v.driverId === msg.playerId) {
+        sendAndCacheAck({
+          actionId: msg.actionId,
+          targetPlayerId: msg.playerId,
+          vehicleId: msg.vehicleId,
+          action: 'BOARD',
+          accepted: true,
+          assignedSeat: 0,
+          driverId: v.driverId,
+          passengerId: v.passengerId,
+          epoch: v.occupancyEpoch,
+          serverTimeMs: Date.now(),
+        });
+        return;
+      }
+      if (v.passengerId === msg.playerId) {
+        sendAndCacheAck({
+          actionId: msg.actionId,
+          targetPlayerId: msg.playerId,
+          vehicleId: msg.vehicleId,
+          action: 'BOARD',
+          accepted: true,
+          assignedSeat: 1,
+          driverId: v.driverId,
+          passengerId: v.passengerId,
+          epoch: v.occupancyEpoch,
+          serverTimeMs: Date.now(),
+        });
+        return;
+      }
+
+      if (v.driverId !== null && v.passengerId !== null) {
+        sendAndCacheAck({
+          actionId: msg.actionId,
+          targetPlayerId: msg.playerId,
+          vehicleId: msg.vehicleId,
+          action: 'BOARD',
+          accepted: false,
+          reason: 'FULL',
+          assignedSeat: null,
+          driverId: v.driverId,
+          passengerId: v.passengerId,
+          epoch: v.occupancyEpoch,
+          serverTimeMs: Date.now(),
+        });
+        return;
+      }
+
+      this.clearPlayerFromAllVehicles(msg.playerId);
+      let assignedSeat: LanVehicleSeatIndex;
+      if (msg.preferredSeat === 1 && v.passengerId === null) {
+        v.passengerId = msg.playerId;
+        assignedSeat = 1;
+      } else if (v.driverId === null) {
+        v.driverId = msg.playerId;
+        assignedSeat = 0;
+      } else {
+        v.passengerId = msg.playerId;
+        assignedSeat = 1;
+      }
+      v.occupancyEpoch++;
+      sendAndCacheAck({
+        actionId: msg.actionId,
+        targetPlayerId: msg.playerId,
+        vehicleId: msg.vehicleId,
+        action: 'BOARD',
+        accepted: true,
+        assignedSeat,
+        driverId: v.driverId,
+        passengerId: v.passengerId,
+        epoch: v.occupancyEpoch,
+        serverTimeMs: Date.now(),
+      });
+      return;
+    }
+
+    if (msg.action === 'DISMOUNT') {
+      const changed = this.clearPlayerFromAllVehicles(msg.playerId);
+      if (changed) {
+        v.occupancyEpoch++;
+      }
+      sendAndCacheAck({
+        actionId: msg.actionId,
+        targetPlayerId: msg.playerId,
+        vehicleId: msg.vehicleId,
+        action: 'DISMOUNT',
+        accepted: true,
+        assignedSeat: null,
+        driverId: v.driverId,
+        passengerId: v.passengerId,
+        epoch: v.occupancyEpoch,
+        serverTimeMs: Date.now(),
+      });
+      return;
+    }
+
+    // SWITCH_SEAT
+    if (v.driverId === msg.playerId) {
+      if (v.passengerId === null) {
+        v.driverId = null;
+        v.passengerId = msg.playerId;
+        v.speed = 0;
+        v.occupancyEpoch++;
+        sendAndCacheAck({
+          actionId: msg.actionId,
+          targetPlayerId: msg.playerId,
+          vehicleId: msg.vehicleId,
+          action: 'SWITCH_SEAT',
+          accepted: true,
+          assignedSeat: 1,
+          driverId: v.driverId,
+          passengerId: v.passengerId,
+          epoch: v.occupancyEpoch,
+          serverTimeMs: Date.now(),
+        });
+      } else {
+        // Swap Driver <-> Passenger cleanly; notify swapped co-rider on next snapshot too
+        const prevPassenger = v.passengerId;
+        v.driverId = prevPassenger;
+        v.passengerId = msg.playerId;
+        v.occupancyEpoch++;
+        if (prevPassenger === this.getLocalPlayerSyncId()) {
+          this.mountedSeatIndex = 0;
+        }
+        sendAndCacheAck({
+          actionId: msg.actionId,
+          targetPlayerId: msg.playerId,
+          vehicleId: msg.vehicleId,
+          action: 'SWITCH_SEAT',
+          accepted: true,
+          assignedSeat: 1,
+          driverId: v.driverId,
+          passengerId: v.passengerId,
+          epoch: v.occupancyEpoch,
+          serverTimeMs: Date.now(),
+        });
+      }
+      return;
+    }
+
+    if (v.passengerId === msg.playerId) {
+      if (v.driverId === null) {
+        v.passengerId = null;
+        v.driverId = msg.playerId;
+        v.occupancyEpoch++;
+        sendAndCacheAck({
+          actionId: msg.actionId,
+          targetPlayerId: msg.playerId,
+          vehicleId: msg.vehicleId,
+          action: 'SWITCH_SEAT',
+          accepted: true,
+          assignedSeat: 0,
+          driverId: v.driverId,
+          passengerId: v.passengerId,
+          epoch: v.occupancyEpoch,
+          serverTimeMs: Date.now(),
+        });
+      } else {
+        sendAndCacheAck({
+          actionId: msg.actionId,
+          targetPlayerId: msg.playerId,
+          vehicleId: msg.vehicleId,
+          action: 'SWITCH_SEAT',
+          accepted: false,
+          reason: 'SEAT_TAKEN',
+          assignedSeat: 1,
+          driverId: v.driverId,
+          passengerId: v.passengerId,
+          epoch: v.occupancyEpoch,
+          serverTimeMs: Date.now(),
+        });
+      }
+      return;
+    }
+
+    sendAndCacheAck({
+      actionId: msg.actionId,
+      targetPlayerId: msg.playerId,
+      vehicleId: msg.vehicleId,
+      action: 'SWITCH_SEAT',
+      accepted: false,
+      reason: 'NOT_OCCUPANT',
+      assignedSeat: null,
+      driverId: v.driverId,
+      passengerId: v.passengerId,
+      epoch: v.occupancyEpoch,
+      serverTimeMs: Date.now(),
+    });
+  }
+
+  private handleVehicleActionAck(ack: LanVehicleActionAckMessage): void {
+    const localId = this.getLocalPlayerSyncId();
+    if (ack.targetPlayerId !== localId) return;
+
+    if (this.pendingVehicleAction?.actionId === ack.actionId) {
+      this.pendingVehicleAction = null;
+    }
+
+    const ref = this.findVehicleById(ack.vehicleId);
+    if (ref) {
+      const v = ref.kind === 'RATHA' ? ref.chariot : ref.animal;
+      if (ack.epoch >= v.occupancyEpoch) {
+        v.driverId = ack.driverId;
+        v.passengerId = ack.passengerId;
+        v.occupancyEpoch = ack.epoch;
+      }
+    }
+
+    if (!ack.accepted) {
+      if (ack.action === 'BOARD') {
+        const mounted = this.getLocalMountedVehicle();
+        if (mounted && mounted.id === ack.vehicleId) {
+          this.dismountLocalPlayerCleanly(false);
+        }
+        this.showMountNotice(
+          ack.reason === 'FULL'
+            ? 'Vehicle is full (2/2 riders)'
+            : 'Could not board vehicle'
+        );
+      } else if (ack.action === 'SWITCH_SEAT') {
+        this.showMountNotice(
+          ack.reason === 'SEAT_TAKEN'
+            ? 'Driver seat is already occupied'
+            : 'Cannot switch seats right now'
+        );
+      }
+      return;
+    }
+
+    if (ack.action === 'DISMOUNT' || ack.assignedSeat === null) {
+      if (this.getLocalMountedVehicle()) {
+        this.dismountLocalPlayerCleanly(false);
+      }
+      return;
+    }
+
+    if (ref) {
+      const mounted = this.getLocalMountedVehicle();
+      if (!mounted || mounted.id !== ack.vehicleId) {
+        this.boardVehicleLocal(ref.kind, ref.index, ack.assignedSeat);
+      } else if (this.mountedSeatIndex !== ack.assignedSeat) {
+        this.mountedSeatIndex = ack.assignedSeat;
+        this.autoDriveActive = false;
+        soundEngine.playMountChariot();
+        this.emitHud();
+      }
+    }
+  }
+
+  private triggerSwitchSeat(): void {
+    const current = this.getLocalMountedVehicle();
+    if (!current) return;
+    if (!this.lanClient?.isMultiplayerActive()) return;
+
+    const localId = this.getLocalPlayerSyncId();
+    const v = current.kind === 'RATHA' ? current.chariot : current.animal;
+
+    if (this.lanClient.isHostingMatch()) {
+      this.processHostVehicleAction({
+        type: 'VEHICLE_ACTION',
+        actionId: `host_sw_${++this.vehicleActionSeq}_${Date.now()}`,
+        playerId: localId,
+        vehicleId: current.id,
+        action: 'SWITCH_SEAT',
+        seq: this.vehicleActionSeq,
+        clientTsMs: Date.now(),
+      });
+      // Reconcile local mountedSeatIndex directly from updated host slots
+      if (v.driverId === localId) {
+        this.mountedSeatIndex = 0;
+      } else if (v.passengerId === localId) {
+        this.mountedSeatIndex = 1;
+        this.autoDriveActive = false;
+      }
+      soundEngine.playMountChariot();
+      this.emitHud();
+      return;
+    }
+
+    this.queueClientVehicleAction(current.id, 'SWITCH_SEAT');
   }
 
   private createNameplateSprite(name: string, accentHex: string): {
@@ -5449,6 +6269,8 @@ export class RamayanaWorldEngine {
         targetZ: st.z,
         yaw: st.yaw,
         targetYaw: st.yaw,
+        vx: st.vx ?? 0,
+        vz: st.vz ?? 0,
         horizSpeed: st.horizSpeed,
         grounded: st.grounded,
         walkPhase: st.walkPhase,
@@ -5456,28 +6278,92 @@ export class RamayanaWorldEngine {
         stealth: st.stealth,
         sprint: st.sprint,
         mountKind: st.mountKind,
+        mountedVehicleId: st.mountedVehicleId ?? null,
+        seatIndex: st.seatIndex ?? null,
         hp: st.hp,
         maxHp: st.maxHp,
+        lastSeq: st.seq ?? 0,
         lastUpdateMs: performance.now(),
       };
       this.remotePlayers.set(st.id, rp);
-      return;
+    } else {
+      // Drop delayed out-of-order packets while allowing sequence resets on restart
+      if (
+        typeof st.seq === 'number' &&
+        st.seq > 0 &&
+        rp.lastSeq > 0 &&
+        st.seq <= rp.lastSeq &&
+        rp.lastSeq - st.seq < 120
+      ) {
+        return;
+      }
+      rp.lastSeq = st.seq ?? rp.lastSeq;
+      rp.targetX = st.x;
+      rp.targetY = st.y;
+      rp.targetZ = st.z;
+      rp.targetYaw = st.yaw;
+      rp.vx = st.vx ?? 0;
+      rp.vz = st.vz ?? 0;
+      rp.horizSpeed = st.horizSpeed;
+      rp.grounded = st.grounded;
+      rp.walkPhase = st.walkPhase;
+      rp.aiming = st.aiming;
+      rp.stealth = st.stealth;
+      rp.sprint = st.sprint;
+      rp.mountKind = st.mountKind;
+      rp.mountedVehicleId = st.mountedVehicleId ?? null;
+      rp.seatIndex = st.seatIndex ?? null;
+      rp.hp = st.hp;
+      rp.maxHp = st.maxHp;
+      rp.lastUpdateMs = performance.now();
     }
 
-    rp.targetX = st.x;
-    rp.targetY = st.y;
-    rp.targetZ = st.z;
-    rp.targetYaw = st.yaw;
-    rp.horizSpeed = st.horizSpeed;
-    rp.grounded = st.grounded;
-    rp.walkPhase = st.walkPhase;
-    rp.aiming = st.aiming;
-    rp.stealth = st.stealth;
-    rp.sprint = st.sprint;
-    rp.mountKind = st.mountKind;
-    rp.hp = st.hp;
-    rp.maxHp = st.maxHp;
-    rp.lastUpdateMs = performance.now();
+    // Host validates & absorbs non-host Seat 0 driver kinematics for vehicles driven by peers
+    if (this.lanClient?.isHostingMatch() && st.driverVehicle) {
+      this.applyHostDriverReport(st.id, st.driverVehicle, st.sentAtMs);
+    }
+  }
+
+  private applyHostDriverReport(
+    senderId: string,
+    report: LanDriverVehicleReport,
+    sentAtMs?: number
+  ): void {
+    const ref = this.findVehicleById(report.vehicleId);
+    if (!ref) return;
+    const v = ref.kind === 'RATHA' ? ref.chariot : ref.animal;
+    if (v.driverId !== senderId) return;
+    if (report.epoch < v.occupancyEpoch) return;
+    if (report.seq <= v.driverSeq && v.driverSeq - report.seq < 120) return;
+
+    v.driverSeq = report.seq;
+    const metrics = this.lanClient?.getNetworkMetrics();
+    let leadSec = metrics ? metrics.oneWayLatencySec : 0.02;
+    if (typeof sentAtMs === 'number' && metrics) {
+      const estAgeMs = Date.now() + metrics.clockOffsetMs - sentAtMs;
+      if (estAgeMs > 0 && estAgeMs < 250) {
+        leadSec = Math.min(0.16, estAgeMs * 0.001);
+      }
+    }
+
+    // Clamp max plausible speed to prevent wild teleportation
+    const maxPlausibleSpd = ref.kind === 'RATHA' ? 88 : ref.kind === 'HORSE' ? 40 : 20;
+    const clampedSpeed = THREE.MathUtils.clamp(report.speed, -maxPlausibleSpd, maxPlausibleSpd);
+    const vx = THREE.MathUtils.clamp(report.vx, -maxPlausibleSpd, maxPlausibleSpd);
+    const vz = THREE.MathUtils.clamp(report.vz, -maxPlausibleSpd, maxPlausibleSpd);
+
+    v.syncTargetX = report.x + vx * leadSec;
+    v.syncTargetZ = report.z + vz * leadSec;
+    v.syncTargetY = report.y;
+    v.syncTargetYaw = report.yaw;
+    if (ref.kind === 'RATHA') {
+      ref.chariot.syncTargetPitch = report.pitch;
+    }
+    v.syncTargetSpeed = clampedSpeed;
+    v.syncTargetVx = vx;
+    v.syncTargetVz = vz;
+    v.syncTargetGaitPhase = report.gaitPhase;
+    v.hasRemoteSync = true;
   }
 
   private removeRemotePlayer(id: string): void {
@@ -5498,16 +6384,258 @@ export class RamayanaWorldEngine {
     }
   }
 
+  private updateSyncedVehicles(dt: number, elapsed: number): void {
+    const localId = this.getLocalPlayerSyncId();
+    const isHost = Boolean(this.lanClient?.isHostingMatch());
+    const profDistScale = this.qualityManager.getProfile().distanceCullScale;
+    const profDistScaleSq = profDistScale * profDistScale;
+
+    for (let i = 0; i < this.chariots.length; i++) {
+      const ch = this.chariots[i];
+      const isLocalDriver = this.mountedChariotIndex === i && this.mountedSeatIndex === 0;
+      if (isLocalDriver) continue;
+
+      if (ch.hasRemoteSync && (!isHost || (ch.driverId !== null && ch.driverId !== localId))) {
+        const prevX = ch.x;
+        const prevZ = ch.z;
+
+        // Dead-reckon along velocity + smoothly converge target with bounded correction
+        ch.syncTargetX += ch.syncTargetVx * dt;
+        ch.syncTargetZ += ch.syncTargetVz * dt;
+
+        const dxErr = ch.syncTargetX - ch.x;
+        const dzErr = ch.syncTargetZ - ch.z;
+        const errSq = dxErr * dxErr + dzErr * dzErr;
+
+        if (errSq > 144) {
+          ch.x = ch.syncTargetX;
+          ch.z = ch.syncTargetZ;
+          ch.yaw = ch.syncTargetYaw;
+        } else {
+          const posAlpha = 1 - Math.exp(-13.5 * dt);
+          ch.x = THREE.MathUtils.lerp(ch.x, ch.syncTargetX, posAlpha);
+          ch.z = THREE.MathUtils.lerp(ch.z, ch.syncTargetZ, posAlpha);
+          ch.yaw = dampAngle(ch.yaw, ch.syncTargetYaw, 14, dt);
+        }
+        ch.speed = THREE.MathUtils.damp(ch.speed, ch.syncTargetSpeed, 12, dt);
+        ch.vx = ch.syncTargetVx;
+        ch.vz = ch.syncTargetVz;
+
+        const res = this.resolveChariotStaticCCD(prevX, prevZ, ch.x, ch.z, ch.yaw, ch.y);
+        ch.x = res.x;
+        ch.z = res.z;
+        this.syncChariotTerrainSupport(ch, dt);
+
+        const movedDist = Math.hypot(ch.x - prevX, ch.z - prevZ);
+        const chSign = ch.speed >= 0 ? 1 : -1;
+        ch.rig.leftWheel.rotation.x += chSign * movedDist * 1.1;
+        ch.rig.rightWheel.rotation.x += chSign * movedDist * 1.1;
+        ch.gaitPhase += (movedDist / 2.25) * Math.PI * 2;
+      } else if (isHost && ch.driverId === null && Math.abs(ch.speed) > 0.05) {
+        ch.speed = THREE.MathUtils.damp(ch.speed, 0, 5.5, dt);
+        const prevX = ch.x;
+        const prevZ = ch.z;
+        const nextX = ch.x + Math.sin(ch.yaw) * ch.speed * dt;
+        const nextZ = ch.z + Math.cos(ch.yaw) * ch.speed * dt;
+        const res = this.resolveChariotStaticCCD(prevX, prevZ, nextX, nextZ, ch.yaw, ch.y);
+        ch.x = res.x;
+        ch.z = res.z;
+        if (res.blocked) ch.speed *= 0.35;
+        ch.vx = (ch.x - prevX) / Math.max(0.001, dt);
+        ch.vz = (ch.z - prevZ) / Math.max(0.001, dt);
+        this.syncChariotTerrainSupport(ch, dt);
+        const movedDist = Math.hypot(ch.x - prevX, ch.z - prevZ);
+        const chSign = ch.speed >= 0 ? 1 : -1;
+        ch.rig.leftWheel.rotation.x += chSign * movedDist * 1.1;
+        ch.rig.rightWheel.rotation.x += chSign * movedDist * 1.1;
+        ch.gaitPhase += (movedDist / 2.25) * Math.PI * 2;
+      } else {
+        ch.vx = 0;
+        ch.vz = 0;
+      }
+
+      // Keep synced moving chariot horses trotting/galloping smoothly even when driven by a peer
+      if (Math.abs(ch.speed) > 0.35) {
+        const dSq = (ch.x - this.playerX) * (ch.x - this.playerX) + (ch.z - this.playerZ) * (ch.z - this.playerZ);
+        if (dSq <= 19600 * profDistScaleSq || this.mountedChariotIndex === i) {
+          const chariotSpdNorm = THREE.MathUtils.clamp(Math.abs(ch.speed) / 28, 0, 1);
+          for (let sIdx = 0; sIdx < ch.rig.steeds.length; sIdx++) {
+            this.animateRoyalHorseRig(
+              ch.rig.steeds[sIdx],
+              ch.gaitPhase + sIdx * 0.45,
+              chariotSpdNorm,
+              elapsed,
+              i * 3.1 + sIdx * 1.4,
+              ch.steedStates[sIdx],
+              dt,
+              ch.yaw
+            );
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < this.animals.length; i++) {
+      const an = this.animals[i];
+      const isLocalDriver = this.mountedAnimalIndex === i && this.mountedSeatIndex === 0;
+      if (isLocalDriver) continue;
+
+      if (an.hasRemoteSync && (!isHost || (an.driverId !== null && an.driverId !== localId))) {
+        const prevX = an.x;
+        const prevZ = an.z;
+
+        an.syncTargetX += an.syncTargetVx * dt;
+        an.syncTargetZ += an.syncTargetVz * dt;
+
+        const dxErr = an.syncTargetX - an.x;
+        const dzErr = an.syncTargetZ - an.z;
+        const errSq = dxErr * dxErr + dzErr * dzErr;
+        if (errSq > 144) {
+          an.x = an.syncTargetX;
+          an.z = an.syncTargetZ;
+          an.yaw = an.syncTargetYaw;
+        } else {
+          const posAlpha = 1 - Math.exp(-13.5 * dt);
+          an.x = THREE.MathUtils.lerp(an.x, an.syncTargetX, posAlpha);
+          an.z = THREE.MathUtils.lerp(an.z, an.syncTargetZ, posAlpha);
+          an.yaw = dampAngle(an.yaw, an.syncTargetYaw, 14, dt);
+        }
+        an.speed = THREE.MathUtils.damp(an.speed, an.syncTargetSpeed, 12, dt);
+        an.vx = an.syncTargetVx;
+        an.vz = an.syncTargetVz;
+
+        const anRadius = an.kind === 'ELEPHANT' ? 1.55 : 0.95;
+        const res = this.moveSweptWithStaticCCD(prevX, prevZ, an.x, an.z, anRadius, an.y, false, false);
+        an.x = res.x;
+        an.z = res.z;
+        an.y = Math.max(RIVER_SURFACE_Y + 0.12, this.surfaceHeightAt(an.x, an.z, an.y));
+        const movedDist = Math.hypot(an.x - prevX, an.z - prevZ);
+        const stride = an.kind === 'ELEPHANT' ? 2.6 : 2.25;
+        an.gaitPhase += (movedDist / stride) * Math.PI * 2;
+        const anObj = an.horseRig ? an.horseRig.group : an.elephantRig!.group;
+        anObj.position.set(an.x, an.y, an.z);
+        anObj.rotation.y = an.yaw;
+      } else if (isHost && an.driverId === null && Math.abs(an.speed) > 0.05) {
+        an.speed = THREE.MathUtils.damp(an.speed, 0, 7.5, dt);
+        const prevX = an.x;
+        const prevZ = an.z;
+        const nextX = an.x + Math.sin(an.yaw) * an.speed * dt;
+        const nextZ = an.z + Math.cos(an.yaw) * an.speed * dt;
+        const anRadius = an.kind === 'ELEPHANT' ? 1.55 : 0.95;
+        const res = this.moveSweptWithStaticCCD(prevX, prevZ, nextX, nextZ, anRadius, an.y, false, false);
+        an.x = res.x;
+        an.z = res.z;
+        an.y = Math.max(RIVER_SURFACE_Y + 0.12, this.surfaceHeightAt(an.x, an.z, an.y));
+        an.vx = (an.x - prevX) / Math.max(0.001, dt);
+        an.vz = (an.z - prevZ) / Math.max(0.001, dt);
+        const movedDist = Math.hypot(an.x - prevX, an.z - prevZ);
+        const stride = an.kind === 'ELEPHANT' ? 2.6 : 2.25;
+        an.gaitPhase += (movedDist / stride) * Math.PI * 2;
+        const anObj = an.horseRig ? an.horseRig.group : an.elephantRig!.group;
+        anObj.position.set(an.x, an.y, an.z);
+        anObj.rotation.y = an.yaw;
+      } else {
+        an.vx = 0;
+        an.vz = 0;
+      }
+    }
+  }
+
   private updateRemotePlayers(dt: number, elapsed: number): void {
+    const netLeadSec = this.lanClient ? this.lanClient.getNetworkMetrics().oneWayLatencySec : 0.02;
     const alpha = 1 - Math.exp(-15 * dt);
     this.remotePlayers.forEach((rp) => {
-      rp.x = THREE.MathUtils.lerp(rp.x, rp.targetX, alpha);
-      rp.y = THREE.MathUtils.lerp(rp.y, rp.targetY, alpha);
-      rp.z = THREE.MathUtils.lerp(rp.z, rp.targetZ, alpha);
+      if (rp.mountedVehicleId && rp.seatIndex !== null) {
+        const ref = this.findVehicleById(rp.mountedVehicleId);
+        if (ref) {
+          rp.auraRing.visible = false;
+          rp.rig.contactShadow.visible = false;
+          if (ref.kind === 'RATHA') {
+            const ch = ref.chariot;
+            computeVehicleSeatWorldPosition(
+              ch.x,
+              ch.y,
+              ch.z,
+              ch.yaw,
+              ch.pitch,
+              'RATHA',
+              rp.seatIndex,
+              this._seatWorldScratch
+            );
+            rp.x = this._seatWorldScratch.x;
+            rp.y = this._seatWorldScratch.y;
+            rp.z = this._seatWorldScratch.z;
+            rp.yaw = rp.seatIndex === 0 ? ch.yaw : dampAngle(rp.yaw, rp.targetYaw, 16, dt);
+            rp.rig.root.position.set(rp.x, rp.y, rp.z);
+            rp.rig.root.rotation.order = 'YXZ';
+            rp.rig.root.rotation.set(-ch.pitch, rp.yaw, 0);
+            if (rp.seatIndex === 0) {
+              this.applyChariotSittingPose(rp.rig, 0, rp.aiming, elapsed, dt, rp.pose);
+            } else {
+              this.applyChariotPassengerPose(rp.rig, rp.aiming, elapsed, dt, rp.pose);
+            }
+            return;
+          } else {
+            const an = ref.animal;
+            const seatH = an.elephantRig
+              ? an.elephantRig.seatHeight
+              : an.horseRig
+              ? an.horseRig.seatHeight
+              : 0.88;
+            computeVehicleSeatWorldPosition(
+              an.x,
+              an.y,
+              an.z,
+              an.yaw,
+              0,
+              an.kind,
+              rp.seatIndex,
+              this._seatWorldScratch,
+              seatH
+            );
+            rp.x = this._seatWorldScratch.x;
+            rp.y = this._seatWorldScratch.y;
+            rp.z = this._seatWorldScratch.z;
+            rp.yaw = an.yaw;
+            rp.rig.root.position.set(rp.x, rp.y, rp.z);
+            rp.rig.root.rotation.order = 'YXZ';
+            rp.rig.root.rotation.set(0, rp.yaw, 0);
+            const maxSpd = an.kind === 'ELEPHANT' ? 16 : 36;
+            const spdNorm = THREE.MathUtils.clamp(Math.abs(an.speed) / maxSpd, 0, 1);
+            this.applyAnimalRidingPose(
+              rp.rig,
+              an.kind,
+              an.gaitPhase,
+              spdNorm,
+              rp.aiming,
+              elapsed,
+              dt,
+              rp.pose
+            );
+            return;
+          }
+        }
+      }
+
+      rp.auraRing.visible = true;
+      rp.rig.contactShadow.visible = true;
+      const predX = rp.targetX + rp.vx * Math.min(0.14, netLeadSec);
+      const predZ = rp.targetZ + rp.vz * Math.min(0.14, netLeadSec);
+      const errSq = (predX - rp.x) * (predX - rp.x) + (predZ - rp.z) * (predZ - rp.z);
+      if (errSq > 144) {
+        rp.x = predX;
+        rp.y = rp.targetY;
+        rp.z = predZ;
+      } else {
+        rp.x = THREE.MathUtils.lerp(rp.x, predX, alpha);
+        rp.y = THREE.MathUtils.lerp(rp.y, rp.targetY, alpha);
+        rp.z = THREE.MathUtils.lerp(rp.z, predZ, alpha);
+      }
       rp.yaw = dampAngle(rp.yaw, rp.targetYaw, 16, dt);
 
       rp.rig.root.position.set(rp.x, rp.y, rp.z);
-      rp.rig.root.rotation.y = rp.yaw;
+      rp.rig.root.rotation.order = 'YXZ';
+      rp.rig.root.rotation.set(0, rp.yaw, 0);
 
       const moveNorm = THREE.MathUtils.clamp(rp.horizSpeed / 12, 0, 1);
       if (rp.horizSpeed > 0.25) {
@@ -5531,6 +6659,19 @@ export class RamayanaWorldEngine {
 
   private applyRemoteWorldSnapshot(snapshot: LanWorldSnapshot): void {
     if (!this.worldReady) return;
+
+    // Ignore delayed out-of-order world snapshots
+    if (
+      typeof snapshot.snapshotSeq === 'number' &&
+      snapshot.snapshotSeq > 0 &&
+      this.lastAppliedWorldSnapshotSeq > 0 &&
+      snapshot.snapshotSeq <= this.lastAppliedWorldSnapshotSeq &&
+      this.lastAppliedWorldSnapshotSeq - snapshot.snapshotSeq < 120
+    ) {
+      return;
+    }
+    this.lastAppliedWorldSnapshotSeq = snapshot.snapshotSeq ?? this.lastAppliedWorldSnapshotSeq;
+
     const localId = this.lanClient?.getLocalPlayerId();
     for (let i = 0; i < snapshot.players.length; i++) {
       const p = snapshot.players[i];
@@ -5545,6 +6686,95 @@ export class RamayanaWorldEngine {
     this.missionIdx = snapshot.missionIdx;
     this.missionProgress = snapshot.missionProgress;
     this.completedMissions = snapshot.completedMissions;
+
+    // Reconcile all vehicles (Chariots, Horses, Elephants) and seat assignments
+    if (Array.isArray(snapshot.vehicles)) {
+      const metrics = this.lanClient.getNetworkMetrics();
+      let hostLeadSec = metrics.oneWayLatencySec;
+      if (typeof snapshot.serverTimeMs === 'number' && metrics.clockOffsetMs !== 0) {
+        const ageMs = Date.now() + metrics.clockOffsetMs - snapshot.serverTimeMs;
+        if (ageMs >= 0 && ageMs < 240) {
+          hostLeadSec = Math.min(0.18, ageMs * 0.001 + metrics.jitterMs * 0.0005);
+        }
+      }
+
+      let authorMountedId: string | null = null;
+      let authorSeat: LanVehicleSeatIndex | null = null;
+
+      for (let i = 0; i < snapshot.vehicles.length; i++) {
+        const sv = snapshot.vehicles[i];
+        const ref = this.findVehicleById(sv.id);
+        if (!ref) continue;
+        const v = ref.kind === 'RATHA' ? ref.chariot : ref.animal;
+
+        if (sv.epoch >= v.occupancyEpoch) {
+          v.driverId = sv.driverId;
+          v.passengerId = sv.passengerId;
+          v.occupancyEpoch = sv.epoch;
+        }
+
+        if (localId && v.driverId === localId) {
+          authorMountedId = sv.id;
+          authorSeat = 0;
+        } else if (localId && v.passengerId === localId) {
+          authorMountedId = sv.id;
+          authorSeat = 1;
+        }
+
+        const isLocalDriver =
+          authorMountedId === sv.id && authorSeat === 0 && !this.pendingVehicleAction;
+
+        if (isLocalDriver) {
+          // Keep driver steering smooth locally; only correct hard divergence (> 8m)
+          const div = Math.hypot(sv.x - v.x, sv.z - v.z);
+          if (div > 8.0) {
+            v.x = sv.x;
+            v.y = sv.y;
+            v.z = sv.z;
+            v.yaw = sv.yaw;
+          }
+          continue;
+        }
+
+        if (sv.seq >= v.netSeq || v.netSeq - sv.seq > 120 || !v.hasRemoteSync) {
+          v.netSeq = sv.seq;
+          v.syncTargetX = sv.x + sv.vx * hostLeadSec;
+          v.syncTargetZ = sv.z + sv.vz * hostLeadSec;
+          v.syncTargetY = sv.y;
+          v.syncTargetYaw = sv.yaw;
+          if (ref.kind === 'RATHA') {
+            ref.chariot.syncTargetPitch = sv.pitch;
+          }
+          v.syncTargetSpeed = sv.speed;
+          v.syncTargetVx = sv.vx;
+          v.syncTargetVz = sv.vz;
+          v.syncTargetGaitPhase = sv.gaitPhase;
+          v.hasRemoteSync = true;
+        }
+      }
+
+      // Reconcile local seat with host truth unless a brand-new pending action is in-flight (< 1s)
+      const pendingFresh =
+        this.pendingVehicleAction &&
+        performance.now() - this.pendingVehicleAction.startedAtMs < 1100;
+      if (!pendingFresh && localId) {
+        const localMount = this.getLocalMountedVehicle();
+        if (authorMountedId && authorSeat !== null) {
+          if (!localMount || localMount.id !== authorMountedId) {
+            const ref = this.findVehicleById(authorMountedId);
+            if (ref) {
+              this.boardVehicleLocal(ref.kind, ref.index, authorSeat);
+            }
+          } else if (this.mountedSeatIndex !== authorSeat) {
+            this.mountedSeatIndex = authorSeat;
+            this.autoDriveActive = false;
+            this.emitHud();
+          }
+        } else if (localMount) {
+          this.dismountLocalPlayerCleanly(false);
+        }
+      }
+    }
 
     const existingById = new Map<string, EnemyEntity>();
     for (let i = 0; i < this.enemies.length; i++) {
@@ -5618,6 +6848,7 @@ export class RamayanaWorldEngine {
 
   private buildHostWorldSnapshot(): LanWorldSnapshot {
     const hero = getHeroPreset(this.lanLocalHeroId);
+    const localMount = this.getLocalMountedVehicle();
     const localPlayer: LanPlayerState = {
       id: this.lanClient?.getLocalPlayerId() || 'host',
       name: this.lanLocalPlayerName,
@@ -5633,17 +6864,59 @@ export class RamayanaWorldEngine {
       aiming: this.input.fireHeld || this.bowDrawHoldTimer > 0,
       stealth: this.stealthActive,
       sprint: this.input.sprint,
-      mountKind:
-        this.mountedChariotIndex !== null
-          ? 'RATHA'
-          : this.mountedAnimalIndex !== null
-          ? this.animals[this.mountedAnimalIndex].kind
-          : 'NONE',
+      mountKind: localMount ? localMount.kind : 'NONE',
+      mountedVehicleId: localMount ? localMount.id : null,
+      seatIndex: localMount ? this.mountedSeatIndex : null,
+      vx: Number(this._projCasterVelScratch.x.toFixed(2)),
+      vz: Number(this._projCasterVelScratch.z.toFixed(2)),
+      sentAtMs: Date.now(),
       hp: Math.round(this.hp),
       maxHp: this.maxHp,
       selectedAstra: this.astraQuest?.selectedAstra ?? null,
       seq: ++this.lanSnapSeq,
     };
+
+    const vehiclesOut: LanVehicleSyncState[] = [];
+    for (let i = 0; i < this.chariots.length; i++) {
+      const ch = this.chariots[i];
+      vehiclesOut.push({
+        id: ch.id,
+        kind: 'RATHA',
+        x: Number(ch.x.toFixed(2)),
+        y: Number(ch.y.toFixed(2)),
+        z: Number(ch.z.toFixed(2)),
+        yaw: Number(ch.yaw.toFixed(3)),
+        pitch: Number(ch.pitch.toFixed(3)),
+        speed: Number(ch.speed.toFixed(2)),
+        vx: Number(ch.vx.toFixed(2)),
+        vz: Number(ch.vz.toFixed(2)),
+        gaitPhase: Number(ch.gaitPhase.toFixed(2)),
+        driverId: ch.driverId,
+        passengerId: ch.passengerId,
+        epoch: ch.occupancyEpoch,
+        seq: ++ch.netSeq,
+      });
+    }
+    for (let i = 0; i < this.animals.length; i++) {
+      const an = this.animals[i];
+      vehiclesOut.push({
+        id: an.id,
+        kind: an.kind,
+        x: Number(an.x.toFixed(2)),
+        y: Number(an.y.toFixed(2)),
+        z: Number(an.z.toFixed(2)),
+        yaw: Number(an.yaw.toFixed(3)),
+        pitch: 0,
+        speed: Number(an.speed.toFixed(2)),
+        vx: Number(an.vx.toFixed(2)),
+        vz: Number(an.vz.toFixed(2)),
+        gaitPhase: Number(an.gaitPhase.toFixed(2)),
+        driverId: an.driverId,
+        passengerId: an.passengerId,
+        epoch: an.occupancyEpoch,
+        seq: ++an.netSeq,
+      });
+    }
 
     const enemiesOut: LanEnemySyncState[] = [];
     const cap = Math.min(this.enemies.length, 48);
@@ -5667,12 +6940,14 @@ export class RamayanaWorldEngine {
     }
 
     return {
+      snapshotSeq: ++this.lanWorldSnapshotSeq,
       serverTimeMs: Date.now(),
       dayTime: Number(this.dayTime.toFixed(4)),
       missionIdx: this.missionIdx,
       missionProgress: this.missionProgress,
       completedMissions: this.completedMissions,
       players: [localPlayer],
+      vehicles: vehiclesOut,
       enemies: enemiesOut,
     };
   }
@@ -5827,8 +7102,12 @@ export class RamayanaWorldEngine {
     this.chakraCooldown = 0;
     this.hp = this.maxHp;
     this.prana = this.maxPrana;
+    if (this.mountedChariotIndex !== null || this.mountedAnimalIndex !== null) {
+      this.dismountLocalPlayerCleanly(true);
+    }
     this.mountedChariotIndex = null;
     this.mountedAnimalIndex = null;
+    this.mountedSeatIndex = null;
     this.seatedOnThrone = false;
     this.isRamSwimming = false;
     this.cameraManualHold = 0;
@@ -5868,115 +7147,326 @@ export class RamayanaWorldEngine {
     return null;
   }
 
-  private syncCameraImmediate(): void {
-    const isMounted = this.mountedChariotIndex !== null || this.mountedAnimalIndex !== null;
-    const dist = isMounted ? this.camDistanceChariot : this.camDistanceFoot;
-    const horizDist = dist * Math.cos(this.camPitch);
-    const vertHeight = 1.65 + dist * Math.sin(this.camPitch);
-    const tx = this.playerX;
-    const ty = this.playerY + 1.65;
-    const tz = this.playerZ;
-    const camX = this.playerX + Math.sin(this.camYaw) * horizDist;
-    const camZ = this.playerZ + Math.cos(this.camYaw) * horizDist;
-    const camY = Math.max(this.surfaceHeightAt(camX, camZ, this.playerY) + 0.45, this.playerY + vertHeight);
-    this.clipCameraAgainstStaticColliders(tx, ty, tz, camX, camY, camZ);
-    this.camSmoothPos.set(_camClipResult.x, _camClipResult.y, _camClipResult.z);
-    this.camSmoothLook.set(tx, ty, tz);
+  private getNearFrustumSafetyMargin(): number {
+    const near = Math.max(0.05, this.camera.near);
+    const halfH = near * Math.tan(THREE.MathUtils.degToRad(this.camera.fov * 0.5));
+    const halfW = halfH * Math.max(0.5, this.camera.aspect);
+    return Math.min(0.115, Math.sqrt(near * near + halfH * halfH + halfW * halfW));
+  }
+
+  private resolveCameraSphereBoundary(
+    eye: THREE.Vector3,
+    center: THREE.Vector3,
+    minRadius: number,
+    pushBias: THREE.Vector3
+  ): void {
+    _fpDelta.subVectors(eye, center);
+    const dSq = _fpDelta.lengthSq();
+    const minSq = minRadius * minRadius;
+    if (dSq >= minSq) return;
+
+    if (dSq < 1e-7) {
+      _fpDelta.copy(pushBias);
+    } else {
+      _fpDelta.multiplyScalar(1 / Math.sqrt(dSq));
+      // Prevent resolution from pushing downward into chest cavity or backward into quiver
+      if (_fpDelta.y < -0.45 || _fpDelta.dot(pushBias) < -0.55) {
+        _fpDelta.lerp(pushBias, 0.72);
+        if (_fpDelta.lengthSq() < 1e-6) {
+          _fpDelta.copy(pushBias);
+        } else {
+          _fpDelta.normalize();
+        }
+      }
+    }
+    eye.copy(center).addScaledVector(_fpDelta, minRadius);
+  }
+
+  private resolveCameraCapsuleBoundary(
+    eye: THREE.Vector3,
+    segA: THREE.Vector3,
+    segB: THREE.Vector3,
+    minRadius: number,
+    pushBias: THREE.Vector3
+  ): void {
+    _fpDelta.subVectors(segB, segA);
+    const abLenSq = _fpDelta.lengthSq();
+    let t = 0;
+    if (abLenSq > 1e-7) {
+      t = THREE.MathUtils.clamp(
+        _fpClosest.subVectors(eye, segA).dot(_fpDelta) / abLenSq,
+        0,
+        1
+      );
+    }
+    _fpClosest.copy(segA).addScaledVector(_fpDelta, t);
+    this.resolveCameraSphereBoundary(eye, _fpClosest, minRadius, pushBias);
+  }
+
+  private clampCameraAgainstEnvironment(eye: THREE.Vector3, nearPad: number): void {
+    const wallPad = Math.max(0.14, nearPad + 0.04);
+    const grid = this.colliderGrid;
+    if (grid) {
+      grid.queryAABB(eye.x - wallPad, eye.x + wallPad, eye.z - wallPad, eye.z + wallPad);
+
+      const outB = grid.outBoxes;
+      const outBLen = grid.outBoxesLength;
+      for (let i = 0; i < outBLen; i++) {
+        const box = this.colliders[outB[i]];
+        if (box.height <= 1.65) continue;
+        const baseY = box.baseY ?? 0;
+        if (eye.y > baseY + box.height || eye.y < baseY + 0.15) continue;
+
+        const rotY = box.rotY ?? 0;
+        const cosR = rotY === 0 ? 1 : Math.cos(rotY);
+        const sinR = rotY === 0 ? 0 : Math.sin(rotY);
+        const dxW = eye.x - box.x;
+        const dzW = eye.z - box.z;
+        const lx = dxW * cosR - dzW * sinR;
+        const lz = dxW * sinR + dzW * cosR;
+
+        const cx = THREE.MathUtils.clamp(lx, -box.halfW, box.halfW);
+        const cz = THREE.MathUtils.clamp(lz, -box.halfD, box.halfD);
+        const dlx = lx - cx;
+        const dlz = lz - cz;
+        const dSq = dlx * dlx + dlz * dlz;
+        if (dSq < wallPad * wallPad) {
+          let pushLx = 0;
+          let pushLz = 0;
+          if (dSq > 1e-8) {
+            const d = Math.sqrt(dSq);
+            const push = wallPad - d;
+            pushLx = (dlx / d) * push;
+            pushLz = (dlz / d) * push;
+          } else {
+            const penX = box.halfW - Math.abs(lx);
+            const penZ = box.halfD - Math.abs(lz);
+            if (penX < penZ) {
+              pushLx = (lx >= 0 ? 1 : -1) * (penX + wallPad);
+            } else {
+              pushLz = (lz >= 0 ? 1 : -1) * (penZ + wallPad);
+            }
+          }
+          eye.x += pushLx * cosR + pushLz * sinR;
+          eye.z += -pushLx * sinR + pushLz * cosR;
+        }
+      }
+
+      const outC = grid.outCircles;
+      const outCLen = grid.outCirclesLength;
+      for (let i = 0; i < outCLen; i++) {
+        const c = this.circleColliders[outC[i]];
+        if (c.height <= 1.65) continue;
+        const baseY = c.baseY ?? 0;
+        if (eye.y > baseY + c.height || eye.y < baseY + 0.15) continue;
+        const dx = eye.x - c.x;
+        const dz = eye.z - c.z;
+        const lim = c.radius + wallPad;
+        const dSq = dx * dx + dz * dz;
+        if (dSq < lim * lim && dSq > 1e-8) {
+          const d = Math.sqrt(dSq);
+          const s = lim / d;
+          eye.x = c.x + dx * s;
+          eye.z = c.z + dz * s;
+        }
+      }
+    }
+
+    const eyeFloor = this.surfaceHeightAt(eye.x, eye.z, this.playerY) + Math.max(0.18, nearPad + 0.08);
+    if (eye.y < eyeFloor) eye.y = eyeFloor;
+    const postCeil = this.indoorCeilingLimitAt(this.playerX, this.playerY, this.playerZ);
+    if (postCeil !== null) {
+      const ceilClamp = Math.max(eyeFloor, postCeil - nearPad * 0.5);
+      if (eye.y > ceilClamp) eye.y = ceilClamp;
+    }
+  }
+
+  private computeFirstPersonEyePosition(out: THREE.Vector3): void {
+    const nearPad = this.getNearFrustumSafetyMargin();
+    const headNeckMinRadius = FP_HEAD_NECK_RADIUS + nearPad;
+
+    _fpFwd.set(-Math.sin(this.camYaw), 0, -Math.cos(this.camYaw));
+    _fpRight.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw));
+    _fpUp.set(0, 1, 0);
+    _fpPushBias
+      .copy(_fpFwd)
+      .multiplyScalar(0.86)
+      .addScaledVector(_fpUp, 0.51)
+      .normalize();
+
+    if (!this.ramRig) {
+      out.set(
+        this.playerX + _fpFwd.x * headNeckMinRadius,
+        this.playerY + 1.715,
+        this.playerZ + _fpFwd.z * headNeckMinRadius
+      );
+      this.clampCameraAgainstEnvironment(out, nearPad);
+      return;
+    }
+
+    this.ramRig.root.updateMatrixWorld(true);
+
+    // 1. World-space anatomical landmarks from live articulated rig
+    if (this.ramRig.headGroup) {
+      _fpHeadWorld.set(0, -0.055, -0.01);
+      this.ramRig.headGroup.localToWorld(_fpHeadWorld);
+    } else {
+      _fpHeadWorld.set(0, 0.72, -0.01);
+      this.ramRig.torso.localToWorld(_fpHeadWorld);
+    }
+
+    // 2. State-aware nominal eye anchor (swimming decouples from stroke bob/roll)
+    if (this.isRamSwimming) {
+      const sinS = Math.sin(this.swimCamTorsoPitch);
+      const cosS = Math.cos(this.swimCamTorsoPitch);
+      const spineLen = 0.74;
+      _fpSpineTop.set(
+        this.playerX + _fpFwd.x * (sinS * spineLen),
+        this.playerY + this.ramPose.hipY + cosS * spineLen,
+        this.playerZ + _fpFwd.z * (sinS * spineLen)
+      );
+      out
+        .copy(_fpSpineTop)
+        .addScaledVector(_fpFwd, 0.28)
+        .addScaledVector(_fpUp, 0.16);
+    } else {
+      if (this.ramRig.headGroup) {
+        _camTarget.set(0, 0.015, 0);
+        this.ramRig.headGroup.localToWorld(_camTarget);
+      } else {
+        _camTarget.set(0, 0.79, 0);
+        this.ramRig.torso.localToWorld(_camTarget);
+      }
+      const downwardChestClearance = Math.max(0, Math.sin(this.camPitch)) * 0.04;
+      out
+        .copy(_camTarget)
+        .addScaledVector(_fpFwd, headNeckMinRadius + downwardChestClearance * 0.5)
+        .addScaledVector(_fpUp, downwardChestClearance * 0.5);
+    }
+
+    // 3. Transform live arm/shoulder landmarks once outside solver loop
+    _fpArmL0.set(0, 0, 0);
+    this.ramRig.leftArm.localToWorld(_fpArmL0);
+    _fpArmL1.set(0, -0.22, 0);
+    this.ramRig.leftArm.localToWorld(_fpArmL1);
+
+    _fpArmR0.set(0, 0, 0);
+    this.ramRig.rightArm.localToWorld(_fpArmR0);
+    _fpArmR1.set(0, -0.22, 0);
+    this.ramRig.rightArm.localToWorld(_fpArmR1);
+
+    // 4. Multi-primitive anatomical collision boundary enforcement (2 iterations)
+    const neckCapRadius = 0.11 + nearPad;
+    const torsoCapRadius = 0.165 + nearPad;
+    const armGuardRadius = 0.075 + nearPad;
+    const quiverGuardRadius = 0.105 + nearPad;
+
+    for (let iter = 0; iter < 2; iter++) {
+      // Shoulder & upper-arm guards (critical during overhead swim strokes & bow aiming)
+      this.resolveCameraCapsuleBoundary(out, _fpArmL0, _fpArmL1, armGuardRadius, _fpPushBias);
+      this.resolveCameraCapsuleBoundary(out, _fpArmR0, _fpArmR1, armGuardRadius, _fpPushBias);
+
+      // Upper torso & pectoral chest capsule
+      _fpPrimA.set(0, 0.34, 0.0);
+      this.ramRig.torso.localToWorld(_fpPrimA);
+      _fpPrimB.set(0, 0.57, 0.0);
+      this.ramRig.torso.localToWorld(_fpPrimB);
+      this.resolveCameraCapsuleBoundary(out, _fpPrimA, _fpPrimB, torsoCapRadius, _fpPushBias);
+
+      // Back-mounted arrow quiver guard (prevents rear-look clipping on mounts/throne)
+      _fpPrimA.set(0.09, 0.66, -0.14);
+      this.ramRig.torso.localToWorld(_fpPrimA);
+      this.resolveCameraSphereBoundary(out, _fpPrimA, quiverGuardRadius, _fpPushBias);
+
+      // Neck-to-clavicle choker capsule
+      _fpPrimA.set(0, 0.60, 0.01);
+      this.ramRig.torso.localToWorld(_fpPrimA);
+      _fpPrimB.set(0, 0.75, -0.01);
+      this.ramRig.torso.localToWorld(_fpPrimB);
+      this.resolveCameraCapsuleBoundary(out, _fpPrimA, _fpPrimB, neckCapRadius, _fpPushBias);
+
+      // Primary 0.22m (+ near-frustum safety) Head & Neck exclusion sphere
+      this.resolveCameraSphereBoundary(out, _fpHeadWorld, headNeckMinRadius, _fpPushBias);
+
+      // Co-rider head exclusion sphere on shared 2-player vehicles so camera never clips into partner
+      const localMount = this.getLocalMountedVehicle();
+      if (localMount) {
+        const occ = localMount.kind === 'RATHA' ? localMount.chariot : localMount.animal;
+        const coRiderId = this.mountedSeatIndex === 0 ? occ.passengerId : occ.driverId;
+        if (coRiderId && this.remotePlayers.has(coRiderId)) {
+          const otherSeat: LanVehicleSeatIndex = this.mountedSeatIndex === 0 ? 1 : 0;
+          const vX = occ.x;
+          const vY = occ.y;
+          const vZ = occ.z;
+          const vYaw = occ.yaw;
+          const vPitch = localMount.kind === 'RATHA' ? localMount.chariot.pitch : 0;
+          const seatH =
+            localMount.kind === 'RATHA'
+              ? undefined
+              : localMount.animal.elephantRig
+              ? localMount.animal.elephantRig.seatHeight
+              : localMount.animal.horseRig
+              ? localMount.animal.horseRig.seatHeight
+              : 0.88;
+          computeVehicleSeatWorldPosition(
+            vX,
+            vY,
+            vZ,
+            vYaw,
+            vPitch,
+            localMount.kind,
+            otherSeat,
+            this._seatWorldScratch,
+            seatH
+          );
+          this._coRiderHeadScratch.set(
+            this._seatWorldScratch.x,
+            this._seatWorldScratch.y + (localMount.kind === 'RATHA' && otherSeat === 1 ? 1.56 : 1.52),
+            this._seatWorldScratch.z
+          );
+          this.resolveCameraSphereBoundary(
+            out,
+            this._coRiderHeadScratch,
+            headNeckMinRadius,
+            _fpPushBias
+          );
+        }
+      }
+    }
+
+    // 5. Ensure outward anatomical push-out never places eye inside terrain, ceilings, or walls
+    this.clampCameraAgainstEnvironment(out, nearPad);
+  }
+
+  private applyFirstPersonCamera(applyShake: boolean): void {
+    this.computeFirstPersonEyePosition(_camDesired);
+    const cosP = Math.cos(this.camPitch);
+    const lookDirX = -Math.sin(this.camYaw) * cosP;
+    const lookDirY = -Math.sin(this.camPitch);
+    const lookDirZ = -Math.cos(this.camYaw) * cosP;
+
+    _camTarget.set(
+      _camDesired.x + lookDirX * 12.0,
+      _camDesired.y + lookDirY * 12.0,
+      _camDesired.z + lookDirZ * 12.0
+    );
+
+    this.camSmoothPos.copy(_camDesired);
+    this.camSmoothLook.copy(_camTarget);
     this.updateRoofOcclusion(this.camSmoothPos.x, this.camSmoothPos.y, this.camSmoothPos.z);
+
     this.camera.position.copy(this.camSmoothPos);
+    if (applyShake && this.cameraShakeAmount > 0.01) {
+      const shakeAmp = Math.min(0.08, this.cameraShakeAmount * 0.06);
+      this.camera.position.x += (Math.random() - 0.5) * shakeAmp;
+      this.camera.position.y += (Math.random() - 0.5) * shakeAmp * 0.8;
+      this.camera.position.z += (Math.random() - 0.5) * shakeAmp;
+    }
     this.camera.lookAt(this.camSmoothLook);
   }
 
-  /**
-   * Traces from lookTarget -> desiredCamera against solid structural walls/pillars/mountains
-   * and enforces indoor ceiling height clamping so ceilings stay visible overhead without blocking sightlines.
-   */
-  private clipCameraAgainstStaticColliders(
-    tx: number,
-    ty: number,
-    tz: number,
-    desiredX: number,
-    desiredY: number,
-    desiredZ: number
-  ): void {
-    const steps = 10;
-    const margin = 0.34;
-    let safeFrac = 1.0;
-
-    const minQx = Math.min(tx, desiredX) - margin;
-    const maxQx = Math.max(tx, desiredX) + margin;
-    const minQz = Math.min(tz, desiredZ) - margin;
-    const maxQz = Math.max(tz, desiredZ) + margin;
-    const grid = this.colliderGrid;
-    grid.queryAABB(minQx, maxQx, minQz, maxQz);
-    const outB = grid.outBoxes;
-    const outBLen = grid.outBoxesLength;
-    const outC = grid.outCircles;
-    const outCLen = grid.outCirclesLength;
-
-    for (let s = 1; s <= steps; s++) {
-      const frac = s / steps;
-      const sx = tx + (desiredX - tx) * frac;
-      const sy = ty + (desiredY - ty) * frac;
-      const sz = tz + (desiredZ - tz) * frac;
-
-      let hit = false;
-      for (let i = 0; i < outBLen; i++) {
-        const box = this.colliders[outB[i]];
-        // Allow unobstructed sightlines over low window sills, dado walls, cots & balcony balustrades
-        if (box.height <= 1.65) continue;
-        const baseY = box.baseY ?? 0;
-        if (sy > baseY + box.height || sy < baseY + 0.15) continue;
-
-        const rotY = box.rotY ?? 0;
-        const cosR = Math.cos(rotY);
-        const sinR = Math.sin(rotY);
-        const dxW = sx - box.x;
-        const dzW = sz - box.z;
-        const lx = dxW * cosR - dzW * sinR;
-        const lz = dxW * sinR + dzW * cosR;
-        if (Math.abs(lx) <= box.halfW + margin && Math.abs(lz) <= box.halfD + margin) {
-          hit = true;
-          break;
-        }
-      }
-
-      if (!hit) {
-        for (let i = 0; i < outCLen; i++) {
-          const c = this.circleColliders[outC[i]];
-          if (c.height <= 1.65) continue;
-          const baseY = c.baseY ?? 0;
-          if (sy > baseY + c.height || sy < baseY + 0.15) continue;
-          const dx = sx - c.x;
-          const dz = sz - c.z;
-          const lim = c.radius + margin;
-          if (dx * dx + dz * dz <= lim * lim) {
-            hit = true;
-            break;
-          }
-        }
-      }
-
-      if (hit) {
-        safeFrac = Math.max(0.18, (s - 1) / steps);
-        break;
-      }
-    }
-
-    const cx = tx + (desiredX - tx) * safeFrac;
-    const cz = tz + (desiredZ - tz) * safeFrac;
-    let cy = ty + (desiredY - ty) * safeFrac;
-    const floorClearance = this.surfaceHeightAt(cx, cz, this.playerY) + 0.42;
-    if (cy < floorClearance) cy = floorClearance;
-
-    const ceilLimit = this.indoorCeilingLimitAt(this.playerX, this.playerY, this.playerZ);
-    if (ceilLimit !== null && cy > ceilLimit) {
-      cy = Math.max(floorClearance, ceilLimit);
-    }
-
-    _camClipResult.x = cx;
-    _camClipResult.y = cy;
-    _camClipResult.z = cz;
+  private syncCameraImmediate(): void {
+    this.applyFirstPersonCamera(false);
   }
 
   /**
@@ -6047,7 +7537,9 @@ export class RamayanaWorldEngine {
     const qPad = radius + 2.5;
     let qX = nx;
     let qZ = nz;
-    grid.queryAABB(qX - qPad, qX + qPad, qZ - qPad, qZ + qPad);
+    if (grid) {
+      grid.queryAABB(qX - qPad, qX + qPad, qZ - qPad, qZ + qPad);
+    }
     const radiusSq = radius * radius;
     const bridgeMargin = BRIDGE_HALF_WIDTH - 0.55 - radius;
 
@@ -6102,6 +7594,8 @@ export class RamayanaWorldEngine {
           }
         }
       }
+
+      if (!grid) continue;
 
       if (Math.abs(nx - qX) > 1.8 || Math.abs(nz - qZ) > 1.8) {
         qX = nx;
@@ -6809,9 +8303,14 @@ export class RamayanaWorldEngine {
   }
 
   private findNearestMount(): {
+    id: string;
     kind: 'RATHA' | 'HORSE' | 'ELEPHANT';
     index: number;
     label: string;
+    occupiedCount: number;
+    driverId: string | null;
+    passengerId: string | null;
+    isFull: boolean;
   } | null {
     let found = false;
     let bestDistSq = Infinity;
@@ -6825,9 +8324,14 @@ export class RamayanaWorldEngine {
       if (dSq < 4.8 * 4.8 && dSq < bestDistSq) {
         bestDistSq = dSq;
         found = true;
+        _nearestMountOut.id = c.id;
         _nearestMountOut.kind = 'RATHA';
         _nearestMountOut.index = i;
         _nearestMountOut.label = 'Royal Ratha';
+        _nearestMountOut.driverId = c.driverId;
+        _nearestMountOut.passengerId = c.passengerId;
+        _nearestMountOut.occupiedCount = (c.driverId ? 1 : 0) + (c.passengerId ? 1 : 0);
+        _nearestMountOut.isFull = c.driverId !== null && c.passengerId !== null;
       }
     }
 
@@ -6841,9 +8345,14 @@ export class RamayanaWorldEngine {
       if (dSq < reach * reach && dSq < bestDistSq) {
         bestDistSq = dSq;
         found = true;
+        _nearestMountOut.id = a.id;
         _nearestMountOut.kind = a.kind;
         _nearestMountOut.index = i;
         _nearestMountOut.label = a.label;
+        _nearestMountOut.driverId = a.driverId;
+        _nearestMountOut.passengerId = a.passengerId;
+        _nearestMountOut.occupiedCount = (a.driverId ? 1 : 0) + (a.passengerId ? 1 : 0);
+        _nearestMountOut.isFull = a.driverId !== null && a.passengerId !== null;
       }
     }
     return found ? _nearestMountOut : null;
@@ -6911,25 +8420,8 @@ export class RamayanaWorldEngine {
       this.playerY = this.surfaceHeightAt(this.playerX, this.playerZ, 0.9);
       this.restoreRamStandingClothes();
     }
-    if (this.mountedChariotIndex !== null) {
-      const ch = this.chariots[this.mountedChariotIndex];
-      ch.speed = 0;
-      this.autoDriveActive = false;
-      this.mountedChariotIndex = null;
-      this.restoreRamStandingClothes();
-      this.playerX = ch.x + Math.cos(ch.yaw) * 2.5;
-      this.playerZ = ch.z - Math.sin(ch.yaw) * 2.5;
-      this.playerY = this.surfaceHeightAt(this.playerX, this.playerZ, ch.y);
-    }
-    if (this.mountedAnimalIndex !== null) {
-      const an = this.animals[this.mountedAnimalIndex];
-      an.speed = 0;
-      this.autoDriveActive = false;
-      this.mountedAnimalIndex = null;
-      this.restoreRamStandingClothes();
-      this.playerX = an.x + Math.cos(an.yaw) * 1.6;
-      this.playerZ = an.z - Math.sin(an.yaw) * 1.6;
-      this.playerY = this.surfaceHeightAt(this.playerX, this.playerZ, an.y);
+    if (this.mountedChariotIndex !== null || this.mountedAnimalIndex !== null) {
+      this.dismountLocalPlayerCleanly(true);
     }
     if (this.stealthActive) {
       this.setStealthMode(false);
@@ -6949,25 +8441,31 @@ export class RamayanaWorldEngine {
   }
 
   private resolveAimDirection(dirOut: THREE.Vector3): void {
-    let dirX = -Math.sin(this.camYaw);
-    let dirZ = -Math.cos(this.camYaw);
-    let dirY = 0.02;
+    const cosP = Math.cos(this.camPitch);
+    let dirX = -Math.sin(this.camYaw) * cosP;
+    let dirY = -Math.sin(this.camPitch);
+    let dirZ = -Math.cos(this.camYaw) * cosP;
 
-    let bestScore = 0.55;
+    const eyeX = this.camSmoothPos.x;
+    const eyeY = this.camSmoothPos.y;
+    const eyeZ = this.camSmoothPos.z;
+    let bestScore = 0.72;
     for (const enemy of this.enemies) {
       if (!enemy.alive) continue;
-      const dx = enemy.x - this.playerX;
-      const dz = enemy.z - this.playerZ;
-      const dist = Math.hypot(dx, dz);
+      const dx = enemy.x - eyeX;
+      const dy = enemy.y + 1.25 - eyeY;
+      const dz = enemy.z - eyeZ;
+      const dist = Math.hypot(dx, dy, dz);
       if (dist > 38 || dist < 0.5) continue;
       const nx = dx / dist;
+      const ny = dy / dist;
       const nz = dz / dist;
-      const dot = nx * dirX + nz * dirZ;
+      const dot = nx * dirX + ny * dirY + nz * dirZ;
       if (dot > bestScore) {
         bestScore = dot;
         dirX = nx;
+        dirY = ny;
         dirZ = nz;
-        dirY = (enemy.y + 1.3 - (this.playerY + 1.5)) / dist;
       }
     }
     dirOut.set(dirX, dirY, dirZ).normalize();
@@ -6979,8 +8477,14 @@ export class RamayanaWorldEngine {
     const dirY = _v1.y;
     const dirZ = _v1.z;
 
-    // Face Lord Ram toward shot
-    this.playerYaw = Math.atan2(dirX, dirZ);
+    // On foot, keep Ram's body aligned with first-person look yaw
+    if (
+      this.mountedChariotIndex === null &&
+      this.mountedAnimalIndex === null &&
+      !this.seatedOnThrone
+    ) {
+      this.playerYaw = this.camYaw + Math.PI;
+    }
 
     const archetype: ProjectileArchetypeId = isChakra
       ? 'CHAKRA'
@@ -7011,7 +8515,9 @@ export class RamayanaWorldEngine {
 
     const startY =
       this.mountedChariotIndex !== null
-        ? this.playerY + 2.35
+        ? this.mountedSeatIndex === 1
+          ? this.playerY + 1.52
+          : this.playerY + 2.35
         : this.mountedAnimalIndex !== null
         ? this.playerY + 1.5
         : this.playerY + 1.45;
@@ -7820,7 +9326,8 @@ export class RamayanaWorldEngine {
     steerRate: number,
     isAiming: boolean,
     elapsed: number,
-    dt = 0.016
+    dt = 0.016,
+    poseState: CharacterPoseState = this.ramPose
   ): void {
     const breath = Math.sin(elapsed * 2.2) * 0.01;
     const steerShift = THREE.MathUtils.clamp(steerRate * 0.16, -0.22, 0.22);
@@ -7832,7 +9339,7 @@ export class RamayanaWorldEngine {
     const tRightElbow = isAiming ? -1.24 : -0.72;
     const tTorsoY = THREE.MathUtils.clamp(-steerRate * 0.14, -0.18, 0.18);
 
-    const p = this.ramPose;
+    const p = poseState;
     const lam = 16;
     p.hipY = THREE.MathUtils.damp(p.hipY, 0.94, lam, dt);
     p.leftHip = THREE.MathUtils.damp(p.leftHip, -1.46, lam, dt);
@@ -7872,6 +9379,63 @@ export class RamayanaWorldEngine {
       rig.capePivot.position.set(-0.118, 0.605, -0.042);
       rig.capePivot.scale.set(1, 0.48, 1);
       rig.capePivot.rotation.x = 0.02;
+    }
+
+    rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
+    rig.leftArm.rotation.set(p.leftArm, 0, p.leftArmZ);
+    rig.rightArm.rotation.set(p.rightArm, 0, p.rightArmZ);
+    rig.leftElbow.rotation.x = p.leftElbow;
+    rig.rightElbow.rotation.x = p.rightElbow;
+  }
+
+  private applyChariotPassengerPose(
+    rig: CharacterRig,
+    isAiming: boolean,
+    elapsed: number,
+    dt = 0.016,
+    poseState: CharacterPoseState = this.ramPose
+  ): void {
+    const p = poseState;
+    const lam = 16;
+    const sway = Math.sin(elapsed * 2.3) * 0.014;
+    p.hipY = THREE.MathUtils.damp(p.hipY, 0.93, lam, dt);
+    p.leftHip = THREE.MathUtils.damp(p.leftHip, -0.12, lam, dt);
+    p.rightHip = THREE.MathUtils.damp(p.rightHip, 0.1, lam, dt);
+    p.leftLegZ = THREE.MathUtils.damp(p.leftLegZ, -0.08, lam, dt);
+    p.rightLegZ = THREE.MathUtils.damp(p.rightLegZ, 0.08, lam, dt);
+    p.leftKnee = THREE.MathUtils.damp(p.leftKnee, 0.18, lam, dt);
+    p.rightKnee = THREE.MathUtils.damp(p.rightKnee, 0.14, lam, dt);
+    p.leftAnkle = THREE.MathUtils.damp(p.leftAnkle, -0.06, lam, dt);
+    p.rightAnkle = THREE.MathUtils.damp(p.rightAnkle, -0.06, lam, dt);
+    p.pleatRotX = THREE.MathUtils.damp(p.pleatRotX, -0.08, lam, dt);
+    p.torsoRotX = THREE.MathUtils.damp(p.torsoRotX, 0.04 + sway, lam, dt);
+    p.torsoRotY = THREE.MathUtils.damp(p.torsoRotY, isAiming ? 0.12 : 0, lam, dt);
+    p.torsoRotZ = THREE.MathUtils.damp(p.torsoRotZ, 0, lam, dt);
+    p.leftArm = THREE.MathUtils.damp(p.leftArm, isAiming ? -1.24 : -0.34, lam, dt);
+    p.rightArm = THREE.MathUtils.damp(p.rightArm, isAiming ? -0.68 : -0.58, lam, dt);
+    p.leftArmZ = THREE.MathUtils.damp(p.leftArmZ, isAiming ? 0.04 : 0.1, lam, dt);
+    p.rightArmZ = THREE.MathUtils.damp(p.rightArmZ, isAiming ? -0.04 : -0.1, lam, dt);
+    p.leftElbow = THREE.MathUtils.damp(p.leftElbow, isAiming ? -0.28 : -0.32, lam, dt);
+    p.rightElbow = THREE.MathUtils.damp(p.rightElbow, isAiming ? -1.28 : -0.68, lam, dt);
+
+    rig.torso.position.y = p.hipY;
+    rig.leftLeg.position.y = p.hipY;
+    rig.rightLeg.position.y = p.hipY;
+    rig.leftLeg.rotation.set(p.leftHip, 0, p.leftLegZ);
+    rig.rightLeg.rotation.set(p.rightHip, 0, p.rightLegZ);
+    rig.leftKnee.rotation.x = p.leftKnee;
+    rig.rightKnee.rotation.x = p.rightKnee;
+    rig.leftAnkle.rotation.x = p.leftAnkle;
+    rig.rightAnkle.rotation.x = p.rightAnkle;
+
+    if (rig.centerPleat) {
+      rig.centerPleat.rotation.x = p.pleatRotX;
+      rig.centerPleat.scale.set(1.0, 1.0, 1.0);
+    }
+    if (rig.capePivot) {
+      rig.capePivot.position.set(-0.118, 0.605, -0.052);
+      rig.capePivot.scale.set(1, 1, 1);
+      rig.capePivot.rotation.x = 0.08 + Math.sin(elapsed * 2.8) * 0.03;
     }
 
     rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
@@ -7943,7 +9507,8 @@ export class RamayanaWorldEngine {
     speedNorm: number,
     isAiming: boolean,
     elapsed: number,
-    dt = 0.016
+    dt = 0.016,
+    poseState: CharacterPoseState = this.ramPose
   ): void {
     const bounce = Math.abs(Math.sin(gaitCycle)) * 0.024 * speedNorm;
     const tHipY = 0.9 + bounce;
@@ -7961,7 +9526,7 @@ export class RamayanaWorldEngine {
     const tLeftElbow = isAiming ? -0.32 : isEle ? -0.72 : -0.82;
     const tRightElbow = isAiming ? -1.24 : isEle ? -0.72 : -0.82;
 
-    const p = this.ramPose;
+    const p = poseState;
     const lam = 16;
     p.hipY = THREE.MathUtils.damp(p.hipY, tHipY, lam, dt);
     p.leftHip = THREE.MathUtils.damp(p.leftHip, tHipX, lam, dt);
@@ -8558,7 +10123,7 @@ export class RamayanaWorldEngine {
       }
     }
 
-    // 1. Camera look rotation (unrestricted vertical pitch) & scroll/pinch zoom
+    // 1. Strict First-Person Camera look rotation (horizontal 360 + vertical pitch; no zoom/perspective switching)
     const hasManualDrag =
       Math.abs(this.input.cameraDeltaX) > 0.25 ||
       Math.abs(this.input.cameraDeltaY) > 0.25;
@@ -8572,28 +10137,11 @@ export class RamayanaWorldEngine {
     this.camYaw -= this.input.cameraDeltaX * 0.0065;
     this.camPitch = THREE.MathUtils.clamp(
       this.camPitch + this.input.cameraDeltaY * 0.0055,
-      -0.85,
+      -1.22,
       1.28
     );
     this.input.cameraDeltaX = 0;
     this.input.cameraDeltaY = 0;
-
-    if (Math.abs(this.input.zoomDelta) > 0.001) {
-      if (this.mountedChariotIndex !== null || this.mountedAnimalIndex !== null) {
-        this.camDistanceChariot = THREE.MathUtils.clamp(
-          this.camDistanceChariot + this.input.zoomDelta,
-          4.6,
-          22.0
-        );
-      } else {
-        this.camDistanceFoot = THREE.MathUtils.clamp(
-          this.camDistanceFoot + this.input.zoomDelta,
-          2.8,
-          18.0
-        );
-      }
-      this.input.zoomDelta = 0;
-    }
 
     // Keep SkyDome & Starfield centered smoothly relative to player across 2.5 km world & step seamless day-night cycle
     const dayCycleDurationSec = 140;
@@ -8658,8 +10206,10 @@ export class RamayanaWorldEngine {
 
     // Keep idle & parked chariot horses alive with distance-LOD breathing (visibility culled after camera lookAt)
     for (let i = 0; i < this.chariots.length; i++) {
-      if (i === this.mountedChariotIndex) continue;
       const ch = this.chariots[i];
+      if (i === this.mountedChariotIndex && (this.mountedSeatIndex !== 1 || Math.abs(ch.speed) > 0.35)) {
+        continue;
+      }
       const dSq = (ch.x - pxIdle) * (ch.x - pxIdle) + (ch.z - pzIdle) * (ch.z - pzIdle);
       if (dSq > 8100 * profDistScaleSq) continue;
       for (let sIdx = 0; sIdx < ch.rig.steeds.length; sIdx++) {
@@ -8690,6 +10240,33 @@ export class RamayanaWorldEngine {
     this.stepVolcanicAtmosphere(dt);
     this.updateAtmosphericMood();
 
+    // Expire transient vehicle notices and retry reliable VEHICLE_ACTION on packet loss
+    if (this.mountNoticeText && performance.now() > this.mountNoticeExpiresMs) {
+      this.mountNoticeText = null;
+    }
+    if (this.pendingVehicleAction) {
+      const nowMs = performance.now();
+      if (!this.lanClient?.isClientInMatch()) {
+        this.pendingVehicleAction = null;
+      } else if (nowMs >= this.pendingVehicleAction.nextRetryAtMs) {
+        if (this.pendingVehicleAction.sentCount >= 8) {
+          this.pendingVehicleAction = null;
+          this.showMountNotice('Seat sync timed out — restored cleanly');
+        } else {
+          this.pendingVehicleAction.sentCount++;
+          this.pendingVehicleAction.nextRetryAtMs = nowMs + 180;
+          this.lanClient.sendVehicleAction({
+            actionId: this.pendingVehicleAction.actionId,
+            vehicleId: this.pendingVehicleAction.vehicleId,
+            action: this.pendingVehicleAction.action,
+            preferredSeat: this.pendingVehicleAction.preferredSeat,
+            seq: this.pendingVehicleAction.seq,
+            clientTsMs: Date.now(),
+          });
+        }
+      }
+    }
+
     // 2. Explicit Interact (Quest Altar/Pearl/Moon-Dial -> Simhasana Throne OR Mount / Dismount)
     if (this.input.interactPressed) {
       this.input.interactPressed = false;
@@ -8702,82 +10279,8 @@ export class RamayanaWorldEngine {
         this.restoreRamStandingClothes();
         soundEngine.playMountChariot();
         this.emitHud();
-      } else if (this.mountedChariotIndex !== null) {
-        const wasStealth = this.stealthActive;
-        const ch = this.chariots[this.mountedChariotIndex];
-        ch.speed = 0;
-        this.autoDriveActive = false;
-        if (ch.rig.leftReinMesh && ch.rig.leftBridleHook && ch.rig.leftRailHook) {
-          updateDynamicReinMesh(ch.rig.leftReinMesh, ch.rig.leftBridleHook, ch.rig.leftRailHook, 0.2);
-        }
-        if (ch.rig.rightReinMesh && ch.rig.rightBridleHook && ch.rig.rightRailHook) {
-          updateDynamicReinMesh(ch.rig.rightReinMesh, ch.rig.rightBridleHook, ch.rig.rightRailHook, 0.2);
-        }
-        this.mountedChariotIndex = null;
-        this.restoreRamStandingClothes();
-        this.setStealthMode(wasStealth);
-        this.cameraManualHold = 0;
-        this.camChariotLockTimer = 0;
-        const sinChY = Math.sin(ch.yaw);
-        const cosChY = Math.cos(ch.yaw);
-        let chosenX = ch.x + cosChY * 2.85;
-        let chosenZ = ch.z - sinChY * 2.85;
-        if (isInRiverWater(chosenX, chosenZ)) {
-          const altX = ch.x - cosChY * 2.85;
-          const altZ = ch.z + sinChY * 2.85;
-          if (!isInRiverWater(altX, altZ)) {
-            chosenX = altX;
-            chosenZ = altZ;
-          } else {
-            const backX = ch.x - sinChY * 2.95;
-            const backZ = ch.z - cosChY * 2.95;
-            if (!isInRiverWater(backX, backZ)) {
-              chosenX = backX;
-              chosenZ = backZ;
-            }
-          }
-        }
-        const safePos = this.resolveStaticColliders(chosenX, chosenZ, 0.58, ch.y);
-        this.playerX = safePos.x;
-        this.playerZ = safePos.z;
-        this.playerY = this.surfaceHeightAt(this.playerX, this.playerZ, ch.y);
-        this.ramRig.root.rotation.order = 'YXZ';
-        this.ramRig.root.rotation.set(0, this.playerYaw, 0);
-        soundEngine.playMountChariot();
-        this.emitHud();
-      } else if (this.mountedAnimalIndex !== null) {
-        const wasStealth = this.stealthActive;
-        const an = this.animals[this.mountedAnimalIndex];
-        an.speed = 0;
-        this.autoDriveActive = false;
-        if (an.horseRig?.leftReinMesh && an.horseRig.rightReinMesh && an.horseRig.leftPommelHook && an.horseRig.rightPommelHook) {
-          an.horseRig.group.updateMatrixWorld(true);
-          an.horseRig.leftBitAnchor.getWorldPosition(_v1);
-          an.horseRig.group.worldToLocal(_v1);
-          updateDynamicReinMesh(an.horseRig.leftReinMesh, _v1, an.horseRig.leftPommelHook, 0.18);
-          an.horseRig.rightBitAnchor.getWorldPosition(_v2);
-          an.horseRig.group.worldToLocal(_v2);
-          updateDynamicReinMesh(an.horseRig.rightReinMesh, _v2, an.horseRig.rightPommelHook, 0.18);
-        }
-        this.mountedAnimalIndex = null;
-        this.restoreRamStandingClothes();
-        this.setStealthMode(wasStealth);
-        this.cameraManualHold = 0;
-        this.camChariotLockTimer = 0;
-        const offDist = an.kind === 'ELEPHANT' ? 2.25 : 1.55;
-        const safePos = this.resolveStaticColliders(
-          an.x + Math.cos(an.yaw) * offDist,
-          an.z - Math.sin(an.yaw) * offDist,
-          0.58,
-          an.y
-        );
-        this.playerX = safePos.x;
-        this.playerZ = safePos.z;
-        this.playerY = this.surfaceHeightAt(this.playerX, this.playerZ, an.y);
-        this.ramRig.root.rotation.order = 'YXZ';
-        this.ramRig.root.rotation.set(0, this.playerYaw, 0);
-        soundEngine.playMountChariot();
-        this.emitHud();
+      } else if (this.mountedChariotIndex !== null || this.mountedAnimalIndex !== null) {
+        this.dismountLocalPlayerCleanly(true);
       } else if (this.isNearThrone()) {
         this.seatedOnThrone = true;
         this.autoDriveActive = false;
@@ -8794,47 +10297,53 @@ export class RamayanaWorldEngine {
         this.emitHud();
       } else {
         const nearMount = this.findNearestMount();
-        if (nearMount?.kind === 'RATHA') {
-          const wasStealth = this.stealthActive;
-          this.mountedChariotIndex = nearMount.index;
-          this.autoDriveActive = false;
-          this.isRamSwimming = false;
-          this.setStealthMode(wasStealth);
-          this.cameraManualHold = 0;
-          this.camChariotLockTimer = 0.7;
-          soundEngine.playMountChariot();
-          this.emitHud();
-        } else if (nearMount) {
-          const wasStealth = this.stealthActive;
-          this.mountedAnimalIndex = nearMount.index;
-          this.autoDriveActive = false;
-          this.isRamSwimming = false;
-          this.setStealthMode(wasStealth);
-          this.cameraManualHold = 0;
-          this.camChariotLockTimer = 0.7;
-          soundEngine.playMountChariot();
-          this.emitHud();
+        if (nearMount) {
+          if (nearMount.isFull) {
+            this.showMountNotice(`${nearMount.label} is full (2/2 players)`);
+          } else {
+            const openSeat: LanVehicleSeatIndex = nearMount.driverId === null ? 0 : 1;
+            this.boardVehicleLocal(nearMount.kind, nearMount.index, openSeat);
+            if (this.lanClient?.isClientInMatch()) {
+              this.queueClientVehicleAction(nearMount.id, 'BOARD', openSeat);
+            } else if (this.lanClient?.isHostingMatch()) {
+              this.lanClient.sendWorldSnapshot(this.buildHostWorldSnapshot());
+            }
+          }
         }
       }
     }
 
-    // 2b. Universal Stealth Mode toggle & Paved-Path Auto-Drive toggle (Ratha, Ashva & Sacred Elephant)
+    // 2b. Universal Stealth Mode toggle, Seat Swap (G), & Paved-Path Auto-Drive toggle
     if (this.input.stealthTogglePressed) {
       this.input.stealthTogglePressed = false;
       this.setStealthMode(!this.stealthActive);
       this.emitHud();
     }
 
+    if (this.input.switchSeatPressed) {
+      this.input.switchSeatPressed = false;
+      this.triggerSwitchSeat();
+    }
+
     if (this.input.autoDriveTogglePressed) {
       this.input.autoDriveTogglePressed = false;
       if (this.mountedChariotIndex !== null || this.mountedAnimalIndex !== null) {
-        this.autoDriveActive = !this.autoDriveActive;
-        this.chariotAutoWaypoints.length = 0;
-        this.chariotAutoWpIdx = 0;
-        this.chariotAutoGoalKey = '';
-        soundEngine.playMountChariot();
-        this.emitHud();
+        if (this.mountedSeatIndex === 1) {
+          this.showMountNotice('Only the driver can toggle Auto-Drive');
+        } else {
+          this.autoDriveActive = !this.autoDriveActive;
+          this.chariotAutoWaypoints.length = 0;
+          this.chariotAutoWpIdx = 0;
+          this.chariotAutoGoalKey = '';
+          soundEngine.playMountChariot();
+          this.emitHud();
+        }
       }
+    }
+
+    // Dead-reckon & terrain-snap remotely driven vehicles before positioning any local Passenger
+    if (this.lanClient?.isMultiplayerActive()) {
+      this.updateSyncedVehicles(dt, elapsed);
     }
 
     // 3. Movement & Brahmastra Summon Pose Lock
@@ -8877,254 +10386,289 @@ export class RamayanaWorldEngine {
       this.input.jumpPressed = false;
       this.isRamSwimming = false;
       const ch = this.chariots[this.mountedChariotIndex];
+      const isPassenger = this.mountedSeatIndex === 1;
       let steerInput = 0;
 
-      if (this.autoDriveActive) {
-        const activeMission = MISSIONS[this.missionIdx];
-        const goalX =
-          activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.x : 0;
-        const goalZ =
-          activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.z : -56;
-        const goalKey = `${goalX.toFixed(0)}:${goalZ.toFixed(0)}`;
-        if (this.chariotAutoWaypoints.length === 0 || this.chariotAutoGoalKey !== goalKey) {
-          buildAutoDriveRoute(ch.x, ch.z, ch.yaw, goalX, goalZ, this.chariotAutoWaypoints);
-          this.chariotAutoWpIdx = 0;
-          this.chariotAutoGoalKey = goalKey;
+      if (!isPassenger) {
+        const startChX = ch.x;
+        const startChZ = ch.z;
+
+        if (this.autoDriveActive) {
+          const activeMission = MISSIONS[this.missionIdx];
+          const goalX =
+            activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.x : 0;
+          const goalZ =
+            activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.z : -56;
+          const goalKey = `${goalX.toFixed(0)}:${goalZ.toFixed(0)}`;
+          if (this.chariotAutoWaypoints.length === 0 || this.chariotAutoGoalKey !== goalKey) {
+            buildAutoDriveRoute(ch.x, ch.z, ch.yaw, goalX, goalZ, this.chariotAutoWaypoints);
+            this.chariotAutoWpIdx = 0;
+            this.chariotAutoGoalKey = goalKey;
+          }
+          const lookahead = THREE.MathUtils.clamp(6.0 + Math.abs(ch.speed) * 0.28, 6.0, 14.0);
+          const route = stepAutoDriveRoute(
+            ch.x,
+            ch.z,
+            this.chariotAutoWaypoints,
+            this.chariotAutoWpIdx,
+            goalX,
+            goalZ,
+            lookahead
+          );
+          this.chariotAutoWpIdx = route.wpIdx;
+
+          const toTx = route.targetX - ch.x;
+          const toTz = route.targetZ - ch.z;
+          const distT = Math.hypot(toTx, toTz);
+
+          const autoMaxSpeed = this.input.sprint ? 76 : 28;
+          const stopAtGoal = route.distToGoal < 7.5 || my < -0.25 || distT < 0.35;
+
+          let yawDiff = 0;
+          if (!stopAtGoal && distT > 0.15) {
+            const desiredYaw = Math.atan2(toTx, toTz);
+            yawDiff = desiredYaw - ch.yaw;
+            while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+            while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+            steerInput = THREE.MathUtils.clamp(-yawDiff * 0.7, -1, 1);
+            // Strict angular-velocity clamp prevents sudden 180 deg whips or erratic spinning
+            const maxTurnStep = (Math.abs(yawDiff) > 0.75 ? 1.75 : 2.15) * dt;
+            ch.yaw += THREE.MathUtils.clamp(yawDiff, -maxTurnStep, maxTurnStep);
+          }
+
+          // Slow gently during sharp corners or initial alignment so chariot remains strictly on paved road
+          const alignFactor = Math.abs(yawDiff) > 0.7 ? 0.16 : Math.max(0.35, Math.cos(yawDiff));
+          const targetAutoSpeed = stopAtGoal ? 0 : autoMaxSpeed * alignFactor;
+          ch.speed = THREE.MathUtils.damp(ch.speed, targetAutoSpeed, 4.5, dt);
+
+          const prevChX = ch.x;
+          const prevChZ = ch.z;
+          const nextX = ch.x + Math.sin(ch.yaw) * ch.speed * dt;
+          const nextZ = ch.z + Math.cos(ch.yaw) * ch.speed * dt;
+          const resolved = this.resolveChariotStaticCCD(ch.x, ch.z, nextX, nextZ, ch.yaw, ch.y);
+          const movedChDist = Math.hypot(resolved.x - prevChX, resolved.z - prevChZ);
+          const chSign = ch.speed >= 0 ? 1 : -1;
+          ch.x = resolved.x;
+          ch.z = resolved.z;
+          if (resolved.blocked) {
+            ch.speed *= 0.35;
+          }
+          ch.rig.leftWheel.rotation.x += chSign * movedChDist * 1.1;
+          ch.rig.rightWheel.rotation.x += chSign * movedChDist * 1.1;
+          ch.gaitPhase += (movedChDist / 2.25) * Math.PI * 2;
+        } else {
+          // Manual Ratha Control with speed-coupled directional steering & hysteresis (zero erratic spinning)
+          this.chariotAutoWaypoints.length = 0;
+          const maxSpeed = this.input.sprint ? 82 : 28;
+          const targetSpeed = my * maxSpeed;
+          ch.speed = THREE.MathUtils.damp(ch.speed, targetSpeed, 4.8, dt);
+
+          if (ch.speed < -1.0) this.chariotReverseIntent = true;
+          else if (ch.speed > 0.4 || my > 0.1) this.chariotReverseIntent = false;
+
+          if (Math.abs(mx) > 0.08) {
+            const turnSign = this.chariotReverseIntent ? -1 : 1;
+            steerInput = mx * turnSign;
+            const speedFrac = Math.min(1, Math.abs(ch.speed) / 14);
+            const turnRate = THREE.MathUtils.lerp(0.82, 1.48, speedFrac);
+            ch.yaw -= steerInput * turnRate * dt;
+          }
+
+          const prevChX = ch.x;
+          const prevChZ = ch.z;
+          const nextX = ch.x + Math.sin(ch.yaw) * ch.speed * dt;
+          const nextZ = ch.z + Math.cos(ch.yaw) * ch.speed * dt;
+          const resolved = this.resolveChariotStaticCCD(
+            ch.x,
+            ch.z,
+            nextX,
+            nextZ,
+            ch.yaw,
+            ch.y
+          );
+          const movedChDist = Math.hypot(resolved.x - prevChX, resolved.z - prevChZ);
+          const chSign = ch.speed >= 0 ? 1 : -1;
+          ch.x = resolved.x;
+          ch.z = resolved.z;
+          if (resolved.blocked) {
+            ch.speed *= 0.35;
+          }
+          ch.rig.leftWheel.rotation.x += chSign * movedChDist * 1.1;
+          ch.rig.rightWheel.rotation.x += chSign * movedChDist * 1.1;
+          ch.gaitPhase += (movedChDist / 2.25) * Math.PI * 2;
         }
-        const lookahead = THREE.MathUtils.clamp(6.0 + Math.abs(ch.speed) * 0.28, 6.0, 14.0);
-        const route = stepAutoDriveRoute(
-          ch.x,
-          ch.z,
-          this.chariotAutoWaypoints,
-          this.chariotAutoWpIdx,
-          goalX,
-          goalZ,
-          lookahead
-        );
-        this.chariotAutoWpIdx = route.wpIdx;
+        this.syncChariotTerrainSupport(ch, dt);
+        ch.vx = (ch.x - startChX) / Math.max(0.001, dt);
+        ch.vz = (ch.z - startChZ) / Math.max(0.001, dt);
 
-        const toTx = route.targetX - ch.x;
-        const toTz = route.targetZ - ch.z;
-        const distT = Math.hypot(toTx, toTz);
-
-        const autoMaxSpeed = this.input.sprint ? 76 : 28;
-        const stopAtGoal = route.distToGoal < 7.5 || my < -0.25 || distT < 0.35;
-
-        let yawDiff = 0;
-        if (!stopAtGoal && distT > 0.15) {
-          const desiredYaw = Math.atan2(toTx, toTz);
-          yawDiff = desiredYaw - ch.yaw;
-          while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
-          while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
-          steerInput = THREE.MathUtils.clamp(-yawDiff * 0.7, -1, 1);
-          // Strict angular-velocity clamp prevents sudden 180 deg whips or erratic spinning
-          const maxTurnStep = (Math.abs(yawDiff) > 0.75 ? 1.75 : 2.15) * dt;
-          ch.yaw += THREE.MathUtils.clamp(yawDiff, -maxTurnStep, maxTurnStep);
+        const chariotSpdNorm = THREE.MathUtils.clamp(Math.abs(ch.speed) / 28, 0, 1);
+        for (let sIdx = 0; sIdx < ch.rig.steeds.length; sIdx++) {
+          this.animateRoyalHorseRig(
+            ch.rig.steeds[sIdx],
+            ch.gaitPhase + sIdx * 0.45,
+            chariotSpdNorm,
+            elapsed,
+            (this.mountedChariotIndex ?? 0) * 3.1 + sIdx * 1.4,
+            ch.steedStates[sIdx],
+            dt,
+            ch.yaw
+          );
         }
 
-        // Slow gently during sharp corners or initial alignment so chariot remains strictly on paved road
-        const alignFactor = Math.abs(yawDiff) > 0.7 ? 0.16 : Math.max(0.35, Math.cos(yawDiff));
-        const targetAutoSpeed = stopAtGoal ? 0 : autoMaxSpeed * alignFactor;
-        ch.speed = THREE.MathUtils.damp(ch.speed, targetAutoSpeed, 4.5, dt);
-
-        const prevChX = ch.x;
-        const prevChZ = ch.z;
-        const nextX = ch.x + Math.sin(ch.yaw) * ch.speed * dt;
-        const nextZ = ch.z + Math.cos(ch.yaw) * ch.speed * dt;
-        const resolved = this.resolveChariotStaticCCD(ch.x, ch.z, nextX, nextZ, ch.yaw, ch.y);
-        const movedChDist = Math.hypot(resolved.x - prevChX, resolved.z - prevChZ);
-        const chSign = ch.speed >= 0 ? 1 : -1;
-        ch.x = resolved.x;
-        ch.z = resolved.z;
-        if (resolved.blocked) {
-          ch.speed *= 0.35;
-        }
-        ch.rig.leftWheel.rotation.x += chSign * movedChDist * 1.1;
-        ch.rig.rightWheel.rotation.x += chSign * movedChDist * 1.1;
-        ch.gaitPhase += (movedChDist / 2.25) * Math.PI * 2;
-      } else {
-        // Manual Ratha Control with speed-coupled directional steering & hysteresis (zero erratic spinning)
-        this.chariotAutoWaypoints.length = 0;
-        const maxSpeed = this.input.sprint ? 82 : 28;
-        const targetSpeed = my * maxSpeed;
-        ch.speed = THREE.MathUtils.damp(ch.speed, targetSpeed, 4.8, dt);
-
-        if (ch.speed < -1.0) this.chariotReverseIntent = true;
-        else if (ch.speed > 0.4 || my > 0.1) this.chariotReverseIntent = false;
-
-        if (Math.abs(mx) > 0.08) {
-          const turnSign = this.chariotReverseIntent ? -1 : 1;
-          steerInput = mx * turnSign;
-          const speedFrac = Math.min(1, Math.abs(ch.speed) / 14);
-          const turnRate = THREE.MathUtils.lerp(0.82, 1.48, speedFrac);
-          ch.yaw -= steerInput * turnRate * dt;
-        }
-
-        const prevChX = ch.x;
-        const prevChZ = ch.z;
-        const nextX = ch.x + Math.sin(ch.yaw) * ch.speed * dt;
-        const nextZ = ch.z + Math.cos(ch.yaw) * ch.speed * dt;
-        const resolved = this.resolveChariotStaticCCD(
-          ch.x,
-          ch.z,
-          nextX,
-          nextZ,
-          ch.yaw,
-          ch.y
-        );
-        const movedChDist = Math.hypot(resolved.x - prevChX, resolved.z - prevChZ);
-        const chSign = ch.speed >= 0 ? 1 : -1;
-        ch.x = resolved.x;
-        ch.z = resolved.z;
-        if (resolved.blocked) {
-          ch.speed *= 0.35;
-        }
-        ch.rig.leftWheel.rotation.x += chSign * movedChDist * 1.1;
-        ch.rig.rightWheel.rotation.x += chSign * movedChDist * 1.1;
-        ch.gaitPhase += (movedChDist / 2.25) * Math.PI * 2;
-      }
-      this.syncChariotTerrainSupport(ch, dt);
-
-      const chariotSpdNorm = THREE.MathUtils.clamp(Math.abs(ch.speed) / 28, 0, 1);
-      for (let sIdx = 0; sIdx < ch.rig.steeds.length; sIdx++) {
-        this.animateRoyalHorseRig(
-          ch.rig.steeds[sIdx],
-          ch.gaitPhase + sIdx * 0.45,
-          chariotSpdNorm,
-          elapsed,
-          (this.mountedChariotIndex ?? 0) * 3.1 + sIdx * 1.4,
-          ch.steedStates[sIdx],
-          dt,
-          ch.yaw
-        );
-      }
-
-      // Chariot ramming damage against Rakshasas (disabled while stealth mode is active to bypass hostiles)
-      if (!this.stealthActive && Math.abs(ch.speed) > 10) {
-        for (const e of this.enemies) {
-          if (!e.alive) continue;
-          const d = Math.hypot(e.x - ch.x, e.z - ch.z);
-          if (d < 3.1) {
-            this.damageEnemy(e, 45);
-            this.spawnBlast(e.x, e.y + 1, e.z, 0xf4c44e);
+        // Chariot ramming damage against Rakshasas (disabled while stealth mode is active to bypass hostiles)
+        if (!this.stealthActive && Math.abs(ch.speed) > 10) {
+          for (const e of this.enemies) {
+            if (!e.alive) continue;
+            const d = Math.hypot(e.x - ch.x, e.z - ch.z);
+            if (d < 3.1) {
+              this.damageEnemy(e, 45);
+              this.spawnBlast(e.x, e.y + 1, e.z, 0xf4c44e);
+            }
           }
         }
       }
 
-      // Sync seated Lord Ram cleanly onto Ratha throne cushion & pitch plane
-      const dLocalZ = -0.72;
-      const dLocalY = 0.62;
-      const sinP = Math.sin(ch.pitch);
-      const cosP = Math.cos(ch.pitch);
-      const tiltedZ = -dLocalY * sinP + dLocalZ * cosP;
-      const tiltedY = dLocalY * cosP + dLocalZ * sinP;
-      this.playerX = ch.x + Math.sin(ch.yaw) * tiltedZ;
-      this.playerZ = ch.z + Math.cos(ch.yaw) * tiltedZ;
-      this.playerY = ch.y + tiltedY;
+      // Sync local Driver (Seat 0) or Passenger (Seat 1) cleanly onto Ratha seat & pitch plane
+      const activeSeat: LanVehicleSeatIndex = isPassenger ? 1 : 0;
+      computeVehicleSeatWorldPosition(
+        ch.x,
+        ch.y,
+        ch.z,
+        ch.yaw,
+        ch.pitch,
+        'RATHA',
+        activeSeat,
+        this._seatWorldScratch
+      );
+      this.playerX = this._seatWorldScratch.x;
+      this.playerZ = this._seatWorldScratch.z;
+      this.playerY = this._seatWorldScratch.y;
       this.playerVelY = 0;
       this.grounded = true;
-      this.playerYaw = ch.yaw;
+      this.playerYaw = isPassenger ? this.camYaw + Math.PI : ch.yaw;
       this.ramRig.root.position.set(this.playerX, this.playerY, this.playerZ);
       this.ramRig.root.rotation.order = 'YXZ';
       this.ramRig.root.rotation.y = this.playerYaw;
       this.ramRig.root.rotation.x = -ch.pitch;
       this.ramRig.contactShadow.visible = false;
-      this.applyChariotSittingPose(
-        this.ramRig,
-        steerInput,
-        isDrawingBow,
-        elapsed,
-        dt
-      );
+      if (isPassenger) {
+        this.applyChariotPassengerPose(this.ramRig, isDrawingBow, elapsed, dt);
+      } else {
+        this.applyChariotSittingPose(
+          this.ramRig,
+          steerInput,
+          isDrawingBow,
+          elapsed,
+          dt
+        );
+      }
     } else if (this.mountedAnimalIndex !== null) {
       this.input.jumpPressed = false;
       this.isRamSwimming = false;
       const an = this.animals[this.mountedAnimalIndex];
       const isEle = an.kind === 'ELEPHANT';
+      const isPassenger = this.mountedSeatIndex === 1;
       const anRadius = isEle ? 1.55 : 0.95;
       const maxSpeed = isEle ? (this.input.sprint ? 16 : 9.5) : (this.input.sprint ? 36 : 16);
 
-      if (this.autoDriveActive) {
-        const activeMission = MISSIONS[this.missionIdx];
-        const goalX =
-          activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.x : 0;
-        const goalZ =
-          activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.z : -56;
-        const goalKey = `${goalX.toFixed(0)}:${goalZ.toFixed(0)}`;
-        if (this.chariotAutoWaypoints.length === 0 || this.chariotAutoGoalKey !== goalKey) {
-          buildAutoDriveRoute(an.x, an.z, an.yaw, goalX, goalZ, this.chariotAutoWaypoints);
-          this.chariotAutoWpIdx = 0;
-          this.chariotAutoGoalKey = goalKey;
-        }
-        const route = stepAutoDriveRoute(
-          an.x,
-          an.z,
-          this.chariotAutoWaypoints,
-          this.chariotAutoWpIdx,
-          goalX,
-          goalZ,
-          7.0
-        );
-        this.chariotAutoWpIdx = route.wpIdx;
-        const toTx = route.targetX - an.x;
-        const toTz = route.targetZ - an.z;
-        const distT = Math.hypot(toTx, toTz);
-        const stopAtGoal = route.distToGoal < 6.0 || my < -0.25 || distT < 0.35;
-        let yawDiff = 0;
-        if (!stopAtGoal && distT > 0.12) {
-          const desiredYaw = Math.atan2(toTx, toTz);
-          yawDiff = desiredYaw - an.yaw;
-          while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
-          while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
-          const maxTurnStep = 2.6 * dt;
-          an.yaw += THREE.MathUtils.clamp(yawDiff, -maxTurnStep, maxTurnStep);
-        }
-        const alignFactor = Math.abs(yawDiff) > 0.7 ? 0.25 : Math.max(0.42, Math.cos(yawDiff));
-        const targetSpd = stopAtGoal ? 0 : maxSpeed * alignFactor;
-        an.speed = THREE.MathUtils.damp(an.speed, targetSpd, 5.0, dt);
-      } else {
-        this.chariotAutoWaypoints.length = 0;
-        // Camera-relative joystick / keyboard movement for fluid Horse & Elephant riding
-        _forward.set(-Math.sin(this.camYaw), 0, -Math.cos(this.camYaw));
-        _right.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw));
-        _v1.set(0, 0, 0).addScaledVector(_forward, my).addScaledVector(_right, mx);
-
-        if (mag > 0.08 && _v1.lengthSq() > 0.001) {
-          _v1.normalize();
-          const targetYaw = Math.atan2(_v1.x, _v1.z);
-          let diff = targetYaw - an.yaw;
-          while (diff > Math.PI) diff -= Math.PI * 2;
-          while (diff < -Math.PI) diff += Math.PI * 2;
-          an.yaw += diff * Math.min(1, 9.0 * dt);
-          an.speed = THREE.MathUtils.damp(an.speed, maxSpeed * mag, 6.0, dt);
+      if (!isPassenger) {
+        const startAnX = an.x;
+        const startAnZ = an.z;
+        if (this.autoDriveActive) {
+          const activeMission = MISSIONS[this.missionIdx];
+          const goalX =
+            activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.x : 0;
+          const goalZ =
+            activeMission && activeMission.id !== 'mission_sabha' ? activeMission.waypoint.z : -56;
+          const goalKey = `${goalX.toFixed(0)}:${goalZ.toFixed(0)}`;
+          if (this.chariotAutoWaypoints.length === 0 || this.chariotAutoGoalKey !== goalKey) {
+            buildAutoDriveRoute(an.x, an.z, an.yaw, goalX, goalZ, this.chariotAutoWaypoints);
+            this.chariotAutoWpIdx = 0;
+            this.chariotAutoGoalKey = goalKey;
+          }
+          const route = stepAutoDriveRoute(
+            an.x,
+            an.z,
+            this.chariotAutoWaypoints,
+            this.chariotAutoWpIdx,
+            goalX,
+            goalZ,
+            7.0
+          );
+          this.chariotAutoWpIdx = route.wpIdx;
+          const toTx = route.targetX - an.x;
+          const toTz = route.targetZ - an.z;
+          const distT = Math.hypot(toTx, toTz);
+          const stopAtGoal = route.distToGoal < 6.0 || my < -0.25 || distT < 0.35;
+          let yawDiff = 0;
+          if (!stopAtGoal && distT > 0.12) {
+            const desiredYaw = Math.atan2(toTx, toTz);
+            yawDiff = desiredYaw - an.yaw;
+            while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+            while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+            const maxTurnStep = 2.6 * dt;
+            an.yaw += THREE.MathUtils.clamp(yawDiff, -maxTurnStep, maxTurnStep);
+          }
+          const alignFactor = Math.abs(yawDiff) > 0.7 ? 0.25 : Math.max(0.42, Math.cos(yawDiff));
+          const targetSpd = stopAtGoal ? 0 : maxSpeed * alignFactor;
+          an.speed = THREE.MathUtils.damp(an.speed, targetSpd, 5.0, dt);
         } else {
-          an.speed = THREE.MathUtils.damp(an.speed, 0, 7.5, dt);
+          this.chariotAutoWaypoints.length = 0;
+          // Camera-relative joystick / keyboard movement for fluid Horse & Elephant riding
+          _forward.set(-Math.sin(this.camYaw), 0, -Math.cos(this.camYaw));
+          _right.set(Math.cos(this.camYaw), 0, -Math.sin(this.camYaw));
+          _v1.set(0, 0, 0).addScaledVector(_forward, my).addScaledVector(_right, mx);
+
+          if (mag > 0.08 && _v1.lengthSq() > 0.001) {
+            _v1.normalize();
+            const targetYaw = Math.atan2(_v1.x, _v1.z);
+            let diff = targetYaw - an.yaw;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            an.yaw += diff * Math.min(1, 9.0 * dt);
+            an.speed = THREE.MathUtils.damp(an.speed, maxSpeed * mag, 6.0, dt);
+          } else {
+            an.speed = THREE.MathUtils.damp(an.speed, 0, 7.5, dt);
+          }
         }
+
+        const nextX = an.x + Math.sin(an.yaw) * an.speed * dt;
+        const nextZ = an.z + Math.cos(an.yaw) * an.speed * dt;
+        const res = this.moveSweptWithStaticCCD(an.x, an.z, nextX, nextZ, anRadius, an.y, false, false);
+        const movedDist = Math.hypot(res.x - an.x, res.z - an.z);
+        an.x = res.x;
+        an.z = res.z;
+        an.y = Math.max(RIVER_SURFACE_Y + 0.12, this.surfaceHeightAt(an.x, an.z, an.y));
+        an.vx = (an.x - startAnX) / Math.max(0.001, dt);
+        an.vz = (an.z - startAnZ) / Math.max(0.001, dt);
+        const animalStride = isEle ? 2.6 : 2.25;
+        an.gaitPhase += (movedDist / animalStride) * Math.PI * 2;
+
+        const anObj = an.horseRig ? an.horseRig.group : an.elephantRig!.group;
+        anObj.position.set(an.x, an.y, an.z);
+        anObj.rotation.y = an.yaw;
       }
-
-      const nextX = an.x + Math.sin(an.yaw) * an.speed * dt;
-      const nextZ = an.z + Math.cos(an.yaw) * an.speed * dt;
-      const res = this.moveSweptWithStaticCCD(an.x, an.z, nextX, nextZ, anRadius, an.y, false, false);
-      const movedDist = Math.hypot(res.x - an.x, res.z - an.z);
-      an.x = res.x;
-      an.z = res.z;
-      an.y = Math.max(RIVER_SURFACE_Y + 0.12, this.surfaceHeightAt(an.x, an.z, an.y));
-      const animalStride = isEle ? 2.6 : 2.25;
-      an.gaitPhase += (movedDist / animalStride) * Math.PI * 2;
-
-      const anObj = an.horseRig ? an.horseRig.group : an.elephantRig!.group;
-      anObj.position.set(an.x, an.y, an.z);
-      anObj.rotation.y = an.yaw;
 
       const seatY = an.elephantRig
         ? an.elephantRig.seatHeight
         : an.horseRig
         ? an.horseRig.seatHeight
         : 0.88;
-      const seatZ = isEle ? 0.18 : -0.02;
-      this.playerX = an.x + Math.sin(an.yaw) * seatZ;
-      this.playerZ = an.z + Math.cos(an.yaw) * seatZ;
-      this.playerY = an.y + seatY;
+      const activeSeat: LanVehicleSeatIndex = isPassenger ? 1 : 0;
+      computeVehicleSeatWorldPosition(
+        an.x,
+        an.y,
+        an.z,
+        an.yaw,
+        0,
+        an.kind,
+        activeSeat,
+        this._seatWorldScratch,
+        seatY
+      );
+      this.playerX = this._seatWorldScratch.x;
+      this.playerZ = this._seatWorldScratch.z;
+      this.playerY = this._seatWorldScratch.y;
       this.playerVelY = 0;
       this.grounded = true;
       this.playerYaw = an.yaw;
@@ -9188,11 +10732,11 @@ export class RamayanaWorldEngine {
         this.playerX = resolved.x;
         this.playerZ = resolved.z;
 
-        const targetYaw = Math.atan2(_v1.x, _v1.z);
+        const targetYaw = this.camYaw + Math.PI;
         let diff = targetYaw - this.playerYaw;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
-        this.playerYaw += diff * Math.min(1, 12 * dt);
+        this.playerYaw += diff * Math.min(1, 20 * dt);
 
         const strideLength = swimming
           ? 2.25
@@ -9202,6 +10746,12 @@ export class RamayanaWorldEngine {
           ? 2.32
           : 1.76;
         this.walkPhase += (resolvedDist / strideLength) * Math.PI * 2;
+      } else {
+        // Keep body oriented with first-person gaze even when turning on the spot
+        let diff = this.camYaw + Math.PI - this.playerYaw;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        this.playerYaw += diff * Math.min(1, 20 * dt);
       }
       this.lastResolvedMoveSpeed = resolvedDist / Math.max(0.001, dt);
       const effectiveMoveIntensity = THREE.MathUtils.clamp(this.lastResolvedMoveSpeed / 4.5, 0, 1);
@@ -9245,8 +10795,16 @@ export class RamayanaWorldEngine {
         this.ramRig.root.position.set(this.playerX, this.playerY, this.playerZ);
         this.ramRig.root.rotation.y = this.playerYaw;
         const divePitch = this.playerVelY < -0.4 ? Math.min(0.65, -this.playerVelY * 0.14) : 0;
+        const targetSwimPitch = 0.25 + effectiveMoveIntensity * 0.55 + divePitch;
+        this.swimCamTorsoPitch = THREE.MathUtils.damp(
+          this.swimCamTorsoPitch,
+          targetSwimPitch,
+          7.5,
+          dt
+        );
         this.applySwimmingPose(this.ramRig, this.walkPhase, effectiveMoveIntensity, elapsed, divePitch, this.ramPose, dt);
       } else {
+        this.swimCamTorsoPitch = THREE.MathUtils.damp(this.swimCamTorsoPitch, 0.25, 10, dt);
         if (this.input.jumpPressed && this.grounded) {
           this.playerVelY = 9.2;
           this.grounded = false;
@@ -9507,7 +11065,7 @@ export class RamayanaWorldEngine {
       !emptyHandsSummon &&
       (this.input.fireHeld || this.bowDrawHoldTimer > 0 || this.brahmaSummonPhase === 'AIM_READY' || this.brahmaSummonPhase === 'LOTUS_APPEAR');
     if (this.ramRig.bowGroup) this.ramRig.bowGroup.visible = showDrawnBow;
-    if (this.ramRig.backBowGroup) this.ramRig.backBowGroup.visible = !emptyHandsSummon && !showDrawnBow;
+    if (this.ramRig.backBowGroup) this.ramRig.backBowGroup.visible = false;
 
     if (!summonLocked && this.input.astraPressed) {
       this.input.astraPressed = false;
@@ -9672,54 +11230,56 @@ export class RamayanaWorldEngine {
 
       // B & C. Continuous Ray-Segment vs Spatial-Hashed Static OBBs & Cylinders
       const grid = this.colliderGrid;
-      grid.queryAABB(
-        Math.min(ax, bx) - 0.1,
-        Math.max(ax, bx) + 0.1,
-        Math.min(az, bz) - 0.1,
-        Math.max(az, bz) + 0.1
-      );
-      const outB = grid.outBoxes;
-      const outBLen = grid.outBoxesLength;
-      for (let c = 0; c < outBLen; c++) {
-        const tHit = this.raySegmentIntersectsOBB(
-          ax,
-          ay,
-          az,
-          bx,
-          by,
-          bz,
-          this.colliders[outB[c]]
+      if (grid) {
+        grid.queryAABB(
+          Math.min(ax, bx) - 0.1,
+          Math.max(ax, bx) + 0.1,
+          Math.min(az, bz) - 0.1,
+          Math.max(az, bz) + 0.1
         );
-        if (tHit !== null && tHit < bestT) {
-          bestT = tHit;
-          hitEnemy = null;
-          hitEnvironment = true;
-        }
-      }
-
-      if (segLenSq > 1e-7) {
-        const outC = grid.outCircles;
-        const outCLen = grid.outCirclesLength;
-        for (let c = 0; c < outCLen; c++) {
-          const cc = this.circleColliders[outC[c]];
-          const baseY = cc.baseY ?? 0;
-          const tHit = this.raySegmentIntersectsCylinder(
+        const outB = grid.outBoxes;
+        const outBLen = grid.outBoxesLength;
+        for (let c = 0; c < outBLen; c++) {
+          const tHit = this.raySegmentIntersectsOBB(
             ax,
             ay,
             az,
             bx,
             by,
             bz,
-            cc.x,
-            cc.z,
-            cc.radius,
-            baseY,
-            baseY + cc.height
+            this.colliders[outB[c]]
           );
           if (tHit !== null && tHit < bestT) {
             bestT = tHit;
             hitEnemy = null;
             hitEnvironment = true;
+          }
+        }
+
+        if (segLenSq > 1e-7) {
+          const outC = grid.outCircles;
+          const outCLen = grid.outCirclesLength;
+          for (let c = 0; c < outCLen; c++) {
+            const cc = this.circleColliders[outC[c]];
+            const baseY = cc.baseY ?? 0;
+            const tHit = this.raySegmentIntersectsCylinder(
+              ax,
+              ay,
+              az,
+              bx,
+              by,
+              bz,
+              cc.x,
+              cc.z,
+              cc.radius,
+              baseY,
+              baseY + cc.height
+            );
+            if (tHit !== null && tHit < bestT) {
+              bestT = tHit;
+              hitEnemy = null;
+              hitEnvironment = true;
+            }
           }
         }
       }
@@ -11184,15 +12744,21 @@ export class RamayanaWorldEngine {
     // Sync final locked physics transforms to Three.js scene objects
     if (this.mountedChariotIndex !== null) {
       const ch = this.chariots[this.mountedChariotIndex];
-      const dLocalZ = -0.72;
-      const dLocalY = 0.62;
-      const sinP = Math.sin(ch.pitch);
-      const cosP = Math.cos(ch.pitch);
-      const tiltedZ = -dLocalY * sinP + dLocalZ * cosP;
-      const tiltedY = dLocalY * cosP + dLocalZ * sinP;
-      this.playerX = ch.x + Math.sin(ch.yaw) * tiltedZ;
-      this.playerZ = ch.z + Math.cos(ch.yaw) * tiltedZ;
-      this.playerY = ch.y + tiltedY;
+      const activeSeat: LanVehicleSeatIndex = this.mountedSeatIndex === 1 ? 1 : 0;
+      computeVehicleSeatWorldPosition(
+        ch.x,
+        ch.y,
+        ch.z,
+        ch.yaw,
+        ch.pitch,
+        'RATHA',
+        activeSeat,
+        this._seatWorldScratch
+      );
+      this.playerX = this._seatWorldScratch.x;
+      this.playerZ = this._seatWorldScratch.z;
+      this.playerY = this._seatWorldScratch.y;
+      this.playerYaw = activeSeat === 1 ? this.camYaw + Math.PI : ch.yaw;
       this.ramRig.root.rotation.order = 'YXZ';
       this.ramRig.root.rotation.x = -ch.pitch;
     } else if (this.mountedAnimalIndex !== null) {
@@ -11202,10 +12768,21 @@ export class RamayanaWorldEngine {
         : an.horseRig
         ? an.horseRig.seatHeight
         : 0.88;
-      const seatZ = an.kind === 'ELEPHANT' ? 0.18 : -0.02;
-      this.playerX = an.x + Math.sin(an.yaw) * seatZ;
-      this.playerZ = an.z + Math.cos(an.yaw) * seatZ;
-      this.playerY = an.y + seatY;
+      const activeSeat: LanVehicleSeatIndex = this.mountedSeatIndex === 1 ? 1 : 0;
+      computeVehicleSeatWorldPosition(
+        an.x,
+        an.y,
+        an.z,
+        an.yaw,
+        0,
+        an.kind,
+        activeSeat,
+        this._seatWorldScratch,
+        seatY
+      );
+      this.playerX = this._seatWorldScratch.x;
+      this.playerZ = this._seatWorldScratch.z;
+      this.playerY = this._seatWorldScratch.y;
       this.playerYaw = an.yaw;
       this.ramRig.root.rotation.order = 'YXZ';
       this.ramRig.root.rotation.x = 0;
@@ -11219,7 +12796,7 @@ export class RamayanaWorldEngine {
     this.ramRig.root.position.set(this.playerX, this.playerY, this.playerZ);
     this.ramRig.root.rotation.y = this.playerYaw;
 
-    // Attach Reins Dynamically from Bridle Bits into Lord Ram's Hands on BOTH Chariots and Mounted Royal Horses
+    // Attach Reins Dynamically from Bridle Bits into Driver's Hands on BOTH Chariots and Mounted Royal Horses
     if (this.mountedChariotIndex !== null) {
       const ch = this.chariots[this.mountedChariotIndex];
       this.ramRig.root.updateMatrixWorld(true);
@@ -11238,6 +12815,7 @@ export class RamayanaWorldEngine {
       }
 
       if (
+        this.mountedSeatIndex !== 1 &&
         !isDrawingBow &&
         this.ramRig.leftHandAnchor &&
         this.ramRig.rightHandAnchor &&
@@ -11272,7 +12850,12 @@ export class RamayanaWorldEngine {
         hr.rightBitAnchor.getWorldPosition(_v4);
         hr.group.worldToLocal(_v4);
 
-        if (!isDrawingBow && this.ramRig.leftHandAnchor && this.ramRig.rightHandAnchor) {
+        if (
+          this.mountedSeatIndex !== 1 &&
+          !isDrawingBow &&
+          this.ramRig.leftHandAnchor &&
+          this.ramRig.rightHandAnchor
+        ) {
           this.ramRig.leftHandAnchor.getWorldPosition(_v1);
           hr.group.worldToLocal(_v1);
           updateDynamicReinMesh(hr.leftReinMesh, _v3, _v1, 0.08);
@@ -11323,121 +12906,46 @@ export class RamayanaWorldEngine {
     this.updateDynamicHeroLighting(this.camYaw);
     this.updateNightLampsPool(elapsed);
 
-    // 10. Smooth Third-Person Camera Damping + Unrestricted Vertical Orbit, Zoom & Indoor Ceiling Bounds
-    let lookTargetX = this.playerX;
-    let lookTargetY = this.playerY + 1.65;
-    let lookTargetZ = this.playerZ;
-
+    // 10. Strict First-Person Eye-Locked Camera (No third-person angles, zoom, or cinematic pullouts)
     if (this.mountedChariotIndex !== null) {
       const ch = this.chariots[this.mountedChariotIndex];
-      lookTargetX = ch.x + Math.sin(ch.yaw) * 1.1;
-      lookTargetY = ch.y + 1.8;
-      lookTargetZ = ch.z + Math.cos(ch.yaw) * 1.1;
-
-      if (this.cameraManualHold <= 0) {
-        const targetBehindYaw = ch.yaw + Math.PI;
-        let diff = targetBehindYaw - this.camYaw;
+      const shouldAlign =
+        this.mountedSeatIndex === 1
+          ? this.camChariotLockTimer > 0
+          : this.cameraManualHold <= 0 &&
+            (this.camChariotLockTimer > 0 || Math.abs(ch.speed) > 0.6);
+      if (shouldAlign) {
+        const targetForwardYaw = ch.yaw + Math.PI;
+        let diff = targetForwardYaw - this.camYaw;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
-        const alignLambda = this.camChariotLockTimer > 0 ? 11.5 : 6.8;
+        const alignLambda = this.camChariotLockTimer > 0 ? 11.5 : 4.2;
         this.camYaw += diff * (1 - Math.exp(-alignLambda * dt));
+      }
+      if (this.mountedSeatIndex === 1) {
+        this.playerYaw = this.camYaw + Math.PI;
+        this.ramRig.root.rotation.y = this.playerYaw;
       }
     } else if (this.mountedAnimalIndex !== null) {
       const an = this.animals[this.mountedAnimalIndex];
-      lookTargetX = an.x + Math.sin(an.yaw) * 0.5;
-      lookTargetY = an.y + (an.kind === 'ELEPHANT' ? 3.2 : 1.9);
-      lookTargetZ = an.z + Math.cos(an.yaw) * 0.5;
-
-      if (this.cameraManualHold <= 0 && Math.abs(an.speed) > 0.6) {
-        const targetBehindYaw = an.yaw + Math.PI;
-        let diff = targetBehindYaw - this.camYaw;
+      const shouldAlign =
+        this.mountedSeatIndex === 1
+          ? this.camChariotLockTimer > 0
+          : this.cameraManualHold <= 0 &&
+            (this.camChariotLockTimer > 0 || Math.abs(an.speed) > 0.6);
+      if (shouldAlign) {
+        const targetForwardYaw = an.yaw + Math.PI;
+        let diff = targetForwardYaw - this.camYaw;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
         this.camYaw += diff * (1 - Math.exp(-4.5 * dt));
       }
-    } else if (!this.seatedOnThrone && mag > 0.12 && this.cameraManualHold <= 0) {
-      const targetBehindYaw = this.playerYaw + Math.PI;
-      let diff = targetBehindYaw - this.camYaw;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      const forwardWeight = my >= -0.35 ? 1.0 : 0.25;
-      const trackLambda = (1.8 + 1.8 * Math.max(0, my)) * mag * forwardWeight;
-      this.camYaw += diff * (1 - Math.exp(-trackLambda * dt));
+    } else if (!this.seatedOnThrone) {
+      this.playerYaw = this.camYaw + Math.PI;
+      this.ramRig.root.rotation.y = this.playerYaw;
     }
 
-    const isMounted = this.mountedChariotIndex !== null || this.mountedAnimalIndex !== null;
-    const camDist = isMounted ? this.camDistanceChariot : this.camDistanceFoot;
-    const horizDist = camDist * Math.cos(this.camPitch);
-    const vertHeight = 1.65 + camDist * Math.sin(this.camPitch);
-
-    const desiredCamX = this.playerX + Math.sin(this.camYaw) * horizDist;
-    const desiredCamZ = this.playerZ + Math.cos(this.camYaw) * horizDist;
-    let desiredCamY = this.playerY + vertHeight;
-
-    // Floor Clearance & Wall Clipping along LookTarget -> DesiredCamera
-    const minGroundClearance = 0.45;
-    for (let s = 1; s <= 4; s++) {
-      const t = s / 4;
-      const sx = lookTargetX + (desiredCamX - lookTargetX) * t;
-      const sz = lookTargetZ + (desiredCamZ - lookTargetZ) * t;
-      const sy = this.surfaceHeightAt(sx, sz, this.playerY) + minGroundClearance;
-      if (desiredCamY < sy) desiredCamY = sy;
-    }
-    this.clipCameraAgainstStaticColliders(
-      lookTargetX,
-      lookTargetY,
-      lookTargetZ,
-      desiredCamX,
-      desiredCamY,
-      desiredCamZ
-    );
-
-    _camDesired.set(_camClipResult.x, _camClipResult.y, _camClipResult.z);
-    _camTarget.set(lookTargetX, lookTargetY, lookTargetZ);
-
-    const dampAlpha = 1 - Math.exp(-10 * dt);
-    this.camSmoothPos.lerp(_camDesired, dampAlpha);
-    this.camSmoothLook.lerp(_camTarget, dampAlpha);
-    const camFloor = this.surfaceHeightAt(this.camSmoothPos.x, this.camSmoothPos.z, this.playerY) + 0.42;
-    if (this.camSmoothPos.y < camFloor) {
-      this.camSmoothPos.y = camFloor;
-    }
-    const postCeil = this.indoorCeilingLimitAt(this.playerX, this.playerY, this.playerZ);
-    if (postCeil !== null && this.camSmoothPos.y > postCeil) {
-      this.camSmoothPos.y = Math.max(camFloor, postCeil);
-    }
-
-    this.updateRoofOcclusion(this.camSmoothPos.x, this.camSmoothPos.y, this.camSmoothPos.z);
-    if (this.brahmaSummonPhase === 'RAISE_HAND' || this.brahmaSummonPhase === 'BLACK_FADE') {
-      this.ramRig.root.updateMatrixWorld(true);
-      if (this.ramRig.rightHandAnchor) {
-        this.ramRig.rightHandAnchor.getWorldPosition(_v1);
-      } else {
-        _v1.set(this.playerX, this.playerY + 2.35, this.playerZ);
-      }
-      _v2.set(
-        this.playerX + Math.sin(this.camYaw) * 2.6,
-        _v1.y + 0.55,
-        this.playerZ + Math.cos(this.camYaw) * 2.6
-      );
-      this.camSmoothPos.lerp(_v2, 1 - Math.exp(-8 * rawDt));
-      this.camSmoothLook.lerp(_v1, 1 - Math.exp(-10 * rawDt));
-      this.camera.position.copy(this.camSmoothPos);
-      this.camera.lookAt(this.camSmoothLook);
-    } else if (this.brahmaSummonPhase === 'CYCLONE_SKY') {
-      _v2.set(this.playerX, this.playerY + 2.4, this.playerZ + 1.5);
-      _v1.set(this.playerX, this.playerY + 72, this.playerZ - 14);
-      this.camera.position.copy(_v2);
-      this.camera.lookAt(_v1);
-    } else {
-      this.camera.position.copy(this.camSmoothPos);
-      if (this.cameraShakeAmount > 0.01) {
-        this.camera.position.x += (Math.random() - 0.5) * this.cameraShakeAmount * 0.55;
-        this.camera.position.y += (Math.random() - 0.5) * this.cameraShakeAmount * 0.45;
-        this.camera.position.z += (Math.random() - 0.5) * this.cameraShakeAmount * 0.55;
-      }
-      this.camera.lookAt(this.camSmoothLook);
-    }
+    this.applyFirstPersonCamera(true);
 
     // 10b. Post-Camera Occlusion Culling, Entity Detail LOD & Transform Sync
     if (this.remotePlayers.size > 0) {
@@ -11449,6 +12957,46 @@ export class RamayanaWorldEngine {
       if (this.lanSyncAccum >= LAN_SYNC_INTERVAL_MS / 1000) {
         this.lanSyncAccum = 0;
         const hero = getHeroPreset(this.lanLocalHeroId);
+        const localMount = this.getLocalMountedVehicle();
+        const isClientDriver =
+          !this.lanClient.isHostingMatch() && localMount && this.mountedSeatIndex === 0;
+        let driverVehicle: LanDriverVehicleReport | undefined;
+        if (isClientDriver && localMount) {
+          if (localMount.kind === 'RATHA') {
+            const ch = localMount.chariot;
+            driverVehicle = {
+              vehicleId: ch.id,
+              x: Number(ch.x.toFixed(2)),
+              y: Number(ch.y.toFixed(2)),
+              z: Number(ch.z.toFixed(2)),
+              yaw: Number(ch.yaw.toFixed(3)),
+              pitch: Number(ch.pitch.toFixed(3)),
+              speed: Number(ch.speed.toFixed(2)),
+              vx: Number(ch.vx.toFixed(2)),
+              vz: Number(ch.vz.toFixed(2)),
+              gaitPhase: Number(ch.gaitPhase.toFixed(2)),
+              seq: ++ch.netSeq,
+              epoch: ch.occupancyEpoch,
+            };
+          } else {
+            const an = localMount.animal;
+            driverVehicle = {
+              vehicleId: an.id,
+              x: Number(an.x.toFixed(2)),
+              y: Number(an.y.toFixed(2)),
+              z: Number(an.z.toFixed(2)),
+              yaw: Number(an.yaw.toFixed(3)),
+              pitch: 0,
+              speed: Number(an.speed.toFixed(2)),
+              vx: Number(an.vx.toFixed(2)),
+              vz: Number(an.vz.toFixed(2)),
+              gaitPhase: Number(an.gaitPhase.toFixed(2)),
+              seq: ++an.netSeq,
+              epoch: an.occupancyEpoch,
+            };
+          }
+        }
+        const safeDt = Math.max(0.001, dt);
         this.lanClient.sendLocalPlayerState({
           name: this.lanLocalPlayerName,
           heroId: hero.id,
@@ -11463,12 +13011,13 @@ export class RamayanaWorldEngine {
           aiming: this.input.fireHeld || this.bowDrawHoldTimer > 0,
           stealth: this.stealthActive,
           sprint: this.input.sprint,
-          mountKind:
-            this.mountedChariotIndex !== null
-              ? 'RATHA'
-              : this.mountedAnimalIndex !== null
-              ? this.animals[this.mountedAnimalIndex].kind
-              : 'NONE',
+          mountKind: localMount ? localMount.kind : 'NONE',
+          mountedVehicleId: localMount ? localMount.id : null,
+          seatIndex: localMount ? (this.mountedSeatIndex ?? 0) : null,
+          vx: Number(((this.playerX - prevX) / safeDt).toFixed(2)),
+          vz: Number(((this.playerZ - prevZ) / safeDt).toFixed(2)),
+          sentAtMs: Date.now(),
+          driverVehicle,
           hp: Math.round(this.hp),
           maxHp: this.maxHp,
           selectedAstra: this.astraQuest?.selectedAstra ?? null,
@@ -12351,6 +13900,32 @@ export class RamayanaWorldEngine {
       ? currentAnimal.kind
       : 'NONE';
 
+    const inMultiplayer = Boolean(this.lanClient?.isMultiplayerActive());
+    const activeMountObj = currentChariot ?? currentAnimal;
+    const mountedSeatIndex: LanVehicleSeatIndex | null =
+      mountKind !== 'NONE' ? (this.mountedSeatIndex ?? 0) : null;
+    const mountedOccupantCount = activeMountObj
+      ? (activeMountObj.driverId ? 1 : 0) + (activeMountObj.passengerId ? 1 : 0)
+      : 0;
+    const partnerId =
+      activeMountObj && mountedSeatIndex !== null
+        ? mountedSeatIndex === 0
+          ? activeMountObj.passengerId
+          : activeMountObj.driverId
+        : null;
+    const mountedPartnerName = partnerId
+      ? this.remotePlayers.get(partnerId)?.name ??
+        this.lanClient?.getSnapshot().players.find((p) => p.id === partnerId)?.name ??
+        null
+      : null;
+    const canSwitchSeat = Boolean(
+      inMultiplayer &&
+        activeMountObj &&
+        mountedSeatIndex !== null &&
+        (mountedSeatIndex === 0 || activeMountObj.driverId === null)
+    );
+    const nearMountFull = Boolean(nearMount?.isFull && mountKind === 'NONE');
+
     const blips = this.activeBlips;
     blips.length = 0;
     let blipCursor = 0;
@@ -12425,6 +14000,8 @@ export class RamayanaWorldEngine {
     let promptHint: string | null = this.astraQuest?.getPromptHint() ?? null;
     if (promptHint) {
       // Quest contextual hint has priority near shrine switches / sanctum
+    } else if (this.mountNoticeText && performance.now() <= this.mountNoticeExpiresMs) {
+      promptHint = this.mountNoticeText;
     } else if (this.brahmaSummonPhase === 'AIM_READY') {
       promptHint = 'Brahmastra Nocked — Press X or tap Shoot to unleash golden beam!';
     } else if (this.seatedOnThrone) {
@@ -12436,13 +14013,19 @@ export class RamayanaWorldEngine {
           : mountKind === 'HORSE'
           ? 'Royal Ashva'
           : 'Royal Ratha';
-      if (this.autoDriveActive) {
+      if (inMultiplayer && mountedSeatIndex === 1) {
+        promptHint = mountedPartnerName
+          ? `Passenger on ${mLabel} (${mountedPartnerName} driving) · Aim & Fire freely · E: Dismount`
+          : `Passenger on ${mLabel} · G: Take Reins (Driver) · E: Dismount`;
+      } else if (this.autoDriveActive) {
         promptHint = `${mLabel} Auto-Drive on Paved Road — V: Manual · Shift: Gallop · E: Dismount`;
       } else {
         promptHint = this.stealthActive
           ? this.stealthSpotted
             ? 'Spotted in Stealth! Break line of sight · E to dismount'
             : `Stealth ${mLabel} — C: Reveal · V: Auto-Drive · E: Dismount`
+          : inMultiplayer
+          ? `Driving ${mLabel} (${mountedOccupantCount}/2) — G: Swap Seat · V: Auto-Drive · E: Dismount`
           : `Riding ${mLabel} — V: Auto-Drive · Shift: Gallop · E: Dismount · Demon Village ${demonVillageDistanceM}m`;
       }
     } else if (nearThrone) {
@@ -12454,7 +14037,14 @@ export class RamayanaWorldEngine {
         ? 'Detected! Move behind foes to regain Stealth'
         : 'Stealth Crouching (2x Ambush Shot) — C to stand';
     } else if (nearMount) {
-      promptHint = `${nearMount.label} nearby — Press E or tap Mount`;
+      if (inMultiplayer && nearMount.isFull) {
+        promptHint = `${nearMount.label} Full (2/2 riders)`;
+      } else if (inMultiplayer && nearMount.occupiedCount === 1) {
+        const seatLabel = nearMount.driverId === null ? 'Driver' : 'Passenger';
+        promptHint = `${nearMount.label} (1/2) — Press E to board as ${seatLabel}`;
+      } else {
+        promptHint = `${nearMount.label} nearby — Press E or tap Mount`;
+      }
     }
 
     const hpVal = Math.round(this.hp);
@@ -12497,7 +14087,7 @@ export class RamayanaWorldEngine {
 
     const resPct = Math.round(resScaleVal * 100);
     const benchKey = benchSummary ? `${benchSummary.compositeScore}:${benchSummary.lockedTier}` : '0';
-    const hudKey = `${hpVal}|${pranaVal}|${this.karma}|${this.wantedLevel}|${mountKind}|${nearMount?.label ?? ''}|${nearThrone ? 1 : 0}|${this.seatedOnThrone ? 1 : 0}|${this.autoDriveActive ? 1 : 0}|${mountSpeedKmh}|${this.stealthActive ? 1 : 0}|${this.stealthSpotted ? 1 : 0}|${chakraCd}|${district.label}|${pX}|${pZ}|${pYaw}|${this.missionIdx}|${this.missionProgress}|${this.completedMissions}|${demonVillageDistanceM}|${this.ascensionActive ? 1 : 0}|${ascElapsed}|${councilSeated}|${this.worldReady ? 1 : 0}|${roundedProgress}|${this.assetStage}|${this.webglError ?? ''}|${qMode}|${qTier}|${fpsVal}|${targetFpsVal}|${resPct}|${benchKey}|${selAstra ?? ''}|${aEnergy}|${cdKey}|${this.brahmaSummonPhase}|${fAlpha}|${dAlpha}|${questHud.unlockedCount}|${questHud.challengeSubProgress ?? ''}|${questHud.challengeTimerSec ?? ''}|${questHud.underwaterBreath ?? ''}|${questHud.brahmaTrialStage}|${enemySummonWarning?.remainingSec ?? ''}|${unlockPopup?.id ?? ''}|${this.showStoryIntro ? 1 : 0}|${promptHint ?? ''}`;
+    const hudKey = `${hpVal}|${pranaVal}|${this.karma}|${this.wantedLevel}|${mountKind}|${nearMount?.label ?? ''}|${nearMountFull ? 1 : 0}|${mountedSeatIndex ?? ''}|${mountedOccupantCount}|${mountedPartnerName ?? ''}|${canSwitchSeat ? 1 : 0}|${nearThrone ? 1 : 0}|${this.seatedOnThrone ? 1 : 0}|${this.autoDriveActive ? 1 : 0}|${mountSpeedKmh}|${this.stealthActive ? 1 : 0}|${this.stealthSpotted ? 1 : 0}|${chakraCd}|${district.label}|${pX}|${pZ}|${pYaw}|${this.missionIdx}|${this.missionProgress}|${this.completedMissions}|${demonVillageDistanceM}|${this.ascensionActive ? 1 : 0}|${ascElapsed}|${councilSeated}|${this.worldReady ? 1 : 0}|${roundedProgress}|${this.assetStage}|${this.webglError ?? ''}|${qMode}|${qTier}|${fpsVal}|${targetFpsVal}|${resPct}|${benchKey}|${selAstra ?? ''}|${aEnergy}|${cdKey}|${this.brahmaSummonPhase}|${fAlpha}|${dAlpha}|${questHud.unlockedCount}|${questHud.challengeSubProgress ?? ''}|${questHud.challengeTimerSec ?? ''}|${questHud.underwaterBreath ?? ''}|${questHud.brahmaTrialStage}|${enemySummonWarning?.remainingSec ?? ''}|${unlockPopup?.id ?? ''}|${this.showStoryIntro ? 1 : 0}|${promptHint ?? ''}`;
     if (hudKey === this.lastHudKey) {
       return;
     }
@@ -12528,6 +14118,11 @@ export class RamayanaWorldEngine {
       nearChariot: nearMount?.kind === 'RATHA',
       mountKind,
       nearMountLabel: nearMount ? nearMount.label : null,
+      nearMountFull,
+      mountedSeatIndex,
+      mountedPartnerName,
+      mountedOccupantCount,
+      canSwitchSeat,
       nearThrone,
       onThrone: this.seatedOnThrone,
       autoDriveActive: this.autoDriveActive,
@@ -12654,16 +14249,9 @@ export class RamayanaWorldEngine {
       }
 
       if (!this.worldReady) {
-        // Gentle scenic sky preview while assets stream in asynchronously across frames
+        // Strict First-Person eye view while world assets stream in asynchronously
         this.updateAtmosphericMood();
-        const orbitYaw = elapsed * 0.16;
-        _v2.set(
-          this.playerX + Math.sin(orbitYaw) * 7.8,
-          this.playerY + 3.4,
-          this.playerZ + Math.cos(orbitYaw) * 7.8
-        );
-        this.camera.position.copy(_v2);
-        this.camera.lookAt(this.playerX, this.playerY + 1.65, this.playerZ);
+        this.applyFirstPersonCamera(false);
         const readyGl = this.renderer.getContext();
         if (!readyGl || readyGl.isContextLost()) {
           this.handleWebglContextLost();
@@ -12692,7 +14280,7 @@ export class RamayanaWorldEngine {
           this.emitHud();
         }
       } else if (this.mode === 'TITLE') {
-        // Gentle scenic orbit around Lord Ram at Ayodhya Plaza with ambient breeze hair physics & background day-night/volcanic eruptions
+        // Strict First-Person eye view on Title Screen with ambient day-night/volcanic eruptions
         this.simFrameCounter++;
         this.stepVolcanicAtmosphere(dt);
         this.updateAtmosphericMood();
@@ -12700,18 +14288,11 @@ export class RamayanaWorldEngine {
         if (this.shivlingWaterUniforms) {
           this.shivlingWaterUniforms.uTime.value = elapsed;
         }
-        const orbitYaw = elapsed * 0.16;
         this.playerHorizSpeed = 0;
         this.playerTurnRate = 0;
         this.updateHairAndCapePhysics(dt, elapsed);
-        this.updateDynamicHeroLighting(orbitYaw);
-        _v2.set(
-          this.playerX + Math.sin(orbitYaw) * 7.8,
-          this.playerY + 3.4,
-          this.playerZ + Math.cos(orbitYaw) * 7.8
-        );
-        this.camera.position.copy(_v2);
-        this.camera.lookAt(this.playerX, this.playerY + 1.65, this.playerZ);
+        this.updateDynamicHeroLighting(this.camYaw);
+        this.applyFirstPersonCamera(false);
         this.updateUnderwaterPostProcessing(elapsed);
       }
 

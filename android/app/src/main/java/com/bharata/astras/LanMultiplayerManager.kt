@@ -332,6 +332,7 @@ class LanMultiplayerManager(
                 val pong = JSONObject().apply {
                     put("type", "PONG")
                     put("ts", msg.optLong("ts"))
+                    put("serverTimeMs", System.currentTimeMillis())
                 }.toString()
                 sendToPeer(senderId, pong)
             }
@@ -369,6 +370,10 @@ class LanMultiplayerManager(
             }
             "ENEMY_DAMAGE_CLAIM" -> {
                 emitWireMessage(rawJson)
+            }
+            "VEHICLE_ACTION" -> {
+                msg.put("playerId", senderId)
+                emitWireMessage(msg.toString())
             }
         }
     }
@@ -626,6 +631,7 @@ class LanMultiplayerManager(
                         val pong = JSONObject().apply {
                             put("type", "PONG")
                             put("ts", msg.optLong("ts"))
+                            put("serverTimeMs", System.currentTimeMillis())
                         }.toString()
                         emitWireMessage(pong)
                     }
@@ -634,6 +640,12 @@ class LanMultiplayerManager(
                         broadcastToRemotePeers(rawJson, excludeId = null)
                         emitWireMessage(rawJson)
                         broadcastLobbyUpdate()
+                    }
+                    "VEHICLE_ACTION_ACK" -> {
+                        val targetId = msg.optString("targetPlayerId", "")
+                        if (targetId.isNotBlank()) {
+                            sendToPeer(targetId, rawJson)
+                        }
                     }
                     "LEAVE" -> {
                         stopAll()
