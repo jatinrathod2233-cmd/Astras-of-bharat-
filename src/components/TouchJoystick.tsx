@@ -21,8 +21,8 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = React.memo(
     });
     const [active, setActive] = useState(false);
 
-    const vw = viewport?.w ?? (typeof window !== 'undefined' ? window.innerWidth : 390);
-    const vh = viewport?.h ?? (typeof window !== 'undefined' ? window.innerHeight : 844);
+    const vw = viewport?.w ?? (typeof window !== 'undefined' ? window.innerWidth : 844);
+    const vh = viewport?.h ?? (typeof window !== 'undefined' ? window.innerHeight : 390);
     const resolvedPlacement =
       placement ?? getDefaultControlLayout(vw, vh).JOYSTICK;
     const rect = computeControlPixelRect('JOYSTICK', resolvedPlacement, vw, vh);

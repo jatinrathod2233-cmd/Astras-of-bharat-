@@ -20,6 +20,7 @@ export class MobileLodAssetCache {
   public readonly obsidianMat: THREE.MeshStandardMaterial;
   public readonly emberMat: THREE.MeshStandardMaterial;
   public readonly volcanoRockMat: THREE.MeshStandardMaterial;
+  public readonly foothillRockMat: THREE.MeshStandardMaterial;
   public readonly volcanoMagmaMat: THREE.MeshPhysicalMaterial;
   public readonly statueGraniteMat: THREE.MeshStandardMaterial;
 
@@ -41,8 +42,11 @@ export class MobileLodAssetCache {
     this.templeStoneMat = this.trackMat(
       new THREE.MeshPhysicalMaterial({
         map: textures.sandstone,
+        normalMap: textures.sandstoneNormal,
+        aoMap: textures.sandstoneAO,
+        aoMapIntensity: 0.72,
         color: 0xe4bf8e,
-        roughness: 0.86,
+        roughness: 0.84,
         metalness: 0.05,
         ior: 1.54,
       })
@@ -50,8 +54,11 @@ export class MobileLodAssetCache {
     this.templeTrimMat = this.trackMat(
       new THREE.MeshPhysicalMaterial({
         map: textures.sandstone,
+        normalMap: textures.sandstoneNormal,
+        aoMap: textures.sandstoneAO,
+        aoMapIntensity: 0.72,
         color: 0x9f6635,
-        roughness: 0.76,
+        roughness: 0.74,
         metalness: 0.14,
         ior: 1.54,
       })
@@ -59,15 +66,20 @@ export class MobileLodAssetCache {
     this.templeGoldMat = this.trackMat(
       new THREE.MeshPhysicalMaterial({
         map: textures.armorMetal,
+        normalMap: textures.armorNormal,
+        metalnessMap: textures.armorMetalness,
         color: 0xf4c24e,
-        roughness: 0.34,
-        metalness: 0.9,
+        roughness: 0.30,
+        metalness: 0.92,
         ior: 1.62,
       })
     );
     this.pavilionWallMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.sandstone,
+        normalMap: textures.sandstoneNormal,
+        aoMap: textures.sandstoneAO,
+        aoMapIntensity: 0.65,
         color: 0xdfb988,
         roughness: 0.8,
       })
@@ -75,6 +87,7 @@ export class MobileLodAssetCache {
     this.pavilionRoofMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.silkGold,
+        normalMap: textures.silkNormal,
         color: 0xa6462b,
         roughness: 0.68,
       })
@@ -82,6 +95,7 @@ export class MobileLodAssetCache {
     this.obsidianMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.darkBasalt,
+        normalMap: textures.darkBasaltNormal,
         color: 0x1e1b22,
         roughness: 0.78,
         metalness: 0.18,
@@ -91,28 +105,40 @@ export class MobileLodAssetCache {
       new THREE.MeshStandardMaterial({
         color: 0xff5a18,
         emissive: 0xff3200,
-        emissiveIntensity: 1.5,
+        emissiveIntensity: 1.6,
         roughness: 0.32,
       })
     );
     this.volcanoRockMat = this.trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0x1a151c,
-        roughness: 0.92,
+        map: textures.rockCliff,
+        normalMap: textures.rockCliffNormal,
+        color: 0x241d26,
+        roughness: 0.9,
         metalness: 0.08,
+      })
+    );
+    this.foothillRockMat = this.trackMat(
+      new THREE.MeshStandardMaterial({
+        map: textures.rockCliff,
+        normalMap: textures.rockCliffNormal,
+        color: 0x5c684d,
+        roughness: 0.88,
+        metalness: 0.04,
       })
     );
     this.volcanoMagmaMat = this.trackMat(
       new THREE.MeshPhysicalMaterial({
         color: 0xff5216,
         emissive: 0xff3b08,
-        emissiveIntensity: 2.2,
-        roughness: 0.34,
+        emissiveIntensity: 2.35,
+        roughness: 0.32,
       })
     );
     this.statueGraniteMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.darkBasalt,
+        normalMap: textures.darkBasaltNormal,
         color: 0x3b404c,
         roughness: 0.62,
         metalness: 0.16,
@@ -444,7 +470,8 @@ export function wrapBlackMountainWithLod(
   radius: number,
   height: number,
   seed: number,
-  cache: MobileLodAssetCache
+  cache: MobileLodAssetCache,
+  farMat?: THREE.Material
 ): THREE.LOD {
   const lod = new THREE.LOD();
   lod.position.set(x, groundHeightAt(x, z) - 0.8, z);
@@ -452,7 +479,7 @@ export function wrapBlackMountainWithLod(
   fullGroup.position.set(0, 0, 0);
   lod.addLevel(fullGroup, 0);
 
-  const farPeak = new THREE.Mesh(cache.hexPeakGeo, cache.obsidianMat);
+  const farPeak = new THREE.Mesh(cache.hexPeakGeo, farMat ?? cache.obsidianMat);
   farPeak.scale.set(radius, height, radius);
   farPeak.position.y = height * 0.5;
   farPeak.rotation.y = seed;

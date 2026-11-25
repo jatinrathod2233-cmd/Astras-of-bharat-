@@ -146,7 +146,7 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
     return (
       <div className="absolute inset-0 z-30 pointer-events-none select-none">
         {/* Central Start Button & Offline LAN Co-op Entry */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-5 pointer-events-none">
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 p-4 pb-24 pointer-events-none">
           <button
             type="button"
             disabled={!hud.assetsReady}
@@ -370,7 +370,7 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
               </div>
             </>
           ) : (
-            <div className="space-y-2.5 max-h-[50vh] overflow-y-auto pr-1">
+            <div className="space-y-2.5 max-h-[42vh] overflow-y-auto pr-1">
               {hud.astraQuest.astras.map((entry) => {
                 const cfg = ASTRA_CONFIG[entry.id];
                 return (

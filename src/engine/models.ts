@@ -973,14 +973,17 @@ export function createLordRamModel(textures: ProceduralTextures): CharacterRig {
   const skinMat = new THREE.MeshPhysicalMaterial({
     map: textures.royalSkin,
     normalMap: textures.royalSkinNormal,
-    normalScale: new THREE.Vector2(0.12, 0.12),
+    normalScale: new THREE.Vector2(0.16, 0.16),
     color: 0xffffff,
-    roughness: 0.46,
+    roughness: 0.44,
     metalness: 0.02,
-    sheen: 0.28,
-    sheenRoughness: 0.56,
+    clearcoat: 0.08,
+    clearcoatRoughness: 0.52,
+    sheen: 0.34,
+    sheenRoughness: 0.52,
     sheenColor: new THREE.Color(0x6c9cff),
   });
+  skinMat.customProgramCacheKey = () => 'lord-ram-skin-v1';
   skinMat.onBeforeCompile = (shader) => {
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <dithering_fragment>',
@@ -1009,15 +1012,16 @@ export function createLordRamModel(textures: ProceduralTextures): CharacterRig {
   const goldMat = new THREE.MeshPhysicalMaterial({
     map: textures.armorMetal,
     normalMap: textures.armorNormal,
-    normalScale: new THREE.Vector2(0.7, 0.7),
+    normalScale: new THREE.Vector2(0.75, 0.75),
     roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
     color: 0xe6b84c,
-    roughness: 0.34,
-    metalness: 0.92,
+    roughness: 0.32,
+    metalness: 0.94,
     ior: 1.62,
     specularIntensity: 1.0,
     anisotropy: 0.65,
-    clearcoat: 0.22,
+    clearcoat: 0.24,
   });
   const leatherMat = new THREE.MeshPhysicalMaterial({
     map: textures.bark,
@@ -2325,20 +2329,27 @@ export function createRakshasaModel(
   isCommander: boolean
 ): CharacterRig {
   const root = new THREE.Group();
-  const scale = isCommander ? 1.38 : 1.06;
+  const scale = isCommander ? 1.44 : 1.12;
 
-  const skinMat = new THREE.MeshStandardMaterial({
+  const skinMat = new THREE.MeshPhysicalMaterial({
+    normalMap: textures.royalSkinNormal,
+    normalScale: new THREE.Vector2(0.24, 0.24),
     color: isCommander ? 0x5d1d26 : 0x3b2c3f,
-    roughness: 0.56,
+    roughness: 0.52,
     metalness: 0.1,
+    sheen: 0.22,
+    sheenColor: new THREE.Color(0x88424c),
   });
-  const armorMat = new THREE.MeshStandardMaterial({
+  const armorMat = new THREE.MeshPhysicalMaterial({
     map: textures.armorMetal,
     normalMap: textures.armorNormal,
-    normalScale: new THREE.Vector2(0.85, 0.85),
+    normalScale: new THREE.Vector2(0.9, 0.9),
+    roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
     color: isCommander ? 0xd09835 : 0x6e6568,
-    roughness: 0.32,
-    metalness: 0.82,
+    roughness: 0.30,
+    metalness: 0.86,
+    ior: 1.6,
   });
   const skirtMat = new THREE.MeshStandardMaterial({
     map: textures.silkGold,
@@ -2492,41 +2503,76 @@ export function createRakshasaModel(
     torso.add(spike);
   });
 
+  const beltArmour = new THREE.Mesh(
+    new THREE.TorusGeometry(0.29, 0.042, 8, 18),
+    armorMat
+  );
+  beltArmour.userData._lodDetail = true;
+  beltArmour.rotation.x = Math.PI / 2;
+  beltArmour.scale.set(1.12, 0.85, 1.0);
+  beltArmour.position.y = 0.22;
+  torso.add(beltArmour);
+
   // Sculpted Fierce Rakshasa Head seated firmly on Neck Bridge
   const headGroup = createSculptedHeadMesh(skinMat, true);
   headGroup.position.y = 1.08;
   torso.add(headGroup);
 
+  const rakScleraMat = new THREE.MeshStandardMaterial({ color: 0x361414, roughness: 0.25 });
+  const rakBrassMat = new THREE.MeshStandardMaterial({
+    map: textures.armorMetal,
+    color: 0xdca542,
+    roughness: 0.32,
+    metalness: 0.88,
+  });
+
   [-1, 1].forEach((side) => {
+    const sclera = new THREE.Mesh(
+      new THREE.SphereGeometry(0.041, 8, 8),
+      rakScleraMat
+    );
+    sclera.scale.set(1.22, 0.78, 0.65);
+    sclera.position.set(side * 0.085, 0.045, 0.204);
+    headGroup.add(sclera);
+
     const eye = new THREE.Mesh(
-      new THREE.SphereGeometry(0.036, 8, 8),
+      new THREE.SphereGeometry(0.029, 8, 8),
       eyeMat
     );
-    eye.scale.set(1.2, 0.75, 0.7);
-    eye.position.set(side * 0.085, 0.045, 0.21);
+    eye.scale.set(1.1, 0.82, 0.7);
+    eye.position.set(side * 0.085, 0.045, 0.214);
     headGroup.add(eye);
 
     const brow = new THREE.Mesh(
-      new THREE.BoxGeometry(0.09, 0.03, 0.045),
+      new THREE.BoxGeometry(0.095, 0.032, 0.05),
       skinMat
     );
-    brow.position.set(side * 0.085, 0.085, 0.21);
-    brow.rotation.z = side * 0.28;
+    brow.position.set(side * 0.085, 0.086, 0.21);
+    brow.rotation.z = side * 0.30;
     headGroup.add(brow);
 
     const fang = new THREE.Mesh(
-      new THREE.ConeGeometry(0.022, 0.095, 6),
+      new THREE.ConeGeometry(0.024, 0.105, 7),
       tuskMat
     );
-    fang.position.set(side * 0.065, -0.1, 0.205);
-    fang.rotation.x = 0.2;
+    fang.position.set(side * 0.068, -0.1, 0.205);
+    fang.rotation.x = 0.22;
     headGroup.add(fang);
 
+    const tuskRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.023, 0.005, 5, 10),
+      rakBrassMat
+    );
+    tuskRing.userData._lodDetail = true;
+    tuskRing.rotation.x = Math.PI / 2;
+    tuskRing.position.set(side * 0.068, -0.102, 0.206);
+    headGroup.add(tuskRing);
+
     const horn = new THREE.Mesh(
-      new THREE.ConeGeometry(0.06, 0.38, 10),
+      new THREE.ConeGeometry(0.064, 0.42, 10),
       armorMat
     );
-    horn.position.set(side * 0.2, 0.25, -0.02);
+    horn.position.set(side * 0.2, 0.26, -0.02);
     horn.rotation.z = -side * 0.48;
     horn.rotation.x = 0.18;
     headGroup.add(horn);
@@ -2745,9 +2791,15 @@ export function createCitizenModel(
   role: NpcRole = 'CITIZEN'
 ): CharacterRig {
   const root = new THREE.Group();
-  const skinMat = new THREE.MeshStandardMaterial({
+  const skinMat = new THREE.MeshPhysicalMaterial({
+    normalMap: textures.royalSkinNormal,
+    normalScale: new THREE.Vector2(0.18, 0.18),
     color: 0xb9855a,
-    roughness: 0.56,
+    roughness: 0.50,
+    metalness: 0.02,
+    sheen: 0.24,
+    sheenRoughness: 0.60,
+    sheenColor: new THREE.Color(0xe6b488),
   });
 
   // Role-specific dhoti & angavastram palette (ALL wear traditional dhoti, padukas & janeu)
@@ -2771,7 +2823,7 @@ export function createCitizenModel(
     normalMap: textures.silkNormal,
     roughnessMap: textures.silkRoughness,
     color: dhotiColor,
-    roughness: 0.8,
+    roughness: 0.78,
     ior: 1.46,
     sheen: 0.48,
     sheenRoughness: 0.55,
@@ -2817,9 +2869,10 @@ export function createCitizenModel(
     map: textures.armorMetal,
     normalMap: textures.armorNormal,
     roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
     color: 0xe6b544,
-    roughness: 0.36,
-    metalness: 0.86,
+    roughness: 0.32,
+    metalness: 0.90,
     ior: 1.6,
     specularIntensity: 0.95,
     clearcoat: 0.2,
@@ -2829,6 +2882,15 @@ export function createCitizenModel(
     roughness: 0.08,
     clearcoat: 1.0,
     ior: 1.42,
+  });
+  const scleraWhiteMat = new THREE.MeshPhysicalMaterial({
+    color: 0xf5f0e6,
+    roughness: 0.14,
+    clearcoat: 0.9,
+  });
+  const lipToneMat = new THREE.MeshStandardMaterial({
+    color: 0x8f5644,
+    roughness: 0.48,
   });
 
   const contactShadow = createContactShadowMesh(textures.contactShadow, 0.62, 0.62);
@@ -3034,6 +3096,27 @@ export function createCitizenModel(
     torso.add(uttariya);
   }
 
+  if (role === 'SOLDIER' || role === 'COMMANDER') {
+    const chestPlate = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.188, 0.165, 0.26, 14, 1, false, -Math.PI * 0.42, Math.PI * 0.84),
+      goldTrimMat
+    );
+    chestPlate.position.set(0, 0.45, 0.055);
+    chestPlate.castShadow = true;
+    torso.add(chestPlate);
+
+    [-0.19, 0.19].forEach((sx) => {
+      const shoulderCap = new THREE.Mesh(
+        new THREE.SphereGeometry(0.082, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.55),
+        goldTrimMat
+      );
+      shoulderCap.userData._lodDetail = true;
+      shoulderCap.position.set(sx, 0.58, 0.01);
+      shoulderCap.rotation.z = sx > 0 ? -0.35 : 0.35;
+      torso.add(shoulderCap);
+    });
+  }
+
   // Sturdy Neck Bridge & Cleanly Seated Head
   const neckBridge = new THREE.Mesh(
     new THREE.CylinderGeometry(0.066, 0.082, 0.14, 12),
@@ -3047,7 +3130,7 @@ export function createCitizenModel(
   head.scale.setScalar(0.84);
   torso.add(head);
 
-  // Traditional forehead Tilak & Eyes
+  // Traditional forehead Tilak, Realistic Sclera+Iris Eyes, Brows & Lips
   const tilak = new THREE.Mesh(
     new THREE.BoxGeometry(0.014, 0.042, 0.012),
     role === 'MINISTER' || role === 'COMMANDER' ? goldTrimMat : janeuWhiteMat
@@ -3056,13 +3139,29 @@ export function createCitizenModel(
   tilak.position.set(0, 0.072, 0.145);
   head.add(tilak);
 
+  const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.044, 0.012, 0.014), lipToneMat);
+  mouth.userData._lodDetail = true;
+  mouth.position.set(0, -0.052, 0.138);
+  head.add(mouth);
+
   [-1, 1].forEach((side) => {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.019, 8, 8), eyeMat);
-    eye.position.set(side * 0.044, 0.02, 0.132);
+    const sclera = new THREE.Mesh(new THREE.SphereGeometry(0.020, 8, 8), scleraWhiteMat);
+    sclera.scale.set(1.18, 0.78, 0.72);
+    sclera.position.set(side * 0.045, 0.02, 0.128);
+    head.add(sclera);
+
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.0125, 8, 8), eyeMat);
+    eye.position.set(side * 0.045, 0.02, 0.137);
     head.add(eye);
+
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.008, 0.012), eyeMat);
+    brow.userData._lodDetail = true;
+    brow.position.set(side * 0.045, 0.042, 0.136);
+    brow.rotation.z = -side * 0.08;
+    head.add(brow);
   });
 
-  // Traditional Headgear per Role (Pagdi turban, Royal Crown band, Spy Cowl, or Topknot)
+  // Traditional Headgear per Role (Pagdi turban with gold fold, Royal Crown band, Spy Cowl, or Topknot)
   if (role === 'SPY') {
     const cowl = new THREE.Mesh(
       new THREE.SphereGeometry(0.155, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.62),
@@ -3086,6 +3185,15 @@ export function createCitizenModel(
     turban.rotation.x = Math.PI / 2;
     turban.position.set(0, 0.125, -0.01);
     head.add(turban);
+
+    const turbanSash = new THREE.Mesh(
+      new THREE.TorusGeometry(0.128, 0.018, 6, 18),
+      goldTrimMat
+    );
+    turbanSash.userData._lodDetail = true;
+    turbanSash.rotation.x = Math.PI / 2 - 0.12;
+    turbanSash.position.set(0, 0.128, -0.008);
+    head.add(turbanSash);
 
     const turbanCrown = new THREE.Mesh(
       new THREE.SphereGeometry(0.12, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.55),
@@ -3679,9 +3787,10 @@ export function createRathaChariotModel(
     normalMap: textures.armorNormal,
     normalScale: new THREE.Vector2(0.8, 0.8),
     roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
     color: 0xf0be4a,
-    roughness: 0.34,
-    metalness: 0.9,
+    roughness: 0.30,
+    metalness: 0.92,
     ior: 1.62,
     specularIntensity: 1.0,
     anisotropy: 0.55,
@@ -4065,8 +4174,10 @@ export function createTempleModel(
     normalMap: textures.sandstoneNormal,
     normalScale: new THREE.Vector2(1.0, 1.0),
     roughnessMap: textures.sandstoneRoughness,
+    aoMap: textures.sandstoneAO,
+    aoMapIntensity: 0.75,
     color: 0xe4bf8e,
-    roughness: 0.86,
+    roughness: 0.84,
     metalness: 0.05,
     ior: 1.54,
     specularIntensity: 0.42,
@@ -4075,6 +4186,8 @@ export function createTempleModel(
     map: textures.sandstone,
     normalMap: textures.sandstoneNormal,
     roughnessMap: textures.sandstoneRoughness,
+    aoMap: textures.sandstoneAO,
+    aoMapIntensity: 0.72,
     color: 0x9f6635,
     roughness: 0.74,
     metalness: 0.16,
@@ -4085,9 +4198,10 @@ export function createTempleModel(
     map: textures.armorMetal,
     normalMap: textures.armorNormal,
     roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
     color: 0xf4c24e,
-    roughness: 0.32,
-    metalness: 0.92,
+    roughness: 0.28,
+    metalness: 0.94,
     ior: 1.62,
     specularIntensity: 1.0,
     anisotropy: 0.5,
@@ -4119,6 +4233,12 @@ export function createTempleModel(
   core.receiveShadow = true;
   group.add(core);
 
+  // Carved sandstone cornice molding & wall pilasters for temple relief depth
+  const corniceBand = new THREE.Mesh(new THREE.BoxGeometry(7.9, 0.36, 7.9), trimMat);
+  corniceBand.userData._lodDetail = true;
+  corniceBand.position.y = 7.08;
+  group.add(corniceBand);
+
   const doorway = new THREE.Mesh(
     new THREE.BoxGeometry(2.3, 3.4, 0.45),
     sanctumGlowMat
@@ -4139,6 +4259,11 @@ export function createTempleModel(
     col.position.set(px, 4.55, pz);
     col.castShadow = true;
     group.add(col);
+
+    const basePlinth = new THREE.Mesh(new THREE.BoxGeometry(1.08, 0.34, 1.08), stoneMat);
+    basePlinth.userData._lodDetail = true;
+    basePlinth.position.set(px, 1.88, pz);
+    group.add(basePlinth);
   });
 
   const tiers = [
@@ -4202,6 +4327,8 @@ export function createPavilionModel(
   const wallMat = new THREE.MeshStandardMaterial({
     map: textures.sandstone,
     normalMap: textures.sandstoneNormal,
+    aoMap: textures.sandstoneAO,
+    aoMapIntensity: 0.68,
     color: 0xdfb988,
     roughness: 0.78,
   });
@@ -5018,7 +5145,7 @@ export function createDemonModel(
   isBoss = false
 ): CharacterRig {
   const root = new THREE.Group();
-  const s = isBoss ? 1.28 : 1.0;
+  const s = isBoss ? 1.42 : 1.14;
 
   const darkBasaltMat = new THREE.MeshStandardMaterial({
     map: textures.darkBasalt,
@@ -5030,10 +5157,12 @@ export function createDemonModel(
   const charredArmorMat = new THREE.MeshPhysicalMaterial({
     map: textures.armorMetal,
     normalMap: textures.armorNormal,
+    normalScale: new THREE.Vector2(0.95, 0.95),
     roughnessMap: textures.armorRoughness,
-    color: isBoss ? 0x5c201b : 0x3b353c,
-    roughness: 0.44,
-    metalness: 0.82,
+    metalnessMap: textures.armorMetalness,
+    color: isBoss ? 0x611e18 : 0x3b353c,
+    roughness: 0.38,
+    metalness: 0.86,
     ior: 1.6,
   });
   const ivoryBoneMat = new THREE.MeshPhysicalMaterial({
@@ -5143,9 +5272,20 @@ export function createDemonModel(
       tusk.castShadow = true;
       headGroup.add(tusk);
 
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 8), redEyeMat);
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.048, 8, 8), redEyeMat);
       eye.position.set(side * 0.17, 0.09, 0.24);
       headGroup.add(eye);
+
+      const tuskRing = new THREE.Mesh(new THREE.TorusGeometry(0.045, 0.011, 6, 12), charredArmorMat);
+      tuskRing.userData._lodDetail = true;
+      tuskRing.position.set(side * 0.20, 0.06, 0.42);
+      tuskRing.rotation.x = Math.PI / 2;
+      headGroup.add(tuskRing);
+
+      const flankArmor = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.34, 0.62), charredArmorMat);
+      flankArmor.userData._lodDetail = true;
+      flankArmor.position.set(side * 0.44, 0.12, 0.0);
+      torso.add(flankArmor);
 
       const ear = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.24, 5), boarHideMat);
       ear.position.set(side * 0.23, 0.25, -0.04);
@@ -5449,11 +5589,27 @@ export function createDemonModel(
     torso.add(cloakCone);
 
     const chestCore = new THREE.Mesh(
-      new THREE.OctahedronGeometry(0.22, 1),
+      new THREE.OctahedronGeometry(0.24, 1),
       wispGlowMat
     );
     chestCore.position.set(0, 0.34, 0.04);
     torso.add(chestCore);
+
+    // Spectral rib-spires & jagged obsidian shoulder mantles
+    [-0.30, 0.30].forEach((sx) => {
+      const wraithPauldron = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.34, 5), darkBasaltMat);
+      wraithPauldron.userData._lodDetail = true;
+      wraithPauldron.position.set(sx, 0.62, 0);
+      wraithPauldron.rotation.z = sx > 0 ? -0.65 : 0.65;
+      torso.add(wraithPauldron);
+    });
+    for (let r = 0; r < 3; r++) {
+      const ribBand = new THREE.Mesh(new THREE.TorusGeometry(0.22 - r * 0.02, 0.018, 5, 12), ivoryBoneMat);
+      ribBand.userData._lodDetail = true;
+      ribBand.rotation.x = Math.PI / 2;
+      ribBand.position.set(0, 0.44 - r * 0.12, 0.02);
+      torso.add(ribBand);
+    }
 
     for (let t = 0; t < 6; t++) {
       const a = (t / 6) * Math.PI * 2;
@@ -5656,29 +5812,43 @@ export function createDemonModel(
   torso.add(skirt);
 
   if (!isSorcerer) {
-    // Spiked Pauldrons & Glowing Molten Chest Core for Brute
+    // Spiked Pauldrons, Molten Chest Fissure Veins & Skull-Buckled War Belt for Brute
     [-0.36, 0.36].forEach((px) => {
       const pauldron = new THREE.Mesh(
-        new THREE.SphereGeometry(0.17, 10, 8),
+        new THREE.SphereGeometry(0.185, 10, 8),
         charredArmorMat
       );
-      pauldron.position.set(px, 0.64, 0);
+      pauldron.position.set(px, 0.65, 0);
       torso.add(pauldron);
-      const spk = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.24, 5), ivoryBoneMat);
+      const spk = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.28, 5), ivoryBoneMat);
       spk.userData._lodDetail = true;
-      spk.position.set(px * 1.18, 0.78, 0);
+      spk.position.set(px * 1.2, 0.80, 0);
       spk.rotation.z = px > 0 ? -0.45 : 0.45;
       torso.add(spk);
     });
     const magmaScar = new THREE.Mesh(
-      new THREE.OctahedronGeometry(0.11, 0),
+      new THREE.OctahedronGeometry(0.13, 0),
       glowMat
     );
     magmaScar.userData._lodDetail = true;
     magmaScar.position.set(0, 0.42, 0.28);
     torso.add(magmaScar);
+
+    [-1, 1].forEach((vx) => {
+      const magmaVein = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.26, 0.03), glowMat);
+      magmaVein.userData._lodDetail = true;
+      magmaVein.position.set(vx * 0.13, 0.46, 0.25);
+      magmaVein.rotation.z = vx * 0.48;
+      torso.add(magmaVein);
+    });
+
+    const warBelt = new THREE.Mesh(new THREE.TorusGeometry(0.25, 0.045, 7, 16), charredArmorMat);
+    warBelt.userData._lodDetail = true;
+    warBelt.rotation.x = Math.PI / 2;
+    warBelt.position.set(0, 0.06, 0);
+    torso.add(warBelt);
   } else {
-    // Skeletal Bone Necklace for Sorcerer
+    // Skeletal Bone Necklace & Cursed Shoulder Mantle for Sorcerer
     for (let b = -2; b <= 2; b++) {
       const boneBead = new THREE.Mesh(
         new THREE.SphereGeometry(0.045, 7, 7),
@@ -5688,6 +5858,11 @@ export function createDemonModel(
       boneBead.position.set(b * 0.08, 0.62 - Math.abs(b) * 0.02, 0.22);
       torso.add(boneBead);
     }
+    const ritualCollar = new THREE.Mesh(new THREE.TorusGeometry(0.25, 0.042, 6, 14), charredArmorMat);
+    ritualCollar.userData._lodDetail = true;
+    ritualCollar.rotation.x = Math.PI / 2;
+    ritualCollar.position.set(0, 0.66, 0);
+    torso.add(ritualCollar);
   }
 
   const headGroup = new THREE.Group();
@@ -5994,18 +6169,25 @@ export function createVolcanoModel(
   x: number,
   z: number,
   radius: number,
-  height: number
+  height: number,
+  textures?: ProceduralTextures
 ): { group: THREE.Group; craterTopY: number } {
   const group = new THREE.Group();
   const baseY = groundHeightAt(x, z);
   group.position.set(x, baseY - 0.6, z);
 
   const rockMat = new THREE.MeshStandardMaterial({
-    color: 0x18141a,
+    map: textures?.rockCliff ?? null,
+    normalMap: textures?.rockCliffNormal ?? null,
+    normalScale: new THREE.Vector2(1.15, 1.15),
+    vertexColors: true,
+    color: 0x2b242c,
     roughness: 0.9,
     metalness: 0.1,
   });
   const strataMat = new THREE.MeshStandardMaterial({
+    map: textures?.darkBasalt ?? null,
+    normalMap: textures?.darkBasaltNormal ?? null,
     color: 0x261f28,
     roughness: 0.88,
     metalness: 0.08,
@@ -6013,12 +6195,12 @@ export function createVolcanoModel(
   const magmaMat = new THREE.MeshPhysicalMaterial({
     color: 0xff5216,
     emissive: 0xff3b08,
-    emissiveIntensity: 2.2,
+    emissiveIntensity: 2.35,
     roughness: 0.34,
     ior: 1.55,
   });
 
-  // High-fidelity 48x28 dense volcanic cone mesh with multi-frequency basalt strata & crags
+  // High-fidelity 48x28 dense volcanic cone mesh with multi-frequency basalt strata, crags & crevice AO
   const coneGeo = new THREE.CylinderGeometry(
     radius * 0.23,
     radius,
@@ -6028,6 +6210,7 @@ export function createVolcanoModel(
     false
   );
   const pos = coneGeo.attributes.position;
+  const cols = new Float32Array(pos.count * 3);
   for (let i = 0; i < pos.count; i++) {
     const vx = pos.getX(i);
     const vy = pos.getY(i);
@@ -6035,14 +6218,21 @@ export function createVolcanoModel(
     const hNorm = (vy + height * 0.5) / height; // 0..1 bottom to summit
     const ang = Math.atan2(vz, vx);
     const rib =
-      Math.sin(ang * 7 + hNorm * 3.1) * 0.065 +
-      Math.cos(ang * 13 - hNorm * 5.2) * 0.038 +
+      Math.sin(ang * 7 + hNorm * 3.1) * 0.072 +
+      Math.cos(ang * 13 - hNorm * 5.2) * 0.042 +
       Math.sin(hNorm * 22) * 0.025;
     const flare = hNorm < 0.25 ? 1 + (0.25 - hNorm) * 0.42 : 1;
     const jag = (1 + rib) * flare;
     pos.setX(i, vx * jag);
     pos.setZ(i, vz * jag);
+
+    const ao = THREE.MathUtils.clamp(0.48 + hNorm * 0.48 + rib * 1.4, 0.35, 1.05);
+    const glowHeat = Math.max(0, hNorm - 0.78) * 1.8;
+    cols[i * 3] = Math.min(1.1, ao + glowHeat * 0.45);
+    cols[i * 3 + 1] = ao + glowHeat * 0.08;
+    cols[i * 3 + 2] = ao;
   }
+  coneGeo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
   coneGeo.computeVertexNormals();
 
   const cone = new THREE.Mesh(coneGeo, rockMat);
@@ -6068,7 +6258,7 @@ export function createVolcanoModel(
     group.add(buttress);
   }
 
-  // Dense Crater Rim Collar & Glowing Molten Caldera Lake
+  // Dense Crater Rim Collar & Jagged Caldera Spires + Glowing Molten Caldera Lake
   const craterRim = new THREE.Mesh(
     new THREE.TorusGeometry(radius * 0.24, radius * 0.048, 12, 36),
     strataMat
@@ -6076,6 +6266,22 @@ export function createVolcanoModel(
   craterRim.rotation.x = Math.PI / 2;
   craterRim.position.y = height;
   group.add(craterRim);
+
+  for (let sp = 0; sp < 6; sp++) {
+    const sa = (sp / 6) * Math.PI * 2 + 0.3;
+    const spire = new THREE.Mesh(
+      new THREE.ConeGeometry(radius * 0.06, height * 0.14, 5),
+      strataMat
+    );
+    spire.position.set(
+      Math.cos(sa) * radius * 0.24,
+      height + height * 0.04,
+      Math.sin(sa) * radius * 0.24
+    );
+    spire.rotation.z = -Math.cos(sa) * 0.18;
+    spire.rotation.x = Math.sin(sa) * 0.18;
+    group.add(spire);
+  }
 
   const lavaPool = new THREE.Mesh(
     new THREE.CircleGeometry(radius * 0.22, 32),
@@ -6108,24 +6314,52 @@ export function createBlackMountainModel(
   z: number,
   radius: number,
   height: number,
-  seed: number
+  seed: number,
+  textures?: ProceduralTextures
 ): THREE.Group {
   const group = new THREE.Group();
   group.position.set(x, groundHeightAt(x, z) - 0.8, z);
 
   const obsidianMat = new THREE.MeshStandardMaterial({
-    color: 0x15141a,
-    roughness: 0.94,
+    map: textures?.rockCliff ?? textures?.darkBasalt ?? null,
+    normalMap: textures?.rockCliffNormal ?? textures?.darkBasaltNormal ?? null,
+    normalScale: new THREE.Vector2(1.05, 1.05),
+    vertexColors: true,
+    color: 0x26232b,
+    roughness: 0.92,
     metalness: 0.06,
   });
 
   const peakCount = 3;
   for (let p = 0; p < peakCount; p++) {
-    const pr = radius * (p === 0 ? 1.0 : 0.65);
-    const ph = height * (p === 0 ? 1.0 : 0.7 + ((seed + p) % 3) * 0.1);
-    const peak = new THREE.Mesh(new THREE.ConeGeometry(pr, ph, 7), obsidianMat);
-    const ox = p === 0 ? 0 : Math.cos(seed + p * 2.1) * radius * 0.55;
-    const oz = p === 0 ? 0 : Math.sin(seed + p * 2.1) * radius * 0.55;
+    const pr = radius * (p === 0 ? 1.0 : 0.68);
+    const ph = height * (p === 0 ? 1.0 : 0.72 + ((seed + p) % 3) * 0.1);
+    const peakGeo = new THREE.ConeGeometry(pr, ph, 16, 10);
+    const pPos = peakGeo.attributes.position;
+    const pCols = new Float32Array(pPos.count * 3);
+    for (let vi = 0; vi < pPos.count; vi++) {
+      const vx = pPos.getX(vi);
+      const vy = pPos.getY(vi);
+      const vz = pPos.getZ(vi);
+      const hNorm = (vy + ph * 0.5) / ph;
+      const ang = Math.atan2(vz, vx);
+      const ridge =
+        Math.sin(ang * 5 + seed + p + hNorm * 2.4) * 0.14 +
+        Math.cos(ang * 9 - hNorm * 3.8 + seed) * 0.08;
+      const radialDisp = 1 + ridge * (1 - hNorm * 0.45);
+      pPos.setX(vi, vx * radialDisp);
+      pPos.setZ(vi, vz * radialDisp);
+      const ao = THREE.MathUtils.clamp(0.45 + hNorm * 0.52 + ridge * 0.9, 0.32, 1.05);
+      pCols[vi * 3] = ao;
+      pCols[vi * 3 + 1] = ao;
+      pCols[vi * 3 + 2] = ao;
+    }
+    peakGeo.setAttribute('color', new THREE.BufferAttribute(pCols, 3));
+    peakGeo.computeVertexNormals();
+
+    const peak = new THREE.Mesh(peakGeo, obsidianMat);
+    const ox = p === 0 ? 0 : Math.cos(seed + p * 2.1) * radius * 0.52;
+    const oz = p === 0 ? 0 : Math.sin(seed + p * 2.1) * radius * 0.52;
     peak.position.set(ox, ph * 0.5, oz);
     peak.rotation.y = seed + p * 1.1;
     group.add(peak);
@@ -6440,10 +6674,12 @@ export function createSevenStoryPalaceAndSabhaModel(
   const stoneMat = new THREE.MeshPhysicalMaterial({
     map: textures.sandstone,
     normalMap: textures.sandstoneNormal,
-    normalScale: new THREE.Vector2(1.0, 1.0),
+    normalScale: new THREE.Vector2(0.88, 0.88),
     roughnessMap: textures.sandstoneRoughness,
+    aoMap: textures.sandstoneAO,
+    aoMapIntensity: 0.72,
     color: 0xe6c38f,
-    roughness: 0.85,
+    roughness: 0.84,
     metalness: 0.05,
     ior: 1.54,
     specularIntensity: 0.44,
@@ -6452,6 +6688,8 @@ export function createSevenStoryPalaceAndSabhaModel(
     map: textures.sandstone,
     normalMap: textures.sandstoneNormal,
     roughnessMap: textures.sandstoneRoughness,
+    aoMap: textures.sandstoneAO,
+    aoMapIntensity: 0.72,
     color: 0x9c5e31,
     roughness: 0.74,
     metalness: 0.15,
@@ -6461,7 +6699,7 @@ export function createSevenStoryPalaceAndSabhaModel(
   const redCarpetMat = new THREE.MeshPhysicalMaterial({
     map: textures.redCarpet,
     normalMap: textures.redCarpetNormal,
-    normalScale: new THREE.Vector2(1.25, 1.25),
+    normalScale: new THREE.Vector2(0.9, 0.9),
     roughnessMap: textures.redCarpetRoughness,
     roughness: 0.82,
     metalness: 0.05,
@@ -6477,7 +6715,7 @@ export function createSevenStoryPalaceAndSabhaModel(
   const mythArtMat = new THREE.MeshPhysicalMaterial({
     map: textures.mythologyArt,
     normalMap: textures.mythologyArtNormal,
-    normalScale: new THREE.Vector2(1.35, 1.35),
+    normalScale: new THREE.Vector2(0.92, 0.92),
     roughness: 0.56,
     metalness: 0.16,
     ior: 1.54,
@@ -6487,9 +6725,10 @@ export function createSevenStoryPalaceAndSabhaModel(
     map: textures.armorMetal,
     normalMap: textures.armorNormal,
     roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
     color: 0xf4c552,
-    roughness: 0.32,
-    metalness: 0.92,
+    roughness: 0.28,
+    metalness: 0.94,
     ior: 1.62,
     specularIntensity: 1.0,
     anisotropy: 0.52,
@@ -6524,7 +6763,7 @@ export function createSevenStoryPalaceAndSabhaModel(
   const epigraphMat = new THREE.MeshPhysicalMaterial({
     map: textures.royalEpigraph,
     normalMap: textures.royalEpigraphNormal,
-    normalScale: new THREE.Vector2(1.4, 1.4),
+    normalScale: new THREE.Vector2(0.92, 0.92),
     roughness: 0.64,
     metalness: 0.12,
     ior: 1.54,
@@ -7433,7 +7672,7 @@ export function createServantQuartersModel(
   const redCarpetMat = new THREE.MeshPhysicalMaterial({
     map: textures.redCarpet,
     normalMap: textures.redCarpetNormal,
-    normalScale: new THREE.Vector2(1.2, 1.2),
+    normalScale: new THREE.Vector2(0.88, 0.88),
     roughnessMap: textures.redCarpetRoughness,
     roughness: 0.82,
     metalness: 0.05,
@@ -7672,7 +7911,13 @@ export function createRoyalElephantUnit(
   jhoolColorHex = 0xb82928
 ): ElephantRig {
   const ele = new THREE.Group();
-  const eleSkinMat = new THREE.MeshPhysicalMaterial({ color: 0x5c5b63, roughness: 0.84, ior: 1.46 });
+  const eleSkinMat = new THREE.MeshPhysicalMaterial({
+    normalMap: textures.barkNormal,
+    normalScale: new THREE.Vector2(0.28, 0.28),
+    color: 0x5c5b63,
+    roughness: 0.82,
+    ior: 1.46,
+  });
   const tuskMat = new THREE.MeshPhysicalMaterial({ color: 0xf6eed8, roughness: 0.28, ior: 1.54, clearcoat: 0.35 });
   const jhoolMat = new THREE.MeshPhysicalMaterial({
     map: textures.velvetCurtain,
@@ -7687,9 +7932,10 @@ export function createRoyalElephantUnit(
     map: textures.armorMetal,
     normalMap: textures.armorNormal,
     roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
     color: 0xf2c14b,
-    roughness: 0.34,
-    metalness: 0.88,
+    roughness: 0.30,
+    metalness: 0.92,
     ior: 1.62,
     anisotropy: 0.45,
   });
@@ -7744,7 +7990,7 @@ export function createRoyalElephantUnit(
     legs.push(legPivot);
   });
 
-  // Head Dome, Crown Ornament & Broad Ears
+  // Head Dome, Crown Ornament, Golden Kumbha-Patta Crest & Broad Ears
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.92, 16, 14), eleSkinMat);
   head.position.set(0, 2.65, 1.65);
   head.castShadow = true;
@@ -7754,8 +8000,20 @@ export function createRoyalElephantUnit(
   headCrown.position.set(0, 3.45, 1.65);
   ele.add(headCrown);
 
+  const foreheadPlate = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.16, 0.55, 8), goldMat);
+  foreheadPlate.userData._lodDetail = true;
+  foreheadPlate.position.set(0, 2.86, 2.48);
+  foreheadPlate.rotation.x = -0.32;
+  ele.add(foreheadPlate);
+
+  const eleEyeMat = new THREE.MeshPhysicalMaterial({ color: 0x261a10, roughness: 0.1, clearcoat: 1.0 });
+
   const earPivots: THREE.Group[] = [];
   [-1, 1].forEach((side) => {
+    const eleEye = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), eleEyeMat);
+    eleEye.position.set(side * 0.52, 2.72, 2.34);
+    ele.add(eleEye);
+
     const earPivot = new THREE.Group();
     earPivot.position.set(side * 0.82, 2.75, 1.4);
     const ear = new THREE.Mesh(new THREE.SphereGeometry(0.68, 12, 10), eleSkinMat);
@@ -7772,6 +8030,11 @@ export function createRoyalElephantUnit(
     ]);
     const tusk = new THREE.Mesh(new THREE.TubeGeometry(tuskCurve, 14, 0.085, 8, false), tuskMat);
     ele.add(tusk);
+
+    const tuskBand = new THREE.Mesh(new THREE.TorusGeometry(0.095, 0.02, 6, 12), goldMat);
+    tuskBand.userData._lodDetail = true;
+    tuskBand.position.set(side * 0.44, 1.94, 2.84);
+    ele.add(tuskBand);
   });
 
   // Articulated S-Curved Trunk
@@ -7831,7 +8094,7 @@ export function createElephantStableModel(
   const redCarpetMat = new THREE.MeshPhysicalMaterial({
     map: textures.redCarpet,
     normalMap: textures.redCarpetNormal,
-    normalScale: new THREE.Vector2(1.2, 1.2),
+    normalScale: new THREE.Vector2(0.88, 0.88),
     roughnessMap: textures.redCarpetRoughness,
     roughness: 0.82,
     metalness: 0.05,
@@ -8045,7 +8308,7 @@ export function createHorseStableModel(
   const redCarpetMat = new THREE.MeshPhysicalMaterial({
     map: textures.redCarpet,
     normalMap: textures.redCarpetNormal,
-    normalScale: new THREE.Vector2(1.2, 1.2),
+    normalScale: new THREE.Vector2(0.88, 0.88),
     roughnessMap: textures.redCarpetRoughness,
     roughness: 0.82,
     metalness: 0.05,
@@ -8458,8 +8721,10 @@ export function createMonumentalStepwellModel(
     map: textures.sandstone,
     normalMap: textures.sandstoneNormal,
     roughnessMap: textures.sandstoneRoughness,
+    aoMap: textures.sandstoneAO,
+    aoMapIntensity: 0.72,
     color: 0xdfb985,
-    roughness: 0.86,
+    roughness: 0.84,
     ior: 1.54,
     specularIntensity: 0.44,
   });
@@ -8467,35 +8732,52 @@ export function createMonumentalStepwellModel(
     map: textures.sandstone,
     normalMap: textures.sandstoneNormal,
     roughnessMap: textures.sandstoneRoughness,
+    aoMap: textures.sandstoneAO,
+    aoMapIntensity: 0.72,
     color: 0xa26635,
-    roughness: 0.76,
+    roughness: 0.74,
     ior: 1.54,
     specularIntensity: 0.48,
   });
   const goldMat = new THREE.MeshPhysicalMaterial({
     map: textures.armorMetal,
+    normalMap: textures.armorNormal,
     roughnessMap: textures.armorRoughness,
+    metalnessMap: textures.armorMetalness,
     color: 0xefc04b,
-    roughness: 0.34,
-    metalness: 0.9,
+    roughness: 0.30,
+    metalness: 0.92,
     ior: 1.62,
   });
   const waterMat = new THREE.MeshPhysicalMaterial({
     map: textures.water,
     normalMap: textures.waterNormal,
+    normalScale: new THREE.Vector2(1.0, 1.0),
     color: 0x2fa8c2,
-    roughness: 0.06,
+    roughness: 0.05,
     metalness: 0.08,
     ior: 1.333,
-    reflectivity: 0.94,
+    reflectivity: 0.96,
     specularIntensity: 1.0,
     transparent: true,
-    opacity: 0.72,
+    opacity: 0.74,
     clearcoat: 1.0,
     clearcoatRoughness: 0.04,
     side: THREE.DoubleSide,
     depthWrite: false,
   });
+  waterMat.customProgramCacheKey = () => 'stepwell-water-v1';
+  waterMat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <dithering_fragment>',
+      `
+      float fresSW = pow(1.0 - max(0.0, dot(normalize(vViewPosition), normalize(vNormal))), 3.2);
+      gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.56, 0.84, 0.96), fresSW * 0.48);
+      gl_FragColor.a = clamp(gl_FragColor.a + fresSW * 0.16, 0.65, 0.94);
+      #include <dithering_fragment>
+      `
+    );
+  };
   const lotusPadMat = new THREE.MeshStandardMaterial({ color: 0x2f7d3a, roughness: 0.65 });
   const lotusPetalMat = new THREE.MeshStandardMaterial({ color: 0xf47da4, roughness: 0.48 });
 

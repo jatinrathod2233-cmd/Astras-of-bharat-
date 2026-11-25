@@ -138,29 +138,19 @@ function loadLanProfile(): LanLocalProfile {
   return { playerName: 'Lord Ram', heroId: 'RAM' };
 }
 
-function tryLockPortraitOrientation(): void {
+function tryLockLandscapeOrientation(): void {
   try {
     const orientation = window.screen?.orientation as
       | (ScreenOrientation & { lock?: (orientation: string) => Promise<void> })
       | undefined;
     if (orientation && typeof orientation.lock === 'function') {
-      void orientation.lock('portrait').catch(() => {
+      void orientation.lock('landscape').catch(() => {
         // Ignore on desktop browsers or non-fullscreen contexts that disallow orientation.lock
       });
     }
   } catch {
     // Ignore unsupported Screen Orientation API
   }
-}
-
-function getStageWidthOverride(): number | undefined {
-  if (typeof window === 'undefined') return undefined;
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  if (w > h && h > 0) {
-    return Math.max(320, Math.min(w, Math.round((h * 9) / 16)));
-  }
-  return undefined;
 }
 
 export default function App() {
@@ -185,9 +175,6 @@ export default function App() {
   lanModalOpenRef.current = lanModalOpen;
   const [muted, setMuted] = useState<boolean>(() => soundEngine.isMuted());
   const [touchSprint, setTouchSprint] = useState(false);
-  const [stageWidthOverride, setStageWidthOverride] = useState<number | undefined>(() =>
-    getStageWidthOverride()
-  );
   const [viewport, setViewport] = useState<{ w: number; h: number }>(() =>
     getViewportDimensions()
   );
@@ -284,11 +271,10 @@ export default function App() {
     }
   }, [mode, resetAllInputs]);
 
-  // Keep custom control bounds locked to the portrait game stage across device sizes
+  // Keep custom control bounds synced to the full-screen landscape stage across device sizes
   useEffect(() => {
-    tryLockPortraitOrientation();
+    tryLockLandscapeOrientation();
     const syncViewport = () => {
-      setStageWidthOverride(getStageWidthOverride());
       const nextVp = getViewportDimensions(stageRef.current);
       setViewport(nextVp);
       setControlLayout(loadControlLayout(nextVp.w, nextVp.h));
@@ -587,9 +573,7 @@ export default function App() {
     lookPointerRef.current.lastX = e.clientX;
     lookPointerRef.current.lastY = e.clientY;
     if (engineRef.current) {
-      // Boost horizontal swipe gain slightly on narrow portrait phone widths so 90° turns fit comfortably in one thumb sweep
-      const portraitHorizGain = e.pointerType === 'touch' && viewportRef.current.w < 500 ? 1.24 : 1.0;
-      engineRef.current.input.cameraDeltaX += dx * portraitHorizGain;
+      engineRef.current.input.cameraDeltaX += dx;
       engineRef.current.input.cameraDeltaY += dy;
     }
   }, []);
@@ -670,7 +654,7 @@ export default function App() {
 
   const handleStartGame = useCallback(() => {
     if (!engineRef.current) return;
-    tryLockPortraitOrientation();
+    tryLockLandscapeOrientation();
     resetAllInputs();
     soundEngine.playMissionChime();
     engineRef.current.setMode('PLAYING');
@@ -713,13 +697,10 @@ export default function App() {
   }, []);
 
   return (
-    <div className="flex h-[100dvh] w-screen items-center justify-center overflow-hidden bg-[#07090D] select-none">
+    <div className="relative h-[100dvh] w-screen overflow-hidden bg-[#07090D] select-none">
       <div
         ref={stageRef}
-        style={stageWidthOverride ? { width: `${stageWidthOverride}px` } : undefined}
-        className={`relative h-full overflow-hidden bg-[#0D1016] select-none ${
-          stageWidthOverride ? 'border-x border-amber-300/15 shadow-2xl' : 'w-full'
-        }`}
+        className="relative h-full w-full overflow-hidden bg-[#0D1016] select-none"
       >
         {/* Dedicated Three.js WebGL Mount Container */}
         <div

@@ -16,6 +16,10 @@ interface OriginalMaterialProps {
   normalMap: THREE.Texture | null;
   roughnessMap: THREE.Texture | null;
   metalnessMap: THREE.Texture | null;
+  aoMap: THREE.Texture | null;
+  aoMapIntensity: number;
+  bumpMap: THREE.Texture | null;
+  bumpScale: number;
   clearcoat: number;
   sheen: number;
   anisotropy: number;
@@ -171,6 +175,11 @@ export class DynamicAssetScaler {
       normalMap: std.normalMap ?? null,
       roughnessMap: std.roughnessMap ?? null,
       metalnessMap: std.metalnessMap ?? null,
+      aoMap: std.aoMap ?? null,
+      aoMapIntensity:
+        typeof std.aoMapIntensity === 'number' ? std.aoMapIntensity : 1.0,
+      bumpMap: std.bumpMap ?? null,
+      bumpScale: typeof std.bumpScale === 'number' ? std.bumpScale : 0,
       clearcoat: typeof std.clearcoat === 'number' ? std.clearcoat : 0,
       sheen: typeof std.sheen === 'number' ? std.sheen : 0,
       anisotropy: typeof std.anisotropy === 'number' ? std.anisotropy : 0,
@@ -260,6 +269,8 @@ export class DynamicAssetScaler {
     const prevHasNormal = Boolean(std.normalMap);
     const prevHasRough = Boolean(std.roughnessMap);
     const prevHasMetal = Boolean(std.metalnessMap);
+    const prevHasAo = Boolean(std.aoMap);
+    const prevHasBump = Boolean(std.bumpMap);
     const prevHasClearcoat =
       typeof std.clearcoat === 'number' && std.clearcoat > 0;
     const prevHasSheen = typeof std.sheen === 'number' && std.sheen > 0;
@@ -270,6 +281,10 @@ export class DynamicAssetScaler {
       std.normalMap = orig.normalMap;
       std.roughnessMap = orig.roughnessMap;
       std.metalnessMap = orig.metalnessMap;
+      std.aoMap = orig.aoMap;
+      std.aoMapIntensity = orig.aoMapIntensity;
+      std.bumpMap = orig.bumpMap;
+      std.bumpScale = orig.bumpScale;
       if (std.isMeshPhysicalMaterial) {
         std.clearcoat = orig.clearcoat;
         std.sheen = orig.sheen;
@@ -280,6 +295,8 @@ export class DynamicAssetScaler {
       std.normalMap = orig.normalMap;
       std.roughnessMap = null;
       std.metalnessMap = null;
+      std.aoMap = null;
+      std.bumpMap = null;
       if (std.isMeshPhysicalMaterial) {
         std.clearcoat = 0;
         std.sheen = 0;
@@ -287,10 +304,12 @@ export class DynamicAssetScaler {
       }
       std.envMapIntensity = Math.max(0.35, orig.envMapIntensity * 0.72);
     } else {
-      // FAST: strip tangent-space normal/roughness/metalness lookups & physical lobes
+      // FAST: strip tangent-space normal/roughness/metalness/ao/bump lookups & physical lobes
       std.normalMap = null;
       std.roughnessMap = null;
       std.metalnessMap = null;
+      std.aoMap = null;
+      std.bumpMap = null;
       if (std.isMeshPhysicalMaterial) {
         std.clearcoat = 0;
         std.sheen = 0;
@@ -304,6 +323,8 @@ export class DynamicAssetScaler {
     const nextHasNormal = Boolean(std.normalMap);
     const nextHasRough = Boolean(std.roughnessMap);
     const nextHasMetal = Boolean(std.metalnessMap);
+    const nextHasAo = Boolean(std.aoMap);
+    const nextHasBump = Boolean(std.bumpMap);
     const nextHasClearcoat =
       typeof std.clearcoat === 'number' && std.clearcoat > 0;
     const nextHasSheen = typeof std.sheen === 'number' && std.sheen > 0;
@@ -314,6 +335,8 @@ export class DynamicAssetScaler {
       prevHasNormal !== nextHasNormal ||
       prevHasRough !== nextHasRough ||
       prevHasMetal !== nextHasMetal ||
+      prevHasAo !== nextHasAo ||
+      prevHasBump !== nextHasBump ||
       prevHasClearcoat !== nextHasClearcoat ||
       prevHasSheen !== nextHasSheen ||
       prevHasAniso !== nextHasAniso;

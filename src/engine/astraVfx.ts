@@ -7,6 +7,7 @@ import { groundHeightAt } from './worldData';
 
 const _vTmp1 = new THREE.Vector3();
 const _vTmp2 = new THREE.Vector3();
+const _vUp = new THREE.Vector3(0, 1, 0);
 
 export interface EnemyDissolveUniforms {
   uDissolve: { value: number };
@@ -568,6 +569,7 @@ interface WaterWaveEffect {
   group: THREE.Group;
   dome: THREE.Mesh;
   ring: THREE.Mesh;
+  foamRing: THREE.Mesh;
   life: number;
   maxLife: number;
   maxRadius: number;
@@ -580,6 +582,7 @@ export interface TornadoZone {
   group: THREE.Group;
   coneInner: THREE.Mesh;
   coneOuter: THREE.Mesh;
+  windRibbon: THREE.Mesh;
   life: number;
   maxLife: number;
   radius: number;
@@ -667,6 +670,7 @@ interface NagaBindVisual {
 interface BeamEffect {
   mesh: THREE.Mesh;
   core: THREE.Mesh;
+  halo: THREE.Mesh;
   life: number;
   maxLife: number;
 }
@@ -1046,9 +1050,10 @@ export class AstraVfxManager {
       onDispose: (g) => pm.disposeObject3DResources(g),
     });
 
-    // 3. Pooled Water Wave Dome + Ring
-    const waveDomeGeo = pm.registerSharedGeometry(new THREE.SphereGeometry(1, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.5));
-    const waveRingGeo = pm.registerSharedGeometry(new THREE.TorusGeometry(1, 0.08, 8, 28));
+    // 3. Pooled Water Wave Dome + Double Caustic Crest Rings
+    const waveDomeGeo = pm.registerSharedGeometry(new THREE.SphereGeometry(1, 20, 14, 0, Math.PI * 2, 0, Math.PI * 0.5));
+    const waveRingGeo = pm.registerSharedGeometry(new THREE.TorusGeometry(1, 0.085, 8, 28));
+    const waveFoamGeo = pm.registerSharedGeometry(new THREE.TorusGeometry(0.84, 0.048, 6, 28));
     pm.registerPool<THREE.Group>({
       key: 'astra_water_wave',
       prewarmCount: 3,
@@ -1060,7 +1065,7 @@ export class AstraVfxManager {
           new THREE.MeshBasicMaterial({
             color: 0x38bdf8,
             transparent: true,
-            opacity: 0.52,
+            opacity: 0.56,
             blending: THREE.AdditiveBlending,
             depthWrite: false,
             side: THREE.DoubleSide,
@@ -1071,15 +1076,28 @@ export class AstraVfxManager {
           new THREE.MeshBasicMaterial({
             color: 0xe0f7ff,
             transparent: true,
-            opacity: 0.85,
+            opacity: 0.90,
             blending: THREE.AdditiveBlending,
             depthWrite: false,
           })
         );
         ring.rotation.x = Math.PI / 2;
-        grp.add(dome, ring);
+        const foamRing = new THREE.Mesh(
+          waveFoamGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0x7dd3fc,
+            transparent: true,
+            opacity: 0.78,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        foamRing.rotation.x = Math.PI / 2;
+        foamRing.position.y = 0.14;
+        grp.add(dome, ring, foamRing);
         grp.userData.dome = dome;
         grp.userData.ring = ring;
+        grp.userData.foamRing = foamRing;
         grp.visible = false;
         pm.poolRoot.add(grp);
         return grp;
@@ -1093,9 +1111,10 @@ export class AstraVfxManager {
       onDispose: (g) => pm.disposeObject3DResources(g),
     });
 
-    // 4. Pooled Spinning Whirlwind Tornado
+    // 4. Pooled Spinning Whirlwind Tornado + Helical Wind Ribbon
     const coneOutGeo = pm.registerSharedGeometry(new THREE.CylinderGeometry(3.4, 0.55, 7.6, 16, 4, true));
     const coneInGeo = pm.registerSharedGeometry(new THREE.CylinderGeometry(1.9, 0.35, 7.2, 12, 4, true));
+    const windRibbonGeo = pm.registerSharedGeometry(new THREE.TorusKnotGeometry(1.45, 0.085, 28, 6, 1, 3));
     pm.registerPool<THREE.Group>({
       key: 'astra_tornado',
       prewarmCount: 2,
@@ -1107,7 +1126,7 @@ export class AstraVfxManager {
           new THREE.MeshBasicMaterial({
             color: 0x7bffb8,
             transparent: true,
-            opacity: 0.36,
+            opacity: 0.38,
             blending: THREE.AdditiveBlending,
             depthWrite: false,
             side: THREE.DoubleSide,
@@ -1119,16 +1138,30 @@ export class AstraVfxManager {
           new THREE.MeshBasicMaterial({
             color: 0xeafff4,
             transparent: true,
-            opacity: 0.44,
+            opacity: 0.48,
             blending: THREE.AdditiveBlending,
             depthWrite: false,
             side: THREE.DoubleSide,
           })
         );
         inner.position.y = 3.6;
-        grp.add(outer, inner);
+        const windRibbon = new THREE.Mesh(
+          windRibbonGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0xb8ffe0,
+            transparent: true,
+            opacity: 0.52,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        windRibbon.rotation.x = Math.PI / 2;
+        windRibbon.scale.set(1.15, 1.15, 2.2);
+        windRibbon.position.y = 3.5;
+        grp.add(outer, inner, windRibbon);
         grp.userData.outer = outer;
         grp.userData.inner = inner;
+        grp.userData.windRibbon = windRibbon;
         grp.visible = false;
         pm.poolRoot.add(grp);
         return grp;
@@ -1306,9 +1339,10 @@ export class AstraVfxManager {
       onDispose: (sp) => sp.material.dispose(),
     });
 
-    // 9. Pooled Brahmastra Sky Beam Cylinder
+    // 9. Pooled Brahmastra Sky Beam Cylinder + Cosmic Magenta-Gold Outer Halo
     const beamOuterGeo = pm.registerSharedGeometry(new THREE.CylinderGeometry(2.1, 2.5, 1, 16, 1, true));
     const beamCoreGeo = pm.registerSharedGeometry(new THREE.CylinderGeometry(0.75, 0.95, 1, 12, 1, true));
+    const beamHaloGeo = pm.registerSharedGeometry(new THREE.CylinderGeometry(3.3, 4.1, 1, 16, 1, true));
     pm.registerPool<THREE.Mesh>({
       key: 'astra_beam',
       prewarmCount: 2,
@@ -1319,7 +1353,7 @@ export class AstraVfxManager {
           new THREE.MeshBasicMaterial({
             color: 0xffb347,
             transparent: true,
-            opacity: 0.72,
+            opacity: 0.78,
             blending: THREE.AdditiveBlending,
             depthWrite: false,
             side: THREE.DoubleSide,
@@ -1328,16 +1362,28 @@ export class AstraVfxManager {
         const core = new THREE.Mesh(
           beamCoreGeo,
           new THREE.MeshBasicMaterial({
-            color: 0xfff8dc,
+            color: 0xfffce8,
             transparent: true,
-            opacity: 0.95,
+            opacity: 0.98,
             blending: THREE.AdditiveBlending,
             depthWrite: false,
             side: THREE.DoubleSide,
           })
         );
-        outer.add(core);
+        const halo = new THREE.Mesh(
+          beamHaloGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0xe879f9,
+            transparent: true,
+            opacity: 0.34,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          })
+        );
+        outer.add(core, halo);
         outer.userData.core = core;
+        outer.userData.halo = halo;
         outer.visible = false;
         pm.poolRoot.add(outer);
         return outer;
@@ -1351,17 +1397,27 @@ export class AstraVfxManager {
       onDispose: (m) => pm.disposeObject3DResources(m),
     });
 
-    // 10. Pooled Jagged Branching Lightning Bolt
+    // 10. Pooled Jagged Branching Lightning Bolt with Outer Plasma Sheath
     const boltMat = pm.registerSharedMaterial(
       new THREE.MeshBasicMaterial({
-        color: 0xe6f6ff,
+        color: 0xf4fbff,
         transparent: true,
-        opacity: 0.96,
+        opacity: 0.98,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    const boltGlowMat = pm.registerSharedMaterial(
+      new THREE.MeshBasicMaterial({
+        color: 0x67e8f9,
+        transparent: true,
+        opacity: 0.48,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       })
     );
     const boltSegGeo = pm.registerSharedGeometry(new THREE.CylinderGeometry(0.14, 0.18, 1.0, 6));
+    const boltGlowGeo = pm.registerSharedGeometry(new THREE.CylinderGeometry(0.32, 0.40, 1.0, 6));
     pm.registerPool<THREE.Group>({
       key: 'astra_lightning',
       prewarmCount: 4,
@@ -1372,6 +1428,8 @@ export class AstraVfxManager {
         for (let i = 0; i < 12; i++) {
           const isBranch = i >= 8;
           const m = new THREE.Mesh(boltSegGeo, boltMat);
+          const sheath = new THREE.Mesh(boltGlowGeo, boltGlowMat);
+          m.add(sheath);
           if (isBranch) m.scale.set(0.45, 1, 0.45);
           g.add(m);
           segs.push(m);
@@ -1598,6 +1656,7 @@ export class AstraVfxManager {
       group: grp,
       dome: grp.userData.dome as THREE.Mesh,
       ring: grp.userData.ring as THREE.Mesh,
+      foamRing: grp.userData.foamRing as THREE.Mesh,
       life: 0.72,
       maxLife: 0.72,
       maxRadius,
@@ -1626,6 +1685,7 @@ export class AstraVfxManager {
       group: grp,
       coneInner: grp.userData.inner as THREE.Mesh,
       coneOuter: grp.userData.outer as THREE.Mesh,
+      windRibbon: grp.userData.windRibbon as THREE.Mesh,
       life: durationSec,
       maxLife: durationSec,
       radius,
@@ -1668,7 +1728,7 @@ export class AstraVfxManager {
       mesh.position.copy(_vTmp1).lerp(_vTmp2, 0.5);
       mesh.scale.set(1.25 - t * 0.45, Math.max(0.2, len), 1.25 - t * 0.45);
       mesh.quaternion.setFromUnitVectors(
-        new THREE.Vector3(0, 1, 0),
+        _vUp,
         _vTmp2.sub(_vTmp1).normalize()
       );
 
@@ -1687,7 +1747,7 @@ export class AstraVfxManager {
           branch.position.copy(_vTmp1).lerp(_vTmp2, 0.5);
           branch.scale.set(0.45, Math.max(0.2, bLen), 0.45);
           branch.quaternion.setFromUnitVectors(
-            new THREE.Vector3(0, 1, 0),
+            _vUp,
             _vTmp2.sub(_vTmp1).normalize()
           );
         }
@@ -1716,18 +1776,20 @@ export class AstraVfxManager {
     // 1. Massive golden-white beam between Ram & impact
     const beam = this.poolManager.acquire<THREE.Mesh>('astra_beam');
     const core = beam.userData.core as THREE.Mesh;
+    const halo = beam.userData.halo as THREE.Mesh;
     _vTmp1.set(fromX, fromY, fromZ);
     _vTmp2.set(toX, toY, toZ);
     const len = Math.max(4, _vTmp1.distanceTo(_vTmp2));
     beam.position.copy(_vTmp1).lerp(_vTmp2, 0.5);
     beam.scale.set(1, len, 1);
     beam.quaternion.setFromUnitVectors(
-      new THREE.Vector3(0, 1, 0),
+      _vUp,
       _vTmp2.sub(_vTmp1).normalize()
     );
     (beam.material as THREE.MeshBasicMaterial).opacity = 0.85;
     (core.material as THREE.MeshBasicMaterial).opacity = 1.0;
-    this.beams.push({ mesh: beam, core, life: 0.65, maxLife: 0.65 });
+    (halo.material as THREE.MeshBasicMaterial).opacity = 0.36;
+    this.beams.push({ mesh: beam, core, halo, life: 0.65, maxLife: 0.65 });
 
     // 2. Vertical celestial lightning pillar at impact
     this.spawnLightningBolt(toX, toY + 46, toZ, toX, toY, toZ);
@@ -1888,8 +1950,10 @@ export class AstraVfxManager {
       const p = Math.min(1, 1 - ww.life / ww.maxLife);
       const rad = THREE.MathUtils.lerp(0.8, ww.maxRadius, p);
       ww.group.scale.set(rad, THREE.MathUtils.lerp(1.8, 0.55, p), rad);
-      (ww.dome.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.52 * (1 - p));
-      (ww.ring.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.88 * (1 - p));
+      ww.foamRing.rotation.z += dt * 4.5;
+      (ww.dome.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.56 * (1 - p));
+      (ww.ring.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.90 * (1 - p));
+      (ww.foamRing.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.78 * (1 - p));
       if (ww.life <= 0) {
         this.poolManager.release('astra_water_wave', ww.group);
         this.waterWaves[i] = this.waterWaves[this.waterWaves.length - 1];
@@ -1903,9 +1967,11 @@ export class AstraVfxManager {
       tn.life -= dt;
       tn.coneOuter.rotation.y += dt * 9.5;
       tn.coneInner.rotation.y -= dt * 13.5;
+      tn.windRibbon.rotation.z += dt * 11.0;
       const fade = Math.min(1, tn.life / 0.5);
-      (tn.coneOuter.material as THREE.MeshBasicMaterial).opacity = 0.36 * fade;
-      (tn.coneInner.material as THREE.MeshBasicMaterial).opacity = 0.44 * fade;
+      (tn.coneOuter.material as THREE.MeshBasicMaterial).opacity = 0.38 * fade;
+      (tn.coneInner.material as THREE.MeshBasicMaterial).opacity = 0.48 * fade;
+      (tn.windRibbon.material as THREE.MeshBasicMaterial).opacity = 0.52 * fade;
       if (Math.random() < dt * 8 * particleScale) {
         this.spawnSpriteBurst(
           tn.x + (Math.random() - 0.5) * 3.5,
@@ -1943,8 +2009,9 @@ export class AstraVfxManager {
       const bm = this.beams[i];
       bm.life -= dt;
       const alpha = Math.max(0, bm.life / bm.maxLife);
-      (bm.mesh.material as THREE.MeshBasicMaterial).opacity = 0.72 * alpha;
-      (bm.core.material as THREE.MeshBasicMaterial).opacity = 0.95 * alpha;
+      (bm.mesh.material as THREE.MeshBasicMaterial).opacity = 0.78 * alpha;
+      (bm.core.material as THREE.MeshBasicMaterial).opacity = 0.98 * alpha;
+      (bm.halo.material as THREE.MeshBasicMaterial).opacity = 0.36 * alpha;
       if (bm.life <= 0) {
         this.poolManager.release('astra_beam', bm.mesh);
         this.beams[i] = this.beams[this.beams.length - 1];
@@ -2090,5 +2157,12 @@ export class AstraVfxManager {
     this.craterTex.dispose();
     this.cycloneMat.dispose();
     this.cycloneCanopy.geometry.dispose();
+    this.objectiveBeamMat.dispose();
+    this.objectiveRingMat.dispose();
+    this.objectiveBeamGroup.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        (obj as THREE.Mesh).geometry.dispose();
+      }
+    });
   }
 }

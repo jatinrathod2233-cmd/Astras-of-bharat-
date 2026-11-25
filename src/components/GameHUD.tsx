@@ -146,10 +146,10 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         cooldowns={hud.astraCooldowns}
       />
 
-      {/* Top Portrait HUD Stack — keeps Minimap, Status Bars, Quest & 5-Astra Strip compact inside top ~160px */}
-      <div className="pointer-events-none absolute inset-x-2.5 top-2.5 z-20 flex flex-col gap-1.5">
-        {/* Row 1: Radar Minimap (left) + Alert/HP/Utility Buttons & Prana/Karma/Astra Bars (right) */}
-        <div className="flex items-start gap-2">
+      {/* Top Landscape HUD Bar — compact 3-zone horizontal layout leaving center & lower viewport open */}
+      <div className="pointer-events-none absolute inset-x-2.5 top-2.5 z-20 flex items-start justify-between gap-2">
+        {/* Top-Left Zone: Radar Minimap + Alert/HP/Prana/Karma/Astra Bars */}
+        <div className="flex items-start gap-2 shrink-0">
           <MinimapRadar
             playerX={hud.playerX}
             playerZ={hud.playerZ}
@@ -157,65 +157,39 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
             blips={hud.blips}
           />
 
-          <div className="flex-1 min-w-0 flex flex-col gap-1">
-            {/* Sub-row A: HP & Alert Stars + Mute/Pause */}
-            <div className="flex items-stretch gap-1.5">
-              <div className="flex-1 min-w-0 rounded-md border border-amber-200/15 bg-[#0D1016]/60 px-2 py-1 space-y-0.5">
-                <div className="flex items-center justify-between gap-1">
-                  <div
-                    className="flex items-center gap-0.5"
-                    aria-label={`Alert level ${hud.wantedLevel} of 5`}
-                  >
-                    {STAR_LEVELS.map((star) => (
-                      <Star
-                        key={star}
-                        className={`h-2.5 w-2.5 ${
-                          star <= hud.wantedLevel
-                            ? 'fill-amber-400 text-amber-400'
-                            : 'text-[#4B463C]'
-                        }`}
-                        aria-hidden="true"
-                      />
-                    ))}
-                  </div>
-                  <span className="font-mono-tabular text-[9px] text-[#EFE9DC]">
-                    HP {hud.hp}/{hud.maxHp}
-                  </span>
+          <div className="w-[156px] sm:w-[186px] flex flex-col gap-1">
+            {/* HP & Alert Stars */}
+            <div className="rounded-md border border-amber-200/15 bg-[#0D1016]/60 px-2 py-1 space-y-0.5">
+              <div className="flex items-center justify-between gap-1">
+                <div
+                  className="flex items-center gap-0.5"
+                  aria-label={`Alert level ${hud.wantedLevel} of 5`}
+                >
+                  {STAR_LEVELS.map((star) => (
+                    <Star
+                      key={star}
+                      className={`h-2.5 w-2.5 ${
+                        star <= hud.wantedLevel
+                          ? 'fill-amber-400 text-amber-400'
+                          : 'text-[#4B463C]'
+                      }`}
+                      aria-hidden="true"
+                    />
+                  ))}
                 </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-sm bg-[#1A202C]/90">
-                  <div
-                    className="h-full bg-[#2EA063] transition-all duration-150"
-                    style={{ width: `${hpPct}%` }}
-                  />
-                </div>
+                <span className="font-mono-tabular text-[9px] text-[#EFE9DC]">
+                  HP {hud.hp}/{hud.maxHp}
+                </span>
               </div>
-
-              <div className="pointer-events-auto flex items-center gap-1 shrink-0">
-                <button
-                  type="button"
-                  onClick={onToggleMute}
-                  aria-label={muted ? 'Unmute audio' : 'Mute audio'}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/60 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer"
-                >
-                  {muted ? (
-                    <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
-                  ) : (
-                    <Volume2 className="h-3.5 w-3.5 text-amber-300" aria-hidden="true" />
-                  )}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={onPause}
-                  aria-label="Pause game"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/60 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer"
-                >
-                  <Pause className="h-3.5 w-3.5 text-amber-300" aria-hidden="true" />
-                </button>
+              <div className="h-1.5 w-full overflow-hidden rounded-sm bg-[#1A202C]/90">
+                <div
+                  className="h-full bg-[#2EA063] transition-all duration-150"
+                  style={{ width: `${hpPct}%` }}
+                />
               </div>
             </div>
 
-            {/* Sub-row B: Compact Horizontal Prana, Karma & Astra Energy Strip */}
+            {/* Compact Horizontal Prana, Karma & Astra Energy Strip */}
             <div
               aria-label="Prana, Karma and Astra status bars"
               className="grid grid-cols-2 gap-1.5 rounded-md border border-amber-200/15 bg-[#0D1016]/55 px-2 py-1"
@@ -290,8 +264,8 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
           </div>
         </div>
 
-        {/* Row 2: Compact Divine Astras Objective Card + Clickable 5-Astra Collection Icons */}
-        <div className="flex flex-col items-center gap-1">
+        {/* Top-Center Zone: Divine Astras Objective Card, 5-Astra Icons & Conditional Warnings */}
+        <div className="flex-1 min-w-0 max-w-[420px] flex flex-col items-center gap-1">
           <div className="w-full rounded-md border border-amber-300/25 bg-[#0D1016]/68 px-2.5 py-1 space-y-0.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 min-w-0 text-[10px] font-semibold text-amber-200">
@@ -317,7 +291,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
                   >
                     <AstraIconBadge
                       id={a.id}
-                      size={20}
+                      size={19}
                       unlocked={a.unlocked}
                       active={hud.selectedAstra === a.id}
                     />
@@ -344,9 +318,8 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
             )}
           </div>
 
-          {/* Compact Badges Row: LAN / FPS / Mount Speed / Stealth Status */}
-          <div className="w-full flex flex-wrap items-start justify-between gap-1.5">
-            <div className="flex flex-wrap items-center gap-1">
+          {(lanSession?.active || showPerfStats) && (
+            <div className="flex flex-wrap items-center justify-center gap-1">
               {lanSession?.active && (
                 <div className="inline-flex items-center gap-1 rounded border border-emerald-400/35 bg-[#0D1016]/75 px-2 py-0.5 font-mono-tabular text-[9px] text-emerald-200">
                   <Wifi className="h-2.5 w-2.5 text-emerald-400 shrink-0" aria-hidden="true" />
@@ -362,105 +335,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
                 </div>
               )}
             </div>
-
-            <div className="pointer-events-auto flex flex-col items-end gap-1 ml-auto">
-              {/* Mounted Speed & Seat Indicator */}
-              {hud.mountKind !== 'NONE' && (
-                <div
-                  role="status"
-                  aria-label="Mount speed indicator"
-                  className={`min-w-[136px] rounded-md border bg-[#0D1016]/68 px-2 py-1 space-y-0.5 ${
-                    hud.stealthActive
-                      ? hud.stealthSpotted
-                        ? 'border-rose-400/65'
-                        : 'border-sky-400/55'
-                      : 'border-amber-300/35'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2 font-mono-tabular text-[9px] text-amber-200">
-                    <span className="inline-flex items-center gap-1 font-medium">
-                      <Gauge className="h-2.5 w-2.5 text-amber-400" aria-hidden="true" />
-                      <span>
-                        {hud.autoDriveActive
-                          ? 'Auto-Drive'
-                          : hud.stealthActive
-                          ? hud.stealthSpotted
-                            ? 'Spotted'
-                            : 'Stealth'
-                          : hud.mountKind === 'ELEPHANT'
-                          ? 'Gaja'
-                          : hud.mountKind === 'HORSE'
-                          ? 'Ashva'
-                          : 'Ratha'}
-                      </span>
-                    </span>
-                    <span className="font-semibold text-[#F7F1E3]">
-                      {hud.chariotSpeedKmh} km/h
-                    </span>
-                  </div>
-                  <div className="h-1 w-full overflow-hidden rounded-sm bg-[#1A202C]/90">
-                    <div
-                      className={`h-full transition-all duration-100 ${
-                        hud.stealthActive
-                          ? hud.stealthSpotted
-                            ? 'bg-rose-400'
-                            : 'bg-sky-400'
-                          : 'bg-amber-400'
-                      }`}
-                      style={{ width: `${chariotSpeedPct}%` }}
-                    />
-                  </div>
-                  {lanSession?.active && hud.mountedSeatIndex !== null && (
-                    <div className="pt-0.5 border-t border-amber-200/15 space-y-0.5">
-                      <div className="flex items-center justify-between gap-1 text-[8.5px] font-medium text-emerald-200">
-                        <span>
-                          {hud.mountedSeatIndex === 0 ? 'Driver' : 'Passenger'} ·{' '}
-                          {hud.mountedOccupantCount}/2
-                        </span>
-                        {hud.canSwitchSeat && (
-                          <button
-                            type="button"
-                            onClick={onSwitchSeat}
-                            className="rounded border border-amber-300/45 bg-amber-500/20 px-1 py-0.5 text-[8px] font-semibold text-amber-200 hover:bg-amber-500/35 cursor-pointer"
-                          >
-                            Swap (G)
-                          </button>
-                        )}
-                      </div>
-                      {hud.mountedPartnerName && (
-                        <div className="truncate text-[8px] text-[#C9C1B2]">
-                          With {hud.mountedPartnerName}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Compact On-Foot Stealth Indicator */}
-              {hud.mountKind === 'NONE' && hud.stealthActive && (
-                <div
-                  role="status"
-                  aria-label="Stealth state"
-                  className={`flex items-center justify-between gap-2 rounded-md border bg-[#0D1016]/68 px-2 py-0.5 text-[9px] font-medium ${
-                    hud.stealthSpotted
-                      ? 'border-rose-400/65 text-rose-200'
-                      : 'border-sky-400/55 text-sky-200'
-                  }`}
-                >
-                  <span className="inline-flex items-center gap-1">
-                    {hud.stealthSpotted ? (
-                      <Eye className="h-2.5 w-2.5 text-rose-300" aria-hidden="true" />
-                    ) : (
-                      <EyeOff className="h-2.5 w-2.5 text-sky-300" aria-hidden="true" />
-                    )}
-                    <span>{hud.stealthSpotted ? 'Spotted' : 'Hidden'}</span>
-                  </span>
-                  <span className="text-[#C9C1B2]">2x Bow</span>
-                </div>
-              )}
-            </div>
-          </div>
+          )}
 
           {/* Enemy Brahmastra 5-Second Interrupt Warning Bar */}
           {enemyWarn && enemyWarn.active && (
@@ -489,11 +364,136 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
             </div>
           )}
         </div>
+
+        {/* Top-Right Zone: Audio/Pause + Mount Speed / Stealth Status */}
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          <div className="pointer-events-auto flex items-center gap-1">
+            <button
+              type="button"
+              onClick={onToggleMute}
+              aria-label={muted ? 'Unmute audio' : 'Mute audio'}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/60 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer"
+            >
+              {muted ? (
+                <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
+              ) : (
+                <Volume2 className="h-3.5 w-3.5 text-amber-300" aria-hidden="true" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={onPause}
+              aria-label="Pause game"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/60 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer"
+            >
+              <Pause className="h-3.5 w-3.5 text-amber-300" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className="pointer-events-auto flex flex-col items-end gap-1">
+            {/* Mounted Speed & Seat Indicator */}
+            {hud.mountKind !== 'NONE' && (
+              <div
+                role="status"
+                aria-label="Mount speed indicator"
+                className={`min-w-[136px] rounded-md border bg-[#0D1016]/68 px-2 py-1 space-y-0.5 ${
+                  hud.stealthActive
+                    ? hud.stealthSpotted
+                      ? 'border-rose-400/65'
+                      : 'border-sky-400/55'
+                    : 'border-amber-300/35'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2 font-mono-tabular text-[9px] text-amber-200">
+                  <span className="inline-flex items-center gap-1 font-medium">
+                    <Gauge className="h-2.5 w-2.5 text-amber-400" aria-hidden="true" />
+                    <span>
+                      {hud.autoDriveActive
+                        ? 'Auto-Drive'
+                        : hud.stealthActive
+                        ? hud.stealthSpotted
+                          ? 'Spotted'
+                          : 'Stealth'
+                        : hud.mountKind === 'ELEPHANT'
+                        ? 'Gaja'
+                        : hud.mountKind === 'HORSE'
+                        ? 'Ashva'
+                        : 'Ratha'}
+                    </span>
+                  </span>
+                  <span className="font-semibold text-[#F7F1E3]">
+                    {hud.chariotSpeedKmh} km/h
+                  </span>
+                </div>
+                <div className="h-1 w-full overflow-hidden rounded-sm bg-[#1A202C]/90">
+                  <div
+                    className={`h-full transition-all duration-100 ${
+                      hud.stealthActive
+                        ? hud.stealthSpotted
+                          ? 'bg-rose-400'
+                          : 'bg-sky-400'
+                        : 'bg-amber-400'
+                    }`}
+                    style={{ width: `${chariotSpeedPct}%` }}
+                  />
+                </div>
+                {lanSession?.active && hud.mountedSeatIndex !== null && (
+                  <div className="pt-0.5 border-t border-amber-200/15 space-y-0.5">
+                    <div className="flex items-center justify-between gap-1 text-[8.5px] font-medium text-emerald-200">
+                      <span>
+                        {hud.mountedSeatIndex === 0 ? 'Driver' : 'Passenger'} ·{' '}
+                        {hud.mountedOccupantCount}/2
+                      </span>
+                      {hud.canSwitchSeat && (
+                        <button
+                          type="button"
+                          onClick={onSwitchSeat}
+                          className="rounded border border-amber-300/45 bg-amber-500/20 px-1 py-0.5 text-[8px] font-semibold text-amber-200 hover:bg-amber-500/35 cursor-pointer"
+                        >
+                          Swap (G)
+                        </button>
+                      )}
+                    </div>
+                    {hud.mountedPartnerName && (
+                      <div className="truncate text-[8px] text-[#C9C1B2]">
+                        With {hud.mountedPartnerName}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Compact On-Foot Stealth Indicator */}
+            {hud.mountKind === 'NONE' && hud.stealthActive && (
+              <div
+                role="status"
+                aria-label="Stealth state"
+                className={`flex items-center justify-between gap-2 rounded-md border bg-[#0D1016]/68 px-2 py-0.5 text-[9px] font-medium ${
+                  hud.stealthSpotted
+                    ? 'border-rose-400/65 text-rose-200'
+                    : 'border-sky-400/55 text-sky-200'
+                }`}
+              >
+                <span className="inline-flex items-center gap-1">
+                  {hud.stealthSpotted ? (
+                    <Eye className="h-2.5 w-2.5 text-rose-300" aria-hidden="true" />
+                  ) : (
+                    <EyeOff className="h-2.5 w-2.5 text-sky-300" aria-hidden="true" />
+                  )}
+                  <span>{hud.stealthSpotted ? 'Spotted' : 'Hidden'}</span>
+                </span>
+                <span className="text-[#C9C1B2]">2x Bow</span>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Underwater Breath Bar for Varunastra Sunken Shrine Dive (positioned cleanly above thumb controls) */}
+      {/* Underwater Breath Bar for Varunastra Sunken Shrine Dive (centered cleanly between thumb clusters) */}
       {breathPct !== null && (
-        <div className="pointer-events-none absolute bottom-[220px] left-1/2 -translate-x-1/2 z-20 w-[180px] rounded-md border border-sky-300/45 bg-[#0B1420]/85 px-2.5 py-1.5 space-y-1">
+        <div className="pointer-events-none absolute bottom-[68px] left-1/2 -translate-x-1/2 z-20 w-[180px] rounded-md border border-sky-300/45 bg-[#0B1420]/85 px-2.5 py-1.5 space-y-1">
           <div className="flex items-center justify-between font-mono-tabular text-[9px] font-semibold text-sky-200">
             <span className="inline-flex items-center gap-1">
               <Waves className="h-3 w-3 text-sky-300" aria-hidden="true" />
@@ -514,9 +514,9 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
         </div>
       )}
 
-      {/* Contextual Prompt Pill — visible on portrait phones safely above bottom controls */}
+      {/* Contextual Prompt Pill — centered cleanly in the lower-center corridor between landscape thumb pads */}
       {hud.promptHint && (
-        <div className="pointer-events-none absolute bottom-[188px] left-1/2 -translate-x-1/2 z-10 max-w-[92%]">
+        <div className="pointer-events-none absolute bottom-[26px] left-1/2 -translate-x-1/2 z-10 max-w-[44%]">
           <div className="truncate rounded border border-amber-300/35 bg-[#0D1016]/68 px-2.5 py-1 text-[10px] font-medium text-amber-200">
             {hud.promptHint}
           </div>
@@ -525,12 +525,12 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
 
       {/* WebGL Context Notice if triggered */}
       {hud.webglError && (
-        <div className="absolute top-36 left-1/2 -translate-x-1/2 z-30 max-w-[90%] rounded-md border border-amber-300/50 bg-[#0D1016]/90 px-3 py-1.5 text-center text-xs text-amber-200">
+        <div className="absolute top-24 left-1/2 -translate-x-1/2 z-30 max-w-[80%] rounded-md border border-amber-300/50 bg-[#0D1016]/90 px-3 py-1.5 text-center text-xs text-amber-200">
           {hud.webglError}
         </div>
       )}
 
-      {/* Portrait Touchscreen Action Pad */}
+      {/* Landscape Touchscreen Action Pad */}
       <TouchActionPad
         chakraCooldown={hud.chakraCooldown}
         chakraMaxCooldown={hud.chakraMaxCooldown}

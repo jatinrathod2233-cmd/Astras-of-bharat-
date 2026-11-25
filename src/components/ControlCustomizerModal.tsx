@@ -312,12 +312,12 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
         style={{ touchAction: 'none' }}
         className="absolute inset-0 z-50 bg-[#0A0D13]/82 select-none overflow-hidden"
       >
-        {/* Subtle static portrait HUD safe-zone guide so players avoid covering radar/HP/Quest bars */}
+        {/* Subtle static landscape HUD safe-zone guide so players avoid covering radar/HP/Quest bars */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute top-2.5 inset-x-2.5 h-[132px] rounded-lg border border-dashed border-amber-200/20 flex items-center justify-center text-[10px] text-amber-200/35"
+          className="pointer-events-none absolute top-2.5 inset-x-2.5 h-[82px] rounded-lg border border-dashed border-amber-200/20 flex items-center justify-center text-[10px] text-amber-200/35"
         >
-          Top HUD · Minimap · HP · Astras
+          Top Landscape HUD · Minimap · Quest · Astras
         </div>
 
         {/* Interactive Draggable & Resizable Controls */}
@@ -408,7 +408,7 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
 
         {/* Floating Compact Inspector Bar (Automatically docks opposite the active control) */}
         <div
-          className={`absolute left-1/2 -translate-x-1/2 z-40 w-[94%] max-w-[520px] rounded-xl border border-amber-300/45 bg-[#0D1016]/95 px-3 py-2.5 shadow-xl space-y-2 ${
+          className={`absolute left-1/2 -translate-x-1/2 z-40 w-[94%] max-w-[520px] max-h-[82vh] overflow-y-auto rounded-xl border border-amber-300/45 bg-[#0D1016]/95 px-3 py-2 shadow-xl space-y-2 ${
             dockBottom ? 'bottom-3' : 'top-3'
           }`}
         >
