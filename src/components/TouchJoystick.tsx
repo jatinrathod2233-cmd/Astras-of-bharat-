@@ -21,8 +21,8 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = React.memo(
     });
     const [active, setActive] = useState(false);
 
-    const vw = viewport?.w ?? (typeof window !== 'undefined' ? window.innerWidth : 844);
-    const vh = viewport?.h ?? (typeof window !== 'undefined' ? window.innerHeight : 390);
+    const vw = viewport?.w ?? (typeof window !== 'undefined' ? window.innerWidth : 390);
+    const vh = viewport?.h ?? (typeof window !== 'undefined' ? window.innerHeight : 844);
     const resolvedPlacement =
       placement ?? getDefaultControlLayout(vw, vh).JOYSTICK;
     const rect = computeControlPixelRect('JOYSTICK', resolvedPlacement, vw, vh);
@@ -83,7 +83,7 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = React.memo(
           width: `${sizePx}px`,
           height: `${sizePx}px`,
         }}
-        className="fixed z-20 flex items-center justify-center select-none pointer-events-auto"
+        className="absolute z-20 flex items-center justify-center select-none pointer-events-auto"
       >
         <div
           ref={baseRef}

@@ -138,7 +138,33 @@ function loadLanProfile(): LanLocalProfile {
   return { playerName: 'Lord Ram', heroId: 'RAM' };
 }
 
+function tryLockPortraitOrientation(): void {
+  try {
+    const orientation = window.screen?.orientation as
+      | (ScreenOrientation & { lock?: (orientation: string) => Promise<void> })
+      | undefined;
+    if (orientation && typeof orientation.lock === 'function') {
+      void orientation.lock('portrait').catch(() => {
+        // Ignore on desktop browsers or non-fullscreen contexts that disallow orientation.lock
+      });
+    }
+  } catch {
+    // Ignore unsupported Screen Orientation API
+  }
+}
+
+function getStageWidthOverride(): number | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  if (w > h && h > 0) {
+    return Math.max(320, Math.min(w, Math.round((h * 9) / 16)));
+  }
+  return undefined;
+}
+
 export default function App() {
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const mountRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<RamayanaWorldEngine | null>(null);
   const lanClientRef = useRef<LanMultiplayerClient | null>(null);
@@ -159,9 +185,14 @@ export default function App() {
   lanModalOpenRef.current = lanModalOpen;
   const [muted, setMuted] = useState<boolean>(() => soundEngine.isMuted());
   const [touchSprint, setTouchSprint] = useState(false);
+  const [stageWidthOverride, setStageWidthOverride] = useState<number | undefined>(() =>
+    getStageWidthOverride()
+  );
   const [viewport, setViewport] = useState<{ w: number; h: number }>(() =>
     getViewportDimensions()
   );
+  const viewportRef = useRef(viewport);
+  viewportRef.current = viewport;
   const [controlLayout, setControlLayout] = useState<ControlLayoutMap>(() => {
     const vp = getViewportDimensions();
     return loadControlLayout(vp.w, vp.h);
@@ -253,16 +284,29 @@ export default function App() {
     }
   }, [mode, resetAllInputs]);
 
-  // Keep custom control bounds responsive across mobile portrait/landscape rotations
+  // Keep custom control bounds locked to the portrait game stage across device sizes
   useEffect(() => {
+    tryLockPortraitOrientation();
     const syncViewport = () => {
-      const nextVp = getViewportDimensions();
+      setStageWidthOverride(getStageWidthOverride());
+      const nextVp = getViewportDimensions(stageRef.current);
       setViewport(nextVp);
       setControlLayout(loadControlLayout(nextVp.w, nextVp.h));
     };
+    syncViewport();
     window.addEventListener('resize', syncViewport);
     window.addEventListener('orientationchange', syncViewport);
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && stageRef.current) {
+      ro = new ResizeObserver(() => {
+        const nextVp = getViewportDimensions(stageRef.current);
+        setViewport(nextVp);
+        setControlLayout(loadControlLayout(nextVp.w, nextVp.h));
+      });
+      ro.observe(stageRef.current);
+    }
     return () => {
+      ro?.disconnect();
       window.removeEventListener('resize', syncViewport);
       window.removeEventListener('orientationchange', syncViewport);
     };
@@ -422,11 +466,18 @@ export default function App() {
       } else if (e.code === 'KeyQ' && !e.repeat) {
         const snapshot = hudRef.current;
         if (snapshot.astraQuest.unlockedCount > 0) {
-          const anchor = lastMouseRef.current ?? {
-            x: window.innerWidth * 0.5,
-            y: window.innerHeight * 0.5,
-          };
-          const clamped = clampWheelCenter(anchor.x, anchor.y);
+          const vp = viewportRef.current;
+          const bounds = stageRef.current?.getBoundingClientRect();
+          const anchor = lastMouseRef.current
+            ? {
+                x: bounds ? lastMouseRef.current.x - bounds.left : lastMouseRef.current.x,
+                y: bounds ? lastMouseRef.current.y - bounds.top : lastMouseRef.current.y,
+              }
+            : {
+                x: vp.w * 0.5,
+                y: vp.h * 0.5,
+              };
+          const clamped = clampWheelCenter(anchor.x, anchor.y, vp.w, vp.h);
           desktopWheelCenterRef.current = clamped;
           desktopWheelOpenRef.current = true;
           desktopHoveredRef.current = snapshot.selectedAstra;
@@ -478,11 +529,14 @@ export default function App() {
     const onMouseMove = (e: MouseEvent) => {
       lastMouseRef.current = { x: e.clientX, y: e.clientY };
       if (!desktopWheelOpenRef.current) return;
+      const bounds = stageRef.current?.getBoundingClientRect();
+      const localX = bounds ? e.clientX - bounds.left : e.clientX;
+      const localY = bounds ? e.clientY - bounds.top : e.clientY;
       const next = getHoveredAstraFromPoint(
         desktopWheelCenterRef.current.x,
         desktopWheelCenterRef.current.y,
-        e.clientX,
-        e.clientY,
+        localX,
+        localY,
         hudRef.current.astraQuest.astras
       );
       if (next !== desktopHoveredRef.current) {
@@ -533,7 +587,9 @@ export default function App() {
     lookPointerRef.current.lastX = e.clientX;
     lookPointerRef.current.lastY = e.clientY;
     if (engineRef.current) {
-      engineRef.current.input.cameraDeltaX += dx;
+      // Boost horizontal swipe gain slightly on narrow portrait phone widths so 90° turns fit comfortably in one thumb sweep
+      const portraitHorizGain = e.pointerType === 'touch' && viewportRef.current.w < 500 ? 1.24 : 1.0;
+      engineRef.current.input.cameraDeltaX += dx * portraitHorizGain;
       engineRef.current.input.cameraDeltaY += dy;
     }
   }, []);
@@ -614,6 +670,7 @@ export default function App() {
 
   const handleStartGame = useCallback(() => {
     if (!engineRef.current) return;
+    tryLockPortraitOrientation();
     resetAllInputs();
     soundEngine.playMissionChime();
     engineRef.current.setMode('PLAYING');
@@ -656,91 +713,100 @@ export default function App() {
   }, []);
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-[#0D1016] select-none">
-      {/* Dedicated Three.js WebGL Mount Container */}
+    <div className="flex h-[100dvh] w-screen items-center justify-center overflow-hidden bg-[#07090D] select-none">
       <div
-        ref={mountRef}
-        onPointerDown={handleCanvasPointerDown}
-        onPointerMove={handleCanvasPointerMove}
-        onPointerUp={handleCanvasPointerUp}
-        onPointerCancel={handleCanvasPointerUp}
-        style={{ touchAction: 'none' }}
-        className="fixed inset-0 z-0 h-full w-full"
-      />
+        ref={stageRef}
+        style={stageWidthOverride ? { width: `${stageWidthOverride}px` } : undefined}
+        className={`relative h-full overflow-hidden bg-[#0D1016] select-none ${
+          stageWidthOverride ? 'border-x border-amber-300/15 shadow-2xl' : 'w-full'
+        }`}
+      >
+        {/* Dedicated Three.js WebGL Mount Container */}
+        <div
+          ref={mountRef}
+          onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handleCanvasPointerUp}
+          onPointerCancel={handleCanvasPointerUp}
+          style={{ touchAction: 'none' }}
+          className="absolute inset-0 z-0 h-full w-full"
+        />
 
-      {/* Active Open-World HUD & Touchscreen Controls */}
-      {mode === 'PLAYING' && (
-        <GameHUD
+        {/* Active Open-World HUD & Touchscreen Controls */}
+        {mode === 'PLAYING' && (
+          <GameHUD
+            hud={hud}
+            muted={muted}
+            sprintActive={touchSprint}
+            showPerfStats={showPerfStats}
+            lanSession={lanSession}
+            desktopWheelOpen={desktopWheelOpen}
+            desktopWheelCenter={desktopWheelCenter}
+            desktopHoveredAstra={desktopHoveredAstra}
+            controlLayout={controlLayout}
+            viewport={viewport}
+            stageRef={stageRef}
+            onToggleMute={handleToggleMute}
+            onPause={handlePause}
+            onJoystickMove={handleJoystickMove}
+            onFireStart={handleFireStart}
+            onFireEnd={handleFireEnd}
+            onAstra={handleAstra}
+            onSelectAstra={handleSelectAstra}
+            onShootAstra={handleShootAstra}
+            onJump={handleJump}
+            onToggleSprint={handleToggleSprint}
+            onInteract={handleInteract}
+            onSwitchSeat={handleSwitchSeat}
+            onToggleStealth={handleToggleStealth}
+            onToggleAutoDrive={handleToggleAutoDrive}
+          />
+        )}
+
+        {/* Title / Pause / Story / Unlock / Defeat / Victory Overlay */}
+        <OverlayModals
+          mode={mode}
           hud={hud}
-          muted={muted}
-          sprintActive={touchSprint}
           showPerfStats={showPerfStats}
           lanSession={lanSession}
-          desktopWheelOpen={desktopWheelOpen}
-          desktopWheelCenter={desktopWheelCenter}
-          desktopHoveredAstra={desktopHoveredAstra}
-          controlLayout={controlLayout}
-          viewport={viewport}
-          onToggleMute={handleToggleMute}
-          onPause={handlePause}
-          onJoystickMove={handleJoystickMove}
-          onFireStart={handleFireStart}
-          onFireEnd={handleFireEnd}
-          onAstra={handleAstra}
-          onSelectAstra={handleSelectAstra}
-          onShootAstra={handleShootAstra}
-          onJump={handleJump}
-          onToggleSprint={handleToggleSprint}
-          onInteract={handleInteract}
-          onSwitchSeat={handleSwitchSeat}
-          onToggleStealth={handleToggleStealth}
-          onToggleAutoDrive={handleToggleAutoDrive}
+          onStartGame={handleStartGame}
+          onResume={handleResume}
+          onRevive={handleRevive}
+          onRestart={handleRestart}
+          onChangeQualityMode={handleChangeQualityMode}
+          onRerunBenchmark={handleRerunBenchmark}
+          onTogglePerfStats={handleTogglePerfStats}
+          onOpenControlCustomizer={() => setCustomizingControls(true)}
+          onOpenLanMultiplayer={() => setLanModalOpen(true)}
+          onDismissStoryIntro={handleDismissStoryIntro}
+          onDismissUnlockPopup={handleDismissUnlockPopup}
         />
-      )}
 
-      {/* Title / Pause / Story / Unlock / Defeat / Victory Overlay */}
-      <OverlayModals
-        mode={mode}
-        hud={hud}
-        showPerfStats={showPerfStats}
-        lanSession={lanSession}
-        onStartGame={handleStartGame}
-        onResume={handleResume}
-        onRevive={handleRevive}
-        onRestart={handleRestart}
-        onChangeQualityMode={handleChangeQualityMode}
-        onRerunBenchmark={handleRerunBenchmark}
-        onTogglePerfStats={handleTogglePerfStats}
-        onOpenControlCustomizer={() => setCustomizingControls(true)}
-        onOpenLanMultiplayer={() => setLanModalOpen(true)}
-        onDismissStoryIntro={handleDismissStoryIntro}
-        onDismissUnlockPopup={handleDismissUnlockPopup}
-      />
+        {/* Interactive Touch Control Layout & Size Editor */}
+        {mode === 'PAUSED' && customizingControls && (
+          <ControlCustomizerModal
+            layout={controlLayout}
+            viewport={viewport}
+            onChangeLayout={setControlLayout}
+            onClose={() => setCustomizingControls(false)}
+          />
+        )}
 
-      {/* Interactive Touch Control Layout & Size Editor */}
-      {mode === 'PAUSED' && customizingControls && (
-        <ControlCustomizerModal
-          layout={controlLayout}
-          viewport={viewport}
-          onChangeLayout={setControlLayout}
-          onClose={() => setCustomizingControls(false)}
-        />
-      )}
-
-      {/* Offline Wi-Fi Hotspot LAN Multiplayer Modal (2–6 Players) */}
-      {lanModalOpen && lanClientRef.current && (
-        <LanMultiplayerModal
-          lanClient={lanClientRef.current}
-          session={lanSession}
-          profile={lanProfile}
-          onUpdateProfile={setLanProfile}
-          onClose={() => setLanModalOpen(false)}
-          onEnterMatch={() => {
-            setLanModalOpen(false);
-            handleStartGame();
-          }}
-        />
-      )}
+        {/* Offline Wi-Fi Hotspot LAN Multiplayer Modal (2–6 Players) */}
+        {lanModalOpen && lanClientRef.current && (
+          <LanMultiplayerModal
+            lanClient={lanClientRef.current}
+            session={lanSession}
+            profile={lanProfile}
+            onUpdateProfile={setLanProfile}
+            onClose={() => setLanModalOpen(false)}
+            onEnterMatch={() => {
+              setLanModalOpen(false);
+              handleStartGame();
+            }}
+          />
+        )}
+      </div>
     </div>
   );
 }

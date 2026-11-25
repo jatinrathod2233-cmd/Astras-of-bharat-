@@ -159,7 +159,7 @@ export const CONTROL_META: Record<ControlId, ControlMeta> = {
   },
 };
 
-const STORAGE_KEY = 'astras_control_layout_v1';
+const STORAGE_KEY = 'astras_control_layout_portrait_v1';
 const SAFE_EDGE_PX = 8;
 const MIN_GAP_PX = 4;
 
@@ -169,11 +169,21 @@ export function clampScale(id: ControlId, rawScale: number): number {
   return Math.round(Math.max(meta.minScale, Math.min(meta.maxScale, rawScale)) * 20) / 20;
 }
 
-export function getViewportDimensions(): { w: number; h: number } {
-  if (typeof window === 'undefined') return { w: 844, h: 390 };
+export function getViewportDimensions(container?: HTMLElement | null): { w: number; h: number } {
+  if (container && container.clientWidth > 0 && container.clientHeight > 0) {
+    return {
+      w: Math.max(300, Math.round(container.clientWidth)),
+      h: Math.max(400, Math.round(container.clientHeight)),
+    };
+  }
+  if (typeof window === 'undefined') return { w: 390, h: 844 };
+  const rawW = window.innerWidth || 390;
+  const rawH = window.innerHeight || 844;
+  // Match portrait frame width when hosted on landscape monitors
+  const portraitW = rawW > rawH ? Math.min(rawW, Math.round((rawH * 9) / 16)) : rawW;
   return {
-    w: Math.max(320, window.innerWidth || 844),
-    h: Math.max(320, window.innerHeight || 390),
+    w: Math.max(300, portraitW),
+    h: Math.max(400, rawH),
   };
 }
 
@@ -236,65 +246,71 @@ export function computeControlPixelRect(
 }
 
 /**
- * Generates responsive default positions matching the original bottom-left
- * action pad and bottom-right virtual joystick layout without overlap across
- * both mobile portrait and landscape screens.
+ * Generates ergonomic portrait-mode defaults for vertically held phones:
+ * - Bottom-left thumb zone: Movement Joystick, Stealth toggle, and contextual Mount/Throne button
+ * - Bottom-right thumb zone: Jump/Sprint bottom row, primary Bow/Chakra mid row, Divyastra Wheel/Shoot top row, and contextual Auto-Drive above
+ * Keeps a wide open center channel and upper viewport unobstructed for aiming & camera look.
  */
 export function getDefaultControlLayout(
   vw: number,
   vh: number
 ): ControlLayoutMap {
-  const compactHeight = vh < 460;
-  const compactWidth = vw < 430;
-  const basePadScale = compactWidth ? 0.92 : 1.0;
+  const narrowPhone = vw < 390;
+  const padScale = narrowPhone ? 0.9 : 0.96;
+  const utilityScale = narrowPhone ? 0.85 : 0.9;
+  const joyScale = narrowPhone ? 0.98 : 1.08;
+  const sideMargin = 12;
+  const bottomMargin = vh >= 760 ? 18 : 12;
+  const rowGap = 6;
 
   const toPlacement = (
     id: ControlId,
     cx: number,
     cy: number,
-    scale = basePadScale
+    scale = padScale
   ): ControlPlacement =>
     clampControlPlacement(id, { nx: cx / vw, ny: cy / vh, scale }, vw, vh);
 
-  // Align column centers to match original 12px left margin + 6px grid gap
-  const col1X = 12 + 29 * basePadScale;
-  const col2X = 12 + (58 + 6 + 29) * basePadScale;
-  const spanCenterX = (col1X + col2X) * 0.5;
+  // Left Thumb Zone: Joystick anchored bottom-left, Stealth & Interact stacked cleanly above
+  const joyRadius = 44 * joyScale;
+  const joyCx = sideMargin + joyRadius;
+  const joyCy = vh - bottomMargin - joyRadius;
+  const joyTop = joyCy - joyRadius;
 
-  const stealthY = vh - (12 + 16 * basePadScale);
-  const jumpSprintY = stealthY - (16 + 6 + 18) * basePadScale;
-  const bowChakraY = jumpSprintY - (18 + 6 + 20) * basePadScale;
-  const wheelShootY = bowChakraY - (20 + 6 + 20) * basePadScale;
+  const leftUtilCenterX = sideMargin + 59 * utilityScale;
+  const stealthHalfH = 16 * utilityScale;
+  const interactHalfH = 15 * utilityScale;
+  const stealthCy = joyTop - 10 - stealthHalfH;
+  const interactCy = stealthCy - stealthHalfH - rowGap - interactHalfH;
 
-  // On short landscape screens, place contextual buttons alongside the action pad
-  // so they never collide with the top-left Prana/Karma bars.
-  const interactX = compactHeight
-    ? spanCenterX + 126 * basePadScale
-    : spanCenterX;
-  const interactY = compactHeight
-    ? stealthY - (16 + 6 + 15) * basePadScale
-    : wheelShootY - (20 + 6 + 15) * basePadScale;
+  // Right Thumb Zone: 2-column action pad anchored bottom-right
+  const colWidth = 58 * padScale;
+  const colGap = 6 * padScale;
+  const col2X = vw - sideMargin - colWidth * 0.5;
+  const col1X = col2X - colWidth - colGap;
+  const rightSpanCenterX = (col1X + col2X) * 0.5;
 
-  const autoDriveX = interactX;
-  const autoDriveY = compactHeight
-    ? stealthY
-    : interactY - (15 + 6 + 15) * basePadScale;
+  const jumpHalfH = 18 * padScale;
+  const bowHalfH = 20 * padScale;
+  const wheelHalfH = 20 * padScale;
+  const autoHalfH = 15 * utilityScale;
 
-  const joyScale = compactWidth ? 0.94 : 1.0;
-  const joyCx = vw - (12 + 44 * joyScale);
-  const joyCy = vh - (12 + 44 * joyScale);
+  const jumpSprintY = vh - bottomMargin - jumpHalfH;
+  const bowChakraY = jumpSprintY - jumpHalfH - rowGap - bowHalfH;
+  const wheelShootY = bowChakraY - bowHalfH - rowGap - wheelHalfH;
+  const autoDriveY = wheelShootY - wheelHalfH - rowGap - autoHalfH;
 
   return {
     JOYSTICK: toPlacement('JOYSTICK', joyCx, joyCy, joyScale),
-    FIRE_BOW: toPlacement('FIRE_BOW', col1X, bowChakraY),
-    CHAKRA: toPlacement('CHAKRA', col2X, bowChakraY),
-    ASTRA_WHEEL: toPlacement('ASTRA_WHEEL', col1X, wheelShootY),
-    SHOOT_ASTRA: toPlacement('SHOOT_ASTRA', col2X, wheelShootY),
-    JUMP: toPlacement('JUMP', col1X, jumpSprintY),
-    SPRINT: toPlacement('SPRINT', col2X, jumpSprintY),
-    STEALTH: toPlacement('STEALTH', spanCenterX, stealthY),
-    INTERACT: toPlacement('INTERACT', interactX, interactY),
-    AUTO_DRIVE: toPlacement('AUTO_DRIVE', autoDriveX, autoDriveY),
+    STEALTH: toPlacement('STEALTH', leftUtilCenterX, stealthCy, utilityScale),
+    INTERACT: toPlacement('INTERACT', leftUtilCenterX, interactCy, utilityScale),
+    JUMP: toPlacement('JUMP', col1X, jumpSprintY, padScale),
+    SPRINT: toPlacement('SPRINT', col2X, jumpSprintY, padScale),
+    FIRE_BOW: toPlacement('FIRE_BOW', col1X, bowChakraY, padScale),
+    CHAKRA: toPlacement('CHAKRA', col2X, bowChakraY, padScale),
+    ASTRA_WHEEL: toPlacement('ASTRA_WHEEL', col1X, wheelShootY, padScale),
+    SHOOT_ASTRA: toPlacement('SHOOT_ASTRA', col2X, wheelShootY, padScale),
+    AUTO_DRIVE: toPlacement('AUTO_DRIVE', rightSpanCenterX, autoDriveY, utilityScale),
   };
 }
 

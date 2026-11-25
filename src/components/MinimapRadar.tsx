@@ -144,7 +144,7 @@ export const MinimapRadar: React.FC<MinimapRadarProps> = React.memo(
     return (
       <div
         aria-label="Open world radar minimap"
-        className="relative h-[80px] w-[80px] shrink-0 overflow-hidden rounded-full border border-amber-300/35 bg-[#0D1016]/55"
+        className="relative h-[72px] w-[72px] sm:h-[78px] sm:w-[78px] shrink-0 overflow-hidden rounded-full border border-amber-300/35 bg-[#0D1016]/55"
       >
         <canvas
           ref={canvasRef}

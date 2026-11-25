@@ -50,6 +50,7 @@ interface TouchActionPadProps {
   brahmastraSummoning: boolean;
   controlLayout: ControlLayoutMap;
   viewport: { w: number; h: number };
+  stageRef?: React.RefObject<HTMLDivElement | null>;
   onFireStart: () => void;
   onFireEnd: () => void;
   onAstra: () => void;
@@ -87,6 +88,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
     brahmastraSummoning,
     controlLayout,
     viewport,
+    stageRef,
     onFireStart,
     onFireEnd,
     onAstra,
@@ -152,35 +154,50 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
       };
     };
 
+    const toStageCoords = useCallback(
+      (clientX: number, clientY: number) => {
+        const bounds = stageRef?.current?.getBoundingClientRect();
+        return {
+          x: bounds ? clientX - bounds.left : clientX,
+          y: bounds ? clientY - bounds.top : clientY,
+        };
+      },
+      [stageRef]
+    );
+
     const handleWheelDown = useCallback(
       (e: React.PointerEvent<HTMLButtonElement>) => {
         e.stopPropagation();
         if (unlockedCount === 0) return;
         e.currentTarget.setPointerCapture(e.pointerId);
         wheelPointerIdRef.current = e.pointerId;
-        const offsetX = e.clientX > viewport.w * 0.5 ? -54 : 54;
-        const offsetY = e.clientY < viewport.h * 0.35 ? 70 : -70;
+        const local = toStageCoords(e.clientX, e.clientY);
+        const offsetX = local.x > viewport.w * 0.5 ? -56 : 56;
+        const offsetY = local.y < viewport.h * 0.35 ? 70 : -74;
         const clamped = clampWheelCenter(
-          e.clientX + offsetX,
-          e.clientY + offsetY
+          local.x + offsetX,
+          local.y + offsetY,
+          viewport.w,
+          viewport.h
         );
         setWheelCenter(clamped);
         hoveredRef.current = selectedAstra;
         setHoveredAstra(selectedAstra);
         setWheelOpen(true);
       },
-      [unlockedCount, selectedAstra, viewport.w, viewport.h]
+      [unlockedCount, selectedAstra, viewport.w, viewport.h, toStageCoords]
     );
 
     const handleWheelMove = useCallback(
       (e: React.PointerEvent<HTMLButtonElement>) => {
         if (wheelPointerIdRef.current !== e.pointerId) return;
         e.stopPropagation();
+        const local = toStageCoords(e.clientX, e.clientY);
         const next = getHoveredAstraFromPoint(
           wheelCenter.x,
           wheelCenter.y,
-          e.clientX,
-          e.clientY,
+          local.x,
+          local.y,
           astras
         );
         if (next !== hoveredRef.current) {
@@ -191,7 +208,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
           }
         }
       },
-      [wheelCenter, astras]
+      [wheelCenter, astras, toStageCoords]
     );
 
     const handleWheelUp = useCallback(
@@ -227,7 +244,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
         {(showThroneBtn || (!onThrone && showMountBtn)) && (
           <div
             style={getWrapperStyle('INTERACT')}
-            className="fixed z-20 select-none pointer-events-auto"
+            className="absolute z-20 select-none pointer-events-auto"
           >
             {showThroneBtn ? (
               <button
@@ -273,7 +290,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
         {isMounted && (
           <div
             style={getWrapperStyle('AUTO_DRIVE')}
-            className="fixed z-20 select-none pointer-events-auto"
+            className="absolute z-20 select-none pointer-events-auto"
           >
             {inMultiplayer && mountedSeatIndex === 1 ? (
               <button
@@ -318,7 +335,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
         {/* Divyastra Wheel Hold Button */}
         <div
           style={getWrapperStyle('ASTRA_WHEEL')}
-          className="fixed z-20 select-none pointer-events-auto"
+          className="absolute z-20 select-none pointer-events-auto"
         >
           <button
             type="button"
@@ -348,7 +365,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
         {/* Dedicated Shoot Astra Button */}
         <div
           style={getWrapperStyle('SHOOT_ASTRA')}
-          className="fixed z-20 select-none pointer-events-auto"
+          className="absolute z-20 select-none pointer-events-auto"
         >
           <button
             type="button"
@@ -393,7 +410,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
         {/* Bow / Fire Button */}
         <div
           style={getWrapperStyle('FIRE_BOW')}
-          className="fixed z-20 select-none pointer-events-auto"
+          className="absolute z-20 select-none pointer-events-auto"
         >
           <button
             type="button"
@@ -417,7 +434,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
         {/* Sudarshan Chakra Button */}
         <div
           style={getWrapperStyle('CHAKRA')}
-          className="fixed z-20 select-none pointer-events-auto"
+          className="absolute z-20 select-none pointer-events-auto"
         >
           <button
             type="button"
@@ -460,7 +477,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
           <>
             <div
               style={getWrapperStyle('JUMP')}
-              className="fixed z-20 select-none pointer-events-auto"
+              className="absolute z-20 select-none pointer-events-auto"
             >
               <button
                 type="button"
@@ -477,7 +494,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
 
             <div
               style={getWrapperStyle('SPRINT')}
-              className="fixed z-20 select-none pointer-events-auto"
+              className="absolute z-20 select-none pointer-events-auto"
             >
               <button
                 type="button"
@@ -503,7 +520,7 @@ export const TouchActionPad: React.FC<TouchActionPadProps> = React.memo(
         {/* Universal Stealth Toggle */}
         <div
           style={getWrapperStyle('STEALTH')}
-          className="fixed z-20 select-none pointer-events-auto"
+          className="absolute z-20 select-none pointer-events-auto"
         >
           <button
             type="button"

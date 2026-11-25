@@ -40,10 +40,15 @@ function createSlicePath(
 /**
  * Clamp wheel center inside viewport so all 5 slices remain visible on small mobile screens.
  */
-export function clampWheelCenter(rawX: number, rawY: number): { x: number; y: number } {
-  const margin = HALF + 14;
-  const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
-  const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
+export function clampWheelCenter(
+  rawX: number,
+  rawY: number,
+  viewportW?: number,
+  viewportH?: number
+): { x: number; y: number } {
+  const margin = HALF + 10;
+  const vw = viewportW ?? (typeof window !== 'undefined' ? window.innerWidth : 390);
+  const vh = viewportH ?? (typeof window !== 'undefined' ? window.innerHeight : 844);
   return {
     x: Math.max(margin, Math.min(vw - margin, rawX)),
     y: Math.max(margin, Math.min(vh - margin, rawY)),
@@ -119,7 +124,7 @@ export const DivyastraRadialWheel: React.FC<DivyastraRadialWheelProps> = React.m
           width: WHEEL_SIZE,
           height: WHEEL_SIZE,
         }}
-        className="fixed z-40 pointer-events-none select-none"
+        className="absolute z-40 pointer-events-none select-none"
       >
         <svg width={WHEEL_SIZE} height={WHEEL_SIZE} viewBox={`0 0 ${WHEEL_SIZE} ${WHEEL_SIZE}`}>
           {/* Outer Dark Backing Ring */}

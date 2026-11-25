@@ -133,8 +133,8 @@ export const LanMultiplayerModal: React.FC<LanMultiplayerModalProps> = ({
   const isNativeHotspot = session.transport === 'NATIVE_ANDROID_HOTSPOT';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0D1016]/88 p-3 sm:p-5">
-      <div className="w-full max-w-[580px] max-h-[92vh] overflow-y-auto rounded-xl border border-amber-300/40 bg-[#0D1016] p-4 sm:p-5 space-y-4 text-[#F7F1E3]">
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-[#0D1016]/88 p-3 sm:p-4">
+      <div className="w-full max-w-[580px] max-h-[92%] overflow-y-auto rounded-xl border border-amber-300/40 bg-[#0D1016] p-4 sm:p-5 space-y-3.5 text-[#F7F1E3]">
         {/* Modal Header */}
         <div className="flex items-start justify-between gap-3 border-b border-amber-200/15 pb-3">
           <div className="space-y-0.5">

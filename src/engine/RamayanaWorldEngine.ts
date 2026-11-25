@@ -828,6 +828,7 @@ export class RamayanaWorldEngine {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
+  private resizeObserver: ResizeObserver | null = null;
   private textures: ProceduralTextures | null = null;
   private poolManager: ObjectPoolManager;
   private occlusionManager = new OcclusionCullingManager();
@@ -1216,10 +1217,12 @@ export class RamayanaWorldEngine {
     this.scene.background = mistColor;
     this.scene.fog = new THREE.Fog(0xc8c2b9, 44, 340 * initProfile.fogFarScale);
 
+    const initW = Math.max(1, container.clientWidth || window.innerWidth || 390);
+    const initH = Math.max(1, container.clientHeight || window.innerHeight || 844);
+    const initAspect = initW / initH;
     this.camera = new THREE.PerspectiveCamera(
-      62,
-      (container.clientWidth || window.innerWidth) /
-        (container.clientHeight || window.innerHeight),
+      this.getResponsiveVerticalFov(initAspect),
+      initAspect,
       FP_CAMERA_NEAR,
       initProfile.cameraFar
     );
@@ -1374,6 +1377,12 @@ export class RamayanaWorldEngine {
     this.poolManager = new ObjectPoolManager(this.scene);
 
     window.addEventListener('resize', this.handleResize);
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => {
+        this.handleResize();
+      });
+      this.resizeObserver.observe(this.container);
+    }
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
     this.emitHud();
     this.startLoop();
@@ -14359,13 +14368,27 @@ export class RamayanaWorldEngine {
     }
   }
 
+  private getResponsiveVerticalFov(aspect: number): number {
+    if (!Number.isFinite(aspect) || aspect >= 1) {
+      return 62;
+    }
+    // In portrait mode (aspect < 1), boost vertical FOV smoothly so horizontal peripheral view remains comfortable without fisheye distortion
+    const targetHalfHorizontalRad = THREE.MathUtils.degToRad(34);
+    const neededVerticalDeg = THREE.MathUtils.radToDeg(
+      2 * Math.atan(Math.tan(targetHalfHorizontalRad) / Math.max(0.42, aspect))
+    );
+    return THREE.MathUtils.clamp(neededVerticalDeg, 64, 86);
+  }
+
   private handleResize = (): void => {
     if (this.disposed) return;
-    const width = this.container.clientWidth || window.innerWidth;
-    const height = this.container.clientHeight || window.innerHeight;
+    const width = Math.max(1, this.container.clientWidth || window.innerWidth || 390);
+    const height = Math.max(1, this.container.clientHeight || window.innerHeight || 844);
     const profile = this.qualityManager.getProfile();
     const effectivePr = this.getEffectivePixelRatio(profile);
-    this.camera.aspect = width / height;
+    const aspect = width / height;
+    this.camera.aspect = aspect;
+    this.camera.fov = this.getResponsiveVerticalFov(aspect);
     this.camera.updateProjectionMatrix();
     if (this.contextLost) return;
     this.renderer.setPixelRatio(effectivePr);
@@ -14382,6 +14405,8 @@ export class RamayanaWorldEngine {
     clearTimeout(this.frameId);
     clearTimeout(this.contextRecoveryTimer);
     window.removeEventListener('resize', this.handleResize);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     this.detachContextListeners(this.renderer.domElement);
     this.occlusionManager.clear();

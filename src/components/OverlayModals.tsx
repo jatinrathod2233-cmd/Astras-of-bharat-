@@ -52,8 +52,8 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
   if (mode === 'PLAYING') {
     if (hud.showStoryIntro) {
       return (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#0D1016]/80 p-5">
-          <div className="w-full max-w-[460px] rounded-xl border border-amber-300/45 bg-[#0D1016]/95 p-6 space-y-4">
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#0D1016]/80 p-4">
+          <div className="w-full max-w-[460px] max-h-[92%] overflow-y-auto rounded-xl border border-amber-300/45 bg-[#0D1016]/95 p-5 space-y-4">
             <div className="space-y-1">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-300">
                 Sage Vashistha’s Counsel
@@ -100,10 +100,10 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
       const popup = hud.astraUnlockPopup;
       const cfg = ASTRA_CONFIG[popup.id];
       return (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#0D1016]/75 p-5">
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#0D1016]/75 p-4">
           <div
             style={{ borderColor: `${cfg.cssAccent}88` }}
-            className="w-full max-w-[400px] rounded-xl border-2 bg-[#0D1016]/95 p-6 text-center space-y-4"
+            className="w-full max-w-[400px] max-h-[92%] overflow-y-auto rounded-xl border-2 bg-[#0D1016]/95 p-5 text-center space-y-4"
           >
             <div className="flex justify-center">
               <AstraIconBadge id={popup.id} size={58} unlocked active />
@@ -144,9 +144,9 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
       : Math.min(99, Math.max(0, Math.round(hud.assetProgress)));
 
     return (
-      <div className="fixed inset-0 z-30 pointer-events-none select-none">
+      <div className="absolute inset-0 z-30 pointer-events-none select-none">
         {/* Central Start Button & Offline LAN Co-op Entry */}
-        <div className="fixed inset-0 flex flex-col items-center justify-center gap-3 p-6 pointer-events-none">
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-5 pointer-events-none">
           <button
             type="button"
             disabled={!hud.assetsReady}
@@ -183,7 +183,7 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
         </div>
 
         {/* Bottom-Docked Loading Bar */}
-        <div className="fixed inset-x-0 bottom-6 flex justify-center px-6 pointer-events-none">
+        <div className="absolute inset-x-0 bottom-5 flex justify-center px-4 pointer-events-none">
           <div className="w-full max-w-[520px] rounded-lg border border-amber-300/30 bg-[#0D1016]/85 px-4 py-3 space-y-2">
             <div className="flex items-center justify-between text-xs text-[#EFE9DC]">
               <span className="inline-flex items-center gap-1.5 font-medium">
@@ -220,12 +220,12 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
 
   if (mode === 'PAUSED') {
     return (
-      <div className="fixed inset-0 z-30 flex items-center justify-center bg-[#0D1016]/75 p-4 sm:p-6">
-        <div className="w-full max-w-[480px] max-h-[90vh] overflow-y-auto rounded-xl border border-amber-300/35 bg-[#0D1016]/95 p-6 space-y-4">
-          <div className="flex items-start justify-between gap-3">
-            <div className="space-y-0.5">
-              <p className="text-xs text-amber-300">{hud.districtName}</p>
-              <h2 className="font-display text-2xl font-semibold text-[#F7F1E3]">
+      <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#0D1016]/75 p-3 sm:p-5">
+        <div className="w-full max-w-[480px] max-h-[92%] overflow-y-auto rounded-xl border border-amber-300/35 bg-[#0D1016]/95 p-4 sm:p-6 space-y-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="space-y-0.5 min-w-0">
+              <p className="text-[11px] text-amber-300 truncate">{hud.districtName}</p>
+              <h2 className="font-display text-xl sm:text-2xl font-semibold text-[#F7F1E3]">
                 Game Paused
               </h2>
             </div>
@@ -454,8 +454,8 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
 
   if (mode === 'DEFEATED') {
     return (
-      <div className="fixed inset-0 z-30 flex items-center justify-center bg-[#0D1016]/80 p-6">
-        <div className="w-full max-w-[440px] rounded-xl border border-rose-400/40 bg-[#0D1016]/95 p-7 space-y-5">
+      <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#0D1016]/80 p-4">
+        <div className="w-full max-w-[440px] max-h-[92%] overflow-y-auto rounded-xl border border-rose-400/40 bg-[#0D1016]/95 p-5 sm:p-7 space-y-4">
           <div className="space-y-1">
             <p className="text-xs text-rose-300">Fallen in Battle</p>
             <h2 className="font-display text-2xl font-semibold text-[#F7F1E3]">
@@ -490,8 +490,8 @@ export const OverlayModals: React.FC<OverlayModalsProps> = React.memo(({
 
   // VICTORY
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-[#0D1016]/75 p-6">
-      <div className="w-full max-w-[480px] rounded-xl border border-amber-300/50 bg-[#0D1016]/95 p-7 space-y-5">
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#0D1016]/75 p-4">
+      <div className="w-full max-w-[480px] max-h-[92%] overflow-y-auto rounded-xl border border-amber-300/50 bg-[#0D1016]/95 p-5 sm:p-7 space-y-4">
         <div className="space-y-1">
           <p className="text-xs text-emerald-300">All Realms Secured</p>
           <h2 className="font-display text-3xl font-semibold text-[#F7F1E3]">

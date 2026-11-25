@@ -54,6 +54,7 @@ type DragMode =
 
 export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = React.memo(
   ({ layout, viewport, onChangeLayout, onClose }) => {
+    const containerRef = useRef<HTMLDivElement | null>(null);
     const [selectedId, setSelectedId] = useState<ControlId>('FIRE_BOW');
     const [activeDragId, setActiveDragId] = useState<ControlId | null>(null);
     const dragRef = useRef<DragMode | null>(null);
@@ -84,19 +85,28 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
       [vw, vh, onChangeLayout]
     );
 
+    const toLocalCoords = (clientX: number, clientY: number) => {
+      const bounds = containerRef.current?.getBoundingClientRect();
+      return {
+        x: bounds ? clientX - bounds.left : clientX,
+        y: bounds ? clientY - bounds.top : clientY,
+      };
+    };
+
     const handleControlPointerDown = (
       id: ControlId,
       e: React.PointerEvent<HTMLDivElement>
     ) => {
       e.stopPropagation();
       setSelectedId(id);
+      const local = toLocalCoords(e.clientX, e.clientY);
       const rect = computeControlPixelRect(id, layoutRef.current[id], vw, vh);
       dragRef.current = {
         kind: 'MOVE',
         id,
         pointerId: e.pointerId,
-        offsetX: e.clientX - rect.cx,
-        offsetY: e.clientY - rect.cy,
+        offsetX: local.x - rect.cx,
+        offsetY: local.y - rect.cy,
       };
       setActiveDragId(id);
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -131,10 +141,11 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
       if (!drag || drag.pointerId !== e.pointerId) return;
       e.stopPropagation();
 
+      const local = toLocalCoords(e.clientX, e.clientY);
       const curr = layoutRef.current[drag.id];
       if (drag.kind === 'MOVE') {
-        const targetCx = e.clientX - drag.offsetX;
-        const targetCy = e.clientY - drag.offsetY;
+        const targetCx = local.x - drag.offsetX;
+        const targetCy = local.y - drag.offsetY;
         const clamped = clampControlPlacement(
           drag.id,
           { nx: targetCx / vw, ny: targetCy / vh, scale: curr.scale },
@@ -146,7 +157,7 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
           [drag.id]: clamped,
         });
       } else {
-        const dist = Math.hypot(e.clientX - drag.cx, e.clientY - drag.cy);
+        const dist = Math.hypot(local.x - drag.cx, local.y - drag.cy);
         const rawScale = dist / drag.baseHalfDiag;
         const nextScale = clampScale(drag.id, rawScale);
         const clamped = clampControlPlacement(
@@ -294,24 +305,19 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
 
     return (
       <div
+        ref={containerRef}
         role="dialog"
         aria-modal="true"
         aria-label="Customize Touch Controls"
         style={{ touchAction: 'none' }}
-        className="fixed inset-0 z-50 bg-[#0A0D13]/82 select-none overflow-hidden"
+        className="absolute inset-0 z-50 bg-[#0A0D13]/82 select-none overflow-hidden"
       >
-        {/* Subtle static HUD safe-zone guides so players avoid covering radar/HP bars */}
+        {/* Subtle static portrait HUD safe-zone guide so players avoid covering radar/HP/Quest bars */}
         <div
           aria-hidden="true"
-          className="pointer-events-none fixed top-3 left-3 h-[80px] w-[80px] rounded-full border border-dashed border-amber-200/20 flex items-center justify-center text-[9px] text-amber-200/35"
+          className="pointer-events-none absolute top-2.5 inset-x-2.5 h-[132px] rounded-lg border border-dashed border-amber-200/20 flex items-center justify-center text-[10px] text-amber-200/35"
         >
-          Minimap
-        </div>
-        <div
-          aria-hidden="true"
-          className="pointer-events-none fixed top-3 right-3 h-[56px] w-[132px] rounded-md border border-dashed border-amber-200/20 flex items-center justify-center text-[9px] text-amber-200/35"
-        >
-          HP / Menu
+          Top HUD · Minimap · HP · Astras
         </div>
 
         {/* Interactive Draggable & Resizable Controls */}
@@ -350,7 +356,7 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
               onPointerCancel={handlePointerUp}
               onLostPointerCapture={handlePointerUp}
               aria-label={`Drag to reposition ${meta.label}`}
-              className={`fixed cursor-grab active:cursor-grabbing ${
+              className={`absolute cursor-grab active:cursor-grabbing ${
                 isSelected ? 'z-30' : 'z-20'
               }`}
             >
@@ -402,7 +408,7 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
 
         {/* Floating Compact Inspector Bar (Automatically docks opposite the active control) */}
         <div
-          className={`fixed left-1/2 -translate-x-1/2 z-40 w-[min(94vw,520px)] rounded-xl border border-amber-300/45 bg-[#0D1016]/95 px-3.5 py-2.5 shadow-xl space-y-2 ${
+          className={`absolute left-1/2 -translate-x-1/2 z-40 w-[94%] max-w-[520px] rounded-xl border border-amber-300/45 bg-[#0D1016]/95 px-3 py-2.5 shadow-xl space-y-2 ${
             dockBottom ? 'bottom-3' : 'top-3'
           }`}
         >
@@ -415,7 +421,7 @@ export const ControlCustomizerModal: React.FC<ControlCustomizerModalProps> = Rea
                 aria-label="Select control to customize"
                 value={selectedId}
                 onChange={(e) => setSelectedId(e.target.value as ControlId)}
-                className="rounded border border-amber-200/25 bg-[#151A24] px-2 py-1 text-xs font-medium text-[#F7F1E3] outline-none focus:border-amber-300"
+                className="min-w-0 max-w-[175px] rounded border border-amber-200/25 bg-[#151A24] px-2 py-1 text-xs font-medium text-[#F7F1E3] outline-none focus:border-amber-300"
               >
                 {CONTROL_ORDER.map((id) => (
                   <option key={id} value={id}>
