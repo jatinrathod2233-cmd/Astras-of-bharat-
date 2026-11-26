@@ -27,6 +27,8 @@ export interface ProceduralTextures {
   armorMetalness: THREE.CanvasTexture;
   royalSkin: THREE.CanvasTexture;
   royalSkinNormal: THREE.CanvasTexture;
+  humanSkin: THREE.CanvasTexture;
+  humanSkinNormal: THREE.CanvasTexture;
   darkBasalt: THREE.CanvasTexture;
   darkBasaltNormal: THREE.CanvasTexture;
   rockCliff: THREE.CanvasTexture;
@@ -721,6 +723,49 @@ function synthRoyalSkinAndBasalt(ctx: TextureSynthContext) {
   const royalSkin = trackTex(ctx, configureColorTexture(skinCanvas, 1, 1, maxAniso, false, ctx.useSecondaryMips));
   const royalSkinNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.05, 1, 1, maxAniso, ctx.useSecondaryMips));
 
+  // Neutral-warm realistic human epidermis albedo + delicate micro-pore normal map
+  // (tints cleanly via material.color into fair-wheatish, olive-bronze, or sun-bronzed human complexions)
+  const humanCanvas = document.createElement('canvas');
+  humanCanvas.width = S;
+  humanCanvas.height = S;
+  const huCtx = humanCanvas.getContext('2d')!;
+  const humanImg = huCtx.createImageData(S, S);
+  const humanD32 = new Uint32Array(humanImg.data.buffer);
+  for (let y = 0; y < S; y++) {
+    const sy = y * invK;
+    const rowOff = y * S;
+    for (let x = 0; x < S; x++) {
+      const sx = x * invK;
+      const macroMottle = smoothNoise(sx * 0.032 + 7.1, sy * 0.032 + 3.7);
+      const vascular = smoothNoise(sx * 0.095 + 19.3, sy * 0.095 + 11.9);
+      const poreGrain = smoothNoise(sx * 0.42 + 41.0, sy * 0.42 + 27.0);
+      const microCrease =
+        Math.sin((sx * 0.22 + macroMottle * 2.1) * 1.4) *
+        Math.cos((sy * 0.24 + vascular * 1.8) * 1.3) *
+        0.5 +
+        0.5;
+      const lum = 0.945 + macroMottle * 0.038 + poreGrain * 0.022;
+      const blush = (vascular - 0.5) * 0.036;
+      scratchHeight[rowOff + x] =
+        0.5 + (poreGrain - 0.5) * 0.24 + (microCrease - 0.5) * 0.14;
+      humanD32[rowOff + x] = packRGBA(
+        clampByte((247 * (lum + Math.max(0, blush)) + 0.5) | 0),
+        clampByte((236 * (lum - blush * 0.25) + 0.5) | 0),
+        clampByte((228 * (lum - blush * 0.45) + 0.5) | 0),
+        255
+      );
+    }
+  }
+  huCtx.putImageData(humanImg, 0, 0);
+  const humanSkin = trackTex(
+    ctx,
+    configureColorTexture(humanCanvas, 1, 1, maxAniso, false, ctx.useSecondaryMips)
+  );
+  const humanSkinNormal = trackTex(
+    ctx,
+    buildNormalMapFromHeight(scratchHeight, S, 0.09, 2, 2, maxAniso, ctx.useSecondaryMips)
+  );
+
   const basCanvas = document.createElement('canvas');
   basCanvas.width = S;
   basCanvas.height = S;
@@ -779,6 +824,8 @@ function synthRoyalSkinAndBasalt(ctx: TextureSynthContext) {
   return {
     royalSkin,
     royalSkinNormal,
+    humanSkin,
+    humanSkinNormal,
     darkBasalt,
     darkBasaltNormal,
     rockCliff: trackTex(ctx, configureColorTexture(cliffCanvas, 3, 3, maxAniso)),

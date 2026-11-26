@@ -244,6 +244,8 @@ const PostSmoothAndUnderwaterShader = {
   `,
 };
 
+const HANUMAN_TAIL_REST_PITCHES = [-1.15, -0.25, 0.42, 0.48, 0.4, 0.34] as const;
+
 // Module-scope reusable math objects (Zero GC in render loop)
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
@@ -2781,8 +2783,9 @@ export class RamayanaWorldEngine {
         if (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) {
           const isTransparentOrFoliage =
             m.transparent || m.opacity < 0.99 || Boolean(m.alphaTest);
+          const isLifelikeSkin = Boolean(m.userData?.lifelikeSkin);
           if (!isTransparentOrFoliage) {
-            m.flatShading = true;
+            m.flatShading = isLifelikeSkin ? false : true;
             m.roughnessMap = null;
             m.aoMap = null;
             m.metalnessMap = null;
@@ -2792,14 +2795,18 @@ export class RamayanaWorldEngine {
             if (hasArtworkRelief) {
               m.normalScale?.set(0.25, 0.25);
               tuneTex(m.normalMap);
+            } else if (m.normalMap !== null && m.userData?.preserveNormalMap) {
+              tuneTex(m.normalMap);
             } else {
               m.normalMap = null;
             }
-            m.envMapIntensity = 0.52;
-            m.roughness =
-              m.metalness > 0.5
-                ? Math.max(0.28, m.roughness)
-                : Math.max(0.58, m.roughness);
+            m.envMapIntensity = isLifelikeSkin ? 0.62 : 0.52;
+            if (!isLifelikeSkin) {
+              m.roughness =
+                m.metalness > 0.5
+                  ? Math.max(0.28, m.roughness)
+                  : Math.max(0.58, m.roughness);
+            }
             m.needsUpdate = true;
           } else {
             m.envMapIntensity = Math.min(0.65, m.envMapIntensity || 0.65);
@@ -5785,9 +5792,11 @@ export class RamayanaWorldEngine {
     this.camPitch = 0.02;
     this.isFlying = false;
     this.heroAbilityCooldown = 0;
-    this.maxHp = HERO_PROFILES[this.activeHeroId].maxHp;
+    const activeProfile = HERO_PROFILES[this.activeHeroId];
+    this.maxHp = activeProfile.maxHp;
     this.hp = this.maxHp;
-    this.prana = 100;
+    this.maxPrana = activeProfile.maxPrana;
+    this.prana = this.maxPrana;
     this.karma = 0;
     this.wantedLevel = 0;
     this.mountedChariotIndex = null;
@@ -6675,9 +6684,13 @@ export class RamayanaWorldEngine {
     }
 
     const hpRatio = this.maxHp > 0 ? THREE.MathUtils.clamp(this.hp / this.maxHp, 0.08, 1.0) : 1.0;
+    const pranaRatio =
+      this.maxPrana > 0 ? THREE.MathUtils.clamp(this.prana / this.maxPrana, 0.08, 1.0) : 1.0;
     this.activeHeroId = targetId;
     this.maxHp = profile.maxHp;
     this.hp = Math.max(1, Math.round(this.maxHp * hpRatio));
+    this.maxPrana = profile.maxPrana;
+    this.prana = Math.min(this.maxPrana, Math.round(this.maxPrana * pranaRatio));
     this.heroAbilityMaxCooldown = profile.specialCooldownSec;
     this.heroAbilityCooldown = Math.min(this.heroAbilityCooldown, profile.specialCooldownSec);
     if (!profile.canFly && this.isFlying) {
@@ -10028,7 +10041,8 @@ export class RamayanaWorldEngine {
     const cfg = ASTRA_CONFIG[astraId];
     const profile = this.qualityManager.getProfile();
     const gY = groundHeightAt(hitX, hitZ);
-    const dmgMult = p.stealthAmbush ? 2.0 : 1.0;
+    const dmgMult =
+      (p.stealthAmbush ? 2.0 : 1.0) * HERO_PROFILES[this.activeHeroId].attackDamageMultiplier;
 
     // Notify quest targets (Fire Bowls, Underwater Pearls, Brahmastra Stage 2 Seals)
     this.astraQuest?.onPlayerArrowHitPoint(hitX, hitY, hitZ, astraId);
@@ -10573,10 +10587,12 @@ export class RamayanaWorldEngine {
       const segs = this.ramRig.tailSegments;
       const tailWaveFreq = this.isFlying ? 6.2 : 2.6 + speedFactor * 3.8;
       for (let i = 0; i < segs.length; i++) {
-        const basePitch = i === 0 ? 0.72 + speedFactor * 0.25 : i < 3 ? 0.32 : -0.3;
+        const restPitch =
+          i < HANUMAN_TAIL_REST_PITCHES.length ? HANUMAN_TAIL_REST_PITCHES[i] : 0.3;
+        const basePitch = i === 0 ? restPitch - speedFactor * 0.24 : restPitch;
         segs[i].rotation.x =
-          basePitch + Math.sin(elapsed * tailWaveFreq - i * 0.55) * (0.08 + speedFactor * 0.1);
-        segs[i].rotation.z = Math.cos(elapsed * (tailWaveFreq * 0.7) - i * 0.6) * 0.14;
+          basePitch + Math.sin(elapsed * tailWaveFreq - i * 0.55) * (0.06 + speedFactor * 0.08);
+        segs[i].rotation.z = Math.cos(elapsed * (tailWaveFreq * 0.7) - i * 0.6) * 0.12;
       }
     }
 
@@ -12363,7 +12379,10 @@ export class RamayanaWorldEngine {
     this.fireCooldown = Math.max(0, this.fireCooldown - dt);
     this.bowDrawHoldTimer = Math.max(0, this.bowDrawHoldTimer - dt);
     this.chakraCooldown = Math.max(0, this.chakraCooldown - dt);
-    this.prana = Math.min(this.maxPrana, this.prana + dt * 5.5);
+    this.prana = Math.min(
+      this.maxPrana,
+      this.prana + dt * 5.5 * HERO_PROFILES[this.activeHeroId].pranaRegenMultiplier
+    );
 
     if (!summonLocked && this.input.fireHeld) {
       this.bowDrawHoldTimer = 0.42;
@@ -12799,7 +12818,8 @@ export class RamayanaWorldEngine {
         p.z = hitZ;
         p.mesh.position.set(hitX, hitY, hitZ);
 
-        const dmgMult = p.stealthAmbush ? 2.0 : 1.0;
+        const dmgMult =
+          (p.stealthAmbush ? 2.0 : 1.0) * HERO_PROFILES[this.activeHeroId].attackDamageMultiplier;
         if (p.isRemoteVisualOnly) {
           this.resolveRemoteAstraVisualImpact(p, hitX, hitY, hitZ);
           this.poolManager.release(p.poolKey, p.mesh);
@@ -13031,7 +13051,10 @@ export class RamayanaWorldEngine {
             const odx = other.x - p.x;
             const odz = other.z - p.z;
             if (odx * odx + odz * odz <= aoeSq) {
-              const dmg = p.stealthAmbush ? 144 : profile.splashDamage;
+              const dmg = Math.round(
+                (p.stealthAmbush ? 144 : profile.splashDamage) *
+                  HERO_PROFILES[this.activeHeroId].attackDamageMultiplier
+              );
               const killed = this.damageEnemy(other, dmg, 'CHAKRA');
               optimisticHits.push({
                 enemyId: other.id,
@@ -14669,9 +14692,13 @@ export class RamayanaWorldEngine {
   }
 
   private inflictDamageToPlayer(hpDmg: number, pranaDrain: number): void {
-    this.hp = Math.max(0, this.hp - hpDmg);
-    if (pranaDrain > 0) {
-      this.prana = Math.max(0, this.prana - pranaDrain);
+    const resistance = HERO_PROFILES[this.activeHeroId].damageResistance;
+    const reducedHpDmg = hpDmg > 0 ? Math.max(1, Math.round(hpDmg * (1 - resistance))) : 0;
+    const reducedPranaDrain =
+      pranaDrain > 0 ? Math.max(1, Math.round(pranaDrain * (1 - resistance * 0.5))) : 0;
+    this.hp = Math.max(0, this.hp - reducedHpDmg);
+    if (reducedPranaDrain > 0) {
+      this.prana = Math.max(0, this.prana - reducedPranaDrain);
     }
     soundEngine.playHit();
     if (this.hp <= 0) {
@@ -15399,7 +15426,7 @@ export class RamayanaWorldEngine {
         this.ramRig.root.rotation.x = 0;
       }
       const radius = dropHeight > 3.5 ? 14.5 : 11.5;
-      const slamDmg = Math.round(hero.specialDamage * (dropHeight > 3.5 ? 1.45 : 1.0));
+      const slamDmg = Math.round(hero.specialDamage * (dropHeight > 3.5 ? 1.6 : 1.15));
       this.astraVfx?.spawnWaterWave(this.playerX, gY, this.playerZ, radius, profile.particleScale, profile.tier);
       this.astraVfx?.spawnSpriteBurst(
         this.playerX,

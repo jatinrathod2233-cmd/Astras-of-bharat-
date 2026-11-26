@@ -435,11 +435,12 @@ function createDetailedFoot(
   return footGroup;
 }
 
-function createRamAnatomicalHeadGeometry(): THREE.BufferGeometry {
+function createRamAnatomicalHeadGeometry(
+  stacks = 12,
+  slices = 12
+): THREE.BufferGeometry {
   // Canonical adult cranial-facial head (~0.23m tall, 0.156m wide, 0.196m deep)
   // Vertical range y in [-0.116, +0.116], facial plane faces +Z
-  const stacks = 12;
-  const slices = 12;
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
@@ -574,11 +575,12 @@ function createRamAnatomicalHeadGeometry(): THREE.BufferGeometry {
   return geo;
 }
 
-function createRamAnatomicalTorsoGeometry(): THREE.BufferGeometry {
+function createRamAnatomicalTorsoGeometry(
+  stacks = 12,
+  slices = 10
+): THREE.BufferGeometry {
   // Lean, royal classical archer/prince torso from pelvis crest (y=0.0) to upper neck (y=0.695)
   // Lean proportions: hips ±0.132m, waist ±0.118m, chest ±0.156m, clavicle ±0.164m, neck ±0.049m
-  const stacks = 12;
-  const slices = 10;
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
@@ -969,7 +971,62 @@ function createRamDetailedFoot(
   return footGroup;
 }
 
-export function createLordRamModel(textures: ProceduralTextures): CharacterRig {
+interface LifelikeSkinOptions {
+  colorHex: number;
+  sheenHex: number;
+  sssRgb: [number, number, number];
+  roughness: number;
+  normalScale?: number;
+  cacheTag: string;
+}
+
+function createLifelikeHumanSkinMaterial(
+  textures: ProceduralTextures,
+  opts: LifelikeSkinOptions
+): THREE.MeshPhysicalMaterial {
+  const nScale = opts.normalScale ?? 0.14;
+  const mat = new THREE.MeshPhysicalMaterial({
+    map: textures.humanSkin,
+    normalMap: textures.humanSkinNormal,
+    normalScale: new THREE.Vector2(nScale, nScale),
+    color: opts.colorHex,
+    roughness: opts.roughness,
+    metalness: 0.0,
+    ior: 1.4,
+    specularIntensity: 0.4,
+    clearcoat: 0.05,
+    clearcoatRoughness: 0.56,
+    sheen: 0.24,
+    sheenRoughness: 0.55,
+    sheenColor: new THREE.Color(opts.sheenHex),
+    flatShading: false,
+  });
+  mat.userData.lifelikeSkin = true;
+  mat.userData.preserveNormalMap = true;
+  const [sr, sg, sb] = opts.sssRgb;
+  mat.customProgramCacheKey = () => `lifelike-human-skin-${opts.cacheTag}-v1`;
+  mat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <dithering_fragment>',
+      `
+      vec3 skinViewDir = normalize(vViewPosition);
+      vec3 skinN = normalize(vNormal);
+      float skinNdotV = max(0.0, dot(skinViewDir, skinN));
+      float skinRim = pow(1.0 - skinNdotV, 3.6);
+      float skinScatterBand = smoothstep(0.05, 0.72, 1.0 - skinNdotV) * (0.45 + 0.55 * skinRim);
+      gl_FragColor.rgb += vec3(${sr.toFixed(3)}, ${sg.toFixed(3)}, ${sb.toFixed(3)}) * skinScatterBand;
+      #include <dithering_fragment>
+      `
+    );
+  };
+  return mat;
+}
+
+export function createLordRamModel(
+  textures: ProceduralTextures,
+  options?: { highResSkin?: boolean }
+): CharacterRig {
+  const highResSkin = Boolean(options?.highResSkin);
   const root = new THREE.Group();
 
   // Grounded realistic PBR Shyam Varna (rich dark-blue) skin with silky sheen & soft sky grazing rim lighting
@@ -1234,8 +1291,8 @@ export function createLordRamModel(textures: ProceduralTextures): CharacterRig {
         [0.92, 0.049, 0.054, 0, 0.004],
         [1.0, 0.046, 0.05, 0, 0.002],
       ],
-      14,
-      20
+      highResSkin ? 14 : 14,
+      highResSkin ? 20 : 20
     );
     const lowerThigh = new THREE.Mesh(lowerThighGeo, skinMat);
     lowerThigh.position.y = -0.27;
@@ -1416,7 +1473,12 @@ export function createLordRamModel(textures: ProceduralTextures): CharacterRig {
   });
 
   // Continuous Defined Anatomical Torso & Neck Mesh
-  const torsoMesh = new THREE.Mesh(createRamAnatomicalTorsoGeometry(), skinMat);
+  const torsoMesh = new THREE.Mesh(
+    highResSkin
+      ? createRamAnatomicalTorsoGeometry(20, 22)
+      : createRamAnatomicalTorsoGeometry(),
+    skinMat
+  );
   torsoMesh.position.y = 0.095;
   torsoMesh.castShadow = true;
   torsoMesh.receiveShadow = true;
@@ -1589,7 +1651,12 @@ export function createLordRamModel(textures: ProceduralTextures): CharacterRig {
   headGroup.position.y = 0.775;
   torso.add(headGroup);
 
-  const headMesh = new THREE.Mesh(createRamAnatomicalHeadGeometry(), skinMat);
+  const headMesh = new THREE.Mesh(
+    highResSkin
+      ? createRamAnatomicalHeadGeometry(22, 24)
+      : createRamAnatomicalHeadGeometry(),
+    skinMat
+  );
   headMesh.castShadow = true;
   headMesh.receiveShadow = true;
   headGroup.add(headMesh);
@@ -2059,8 +2126,8 @@ export function createLordRamModel(textures: ProceduralTextures): CharacterRig {
         [0.88, 0.034, 0.038, 0, 0], // distal taper
         [1.0, 0.032, 0.034, 0, -0.001], // elbow condyles
       ],
-      6,
-      7
+      highResSkin ? 12 : 6,
+      highResSkin ? 16 : 7
     );
     const upperArm = new THREE.Mesh(upperArmGeo, skinMat);
     upperArm.castShadow = true;
@@ -2098,7 +2165,7 @@ export function createLordRamModel(textures: ProceduralTextures): CharacterRig {
 
     // Seamless Spherical Elbow Joint Cap (zero detachment on flexion)
     const elbowCap = new THREE.Mesh(
-      new THREE.SphereGeometry(0.033, 6, 5),
+      new THREE.SphereGeometry(0.033, highResSkin ? 12 : 6, highResSkin ? 10 : 5),
       skinMat
     );
     elbowCap.scale.set(0.95, 1.0, 1.02);
@@ -2115,8 +2182,8 @@ export function createLordRamModel(textures: ProceduralTextures): CharacterRig {
         [0.88, 0.023, 0.026, 0, 0],
         [1.0, 0.022, 0.024, 0, 0], // wrist
       ],
-      6,
-      7
+      highResSkin ? 12 : 6,
+      highResSkin ? 16 : 7
     );
     const forearm = new THREE.Mesh(forearmGeo, skinMat);
     forearm.position.y = 0.01;
@@ -9192,10 +9259,11 @@ export function createFishSchoolGeometry(): THREE.BufferGeometry {
 // LAKSHMAN (Serpent-Crest Royal Archer) & BHARAT (Dharma Sovereign Guardian)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function createHanumanTorsoGeometry(): THREE.BufferGeometry {
-  // Powerful V-tapered divine Vanara warrior torso from pelvis crest (y=0.0) to upper neck (y=0.71)
-  const stacks = 12;
-  const slices = 10;
+function createHanumanTorsoGeometry(
+  stacks = 20,
+  slices = 22
+): THREE.BufferGeometry {
+  // Powerful V-tapered divine hero torso from pelvis crest (y=0.0) to upper neck (y=0.71)
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
@@ -9371,24 +9439,21 @@ function createVajraGadaMace(
 export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
   const root = new THREE.Group();
 
-  // Warm burnished saffron-bronze heroic skin with divine rim glow
-  const skinMat = new THREE.MeshPhysicalMaterial({
-    map: textures.royalSkin,
-    normalMap: textures.royalSkinNormal,
-    normalScale: new THREE.Vector2(0.24, 0.24),
-    color: 0xe39e68,
-    roughness: 0.44,
-    metalness: 0.04,
-    clearcoat: 0.12,
-    sheen: 0.42,
-    sheenRoughness: 0.45,
-    sheenColor: new THREE.Color(0xffb454),
+  // Natural lifelike sun-bronzed copper-wheat human skin with warm hemoglobin SSS & micro-pore detail
+  const skinMat = createLifelikeHumanSkinMaterial(textures, {
+    colorHex: 0xc68559,
+    sheenHex: 0xf4b686,
+    sssRgb: [0.15, 0.052, 0.026],
+    roughness: 0.43,
+    normalScale: 0.14,
+    cacheTag: 'hanuman',
   });
   const furTrimMat = new THREE.MeshPhysicalMaterial({
-    color: 0xf4a852,
-    roughness: 0.68,
-    sheen: 0.72,
-    sheenColor: new THREE.Color(0xffe09a),
+    color: 0x5c3c24,
+    roughness: 0.72,
+    sheen: 0.55,
+    sheenRoughness: 0.6,
+    sheenColor: new THREE.Color(0x9a6d48),
   });
   const dhotiMat = new THREE.MeshPhysicalMaterial({
     map: textures.silkGold,
@@ -9432,25 +9497,64 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     roughness: 0.25,
   });
   const sindoorMat = new THREE.MeshStandardMaterial({
-    color: 0xff4500,
-    emissive: 0xd93000,
-    emissiveIntensity: 0.55,
-    roughness: 0.5,
+    color: 0xe63c14,
+    emissive: 0x7a1a04,
+    emissiveIntensity: 0.22,
+    roughness: 0.52,
   });
-  const hairMat = new THREE.MeshStandardMaterial({
-    color: 0x161214,
-    roughness: 0.48,
+  const hairMat = new THREE.MeshPhysicalMaterial({
+    color: 0x221611,
+    roughness: 0.46,
+    metalness: 0.04,
+    sheen: 0.34,
+    sheenRoughness: 0.48,
+    sheenColor: new THREE.Color(0x5c3c29),
+  });
+  hairMat.userData.lifelikeSkin = true;
+  const lipMat = new THREE.MeshPhysicalMaterial({
+    color: 0x8f4e3d,
+    roughness: 0.41,
+    metalness: 0.0,
+    ior: 1.4,
+    sheen: 0.2,
+    sheenColor: new THREE.Color(0xc47b66),
+  });
+  lipMat.userData.lifelikeSkin = true;
+  const cavityDarkMat = new THREE.MeshStandardMaterial({
+    color: 0x2e1713,
+    roughness: 0.85,
   });
   const eyeWhiteMat = new THREE.MeshPhysicalMaterial({
-    color: 0xfaf5e8,
+    color: 0xf7f2ea,
     roughness: 0.12,
+    ior: 1.38,
     clearcoat: 0.95,
   });
+  eyeWhiteMat.userData.lifelikeSkin = true;
   const irisMat = new THREE.MeshPhysicalMaterial({
-    color: 0xd96b18,
-    emissive: 0x662200,
-    emissiveIntensity: 0.45,
+    color: 0x6b3a1c,
     roughness: 0.1,
+    ior: 1.42,
+    clearcoat: 1.0,
+  });
+  irisMat.userData.lifelikeSkin = true;
+  const limbalMat = new THREE.MeshStandardMaterial({
+    color: 0x21130b,
+    roughness: 0.32,
+  });
+  limbalMat.userData.lifelikeSkin = true;
+  const pupilMat = new THREE.MeshPhysicalMaterial({
+    color: 0x080607,
+    roughness: 0.05,
+    ior: 1.52,
+    clearcoat: 1.0,
+  });
+  pupilMat.userData.lifelikeSkin = true;
+  const catchlightMat = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    emissive: 0xffffff,
+    emissiveIntensity: 0.85,
+    roughness: 0.04,
     clearcoat: 1.0,
   });
   const leatherMat = new THREE.MeshStandardMaterial({
@@ -9467,7 +9571,7 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     const legPivot = new THREE.Group();
     legPivot.position.set(xOffset, 0.94, 0);
 
-    const hipBall = new THREE.Mesh(new THREE.SphereGeometry(0.105, 7, 6), dhotiMat);
+    const hipBall = new THREE.Mesh(new THREE.SphereGeometry(0.105, 12, 10), dhotiMat);
     legPivot.add(hipBall);
 
     const thighGeo = createRamAnatomicalLimbGeometry(
@@ -9478,8 +9582,8 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
         [0.72, 0.082, 0.088, 0, 0.004],
         [1.0, 0.062, 0.066, 0, 0],
       ],
-      6,
-      7
+      14,
+      18
     );
     const upperThigh = new THREE.Mesh(
       createRamAnatomicalLimbGeometry(
@@ -9489,8 +9593,8 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
           [0.65, 0.098, 0.105, 0, 0.003],
           [1.0, 0.0, 0.0, 0, 0],
         ],
-        5,
-        6
+        8,
+        12
       ),
       dhotiMat
     );
@@ -9499,13 +9603,14 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
 
     const thighMesh = new THREE.Mesh(thighGeo, skinMat);
     thighMesh.castShadow = true;
+    thighMesh.receiveShadow = true;
     legPivot.add(thighMesh);
 
     const kneePivot = new THREE.Group();
     kneePivot.position.set(0, -0.445, 0);
     legPivot.add(kneePivot);
 
-    const kneeCap = new THREE.Mesh(new THREE.SphereGeometry(0.062, 7, 6), goldMat);
+    const kneeCap = new THREE.Mesh(new THREE.SphereGeometry(0.062, 12, 10), goldMat);
     kneeCap.scale.set(1.0, 0.9, 0.85);
     kneeCap.position.set(0, 0, 0.025);
     kneePivot.add(kneeCap);
@@ -9518,12 +9623,13 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
         [0.7, 0.048, 0.056, 0, -0.006],
         [1.0, 0.038, 0.042, 0, 0],
       ],
-      6,
-      7
+      14,
+      18
     );
     const shin = new THREE.Mesh(shinGeo, skinMat);
     shin.position.y = 0.012;
     shin.castShadow = true;
+    shin.receiveShadow = true;
     kneePivot.add(shin);
 
     const anklet = new THREE.Mesh(new THREE.TorusGeometry(0.046, 0.01, 5, 10), goldMat);
@@ -9534,6 +9640,9 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     const anklePivot = new THREE.Group();
     anklePivot.position.set(0, -0.405, 0);
     kneePivot.add(anklePivot);
+
+    const ankleBall = new THREE.Mesh(new THREE.SphereGeometry(0.04, 12, 10), skinMat);
+    anklePivot.add(ankleBall);
 
     const foot = createRamDetailedFoot(isLeft, skinMat, leatherMat, goldMat);
     foot.scale.set(1.18, 1.1, 1.15);
@@ -9672,19 +9781,19 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
   capePivot.add(cape);
   torso.add(capePivot);
 
-  // Articulated 6-Segment Golden-Furred Vanara Tail
+  // Articulated 6-Segment Golden-Furred Vanara Tail (positioned cleanly behind his lower back -Z)
   const tailSegments: THREE.Group[] = [];
   let tailParent: THREE.Object3D = torso;
   const tailLengths = [0.22, 0.22, 0.22, 0.21, 0.2, 0.18];
+  const tailRestPitches = [-1.15, -0.25, 0.42, 0.48, 0.4, 0.34];
   tailLengths.forEach((tLen, idx) => {
     const tp = new THREE.Group();
     if (idx === 0) {
-      tp.position.set(0, 0.03, -0.125);
-      tp.rotation.x = 0.72;
+      tp.position.set(0, 0.04, -0.145);
     } else {
-      tp.position.set(0, tLen, 0);
-      tp.rotation.x = idx < 3 ? 0.34 : -0.32;
+      tp.position.set(0, tailLengths[idx - 1], 0);
     }
+    tp.rotation.x = tailRestPitches[idx];
     const r0 = 0.026 * (1 - idx * 0.1);
     const r1 = 0.022 * (1 - idx * 0.1);
     const segGeo = new THREE.CylinderGeometry(r1, r0, tLen, 10);
@@ -9712,66 +9821,192 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
   heroAuraMesh.position.set(0, 0.58, -0.16);
   torso.add(heroAuraMesh);
 
-  // Fiercely Noble Sculpted Vanara Head + Sindoor Tilak + Kireeta Mukut Crown
+  // Lifelike Noble Cinematic Head + Sculpted Human Features + Sindoor Tilak + Kireeta Mukut Crown
   const headGroup = new THREE.Group();
   headGroup.position.set(0, 0.805, 0.01);
   torso.add(headGroup);
 
-  const cranium = new THREE.Mesh(createRamAnatomicalHeadGeometry(), skinMat);
-  cranium.scale.set(1.12, 1.06, 1.08);
+  const cranium = new THREE.Mesh(createRamAnatomicalHeadGeometry(22, 24), skinMat);
+  cranium.scale.set(1.1, 1.05, 1.07);
   cranium.castShadow = true;
+  cranium.receiveShadow = true;
   headGroup.add(cranium);
 
-  // Characteristic strong Vanara lower muzzle/jaw contour & mane cheek sideburns
-  const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.056, 8, 6), furTrimMat);
-  muzzle.scale.set(1.06, 0.72, 0.92);
-  muzzle.position.set(0, -0.036, 0.072);
-  headGroup.add(muzzle);
-
+  // Natural lifelike eyes seated cleanly inside orbital sockets + sculpted human eyelids & arched brows
   [-1, 1].forEach((side) => {
-    const eyeWhite = new THREE.Mesh(new THREE.SphereGeometry(0.016, 6, 5), eyeWhiteMat);
-    eyeWhite.scale.set(1.1, 0.8, 0.7);
-    eyeWhite.position.set(side * 0.035, 0.016, 0.088);
-    headGroup.add(eyeWhite);
+    const eyeGroup = new THREE.Group();
+    eyeGroup.position.set(side * 0.0345, 0.014, 0.0855);
+    eyeGroup.rotation.y = side * 0.15;
 
-    const iris = new THREE.Mesh(new THREE.SphereGeometry(0.0085, 6, 5), irisMat);
-    iris.position.set(side * 0.035, 0.016, 0.098);
-    headGroup.add(iris);
+    const sclera = new THREE.Mesh(new THREE.SphereGeometry(0.0145, 14, 12), eyeWhiteMat);
+    sclera.scale.set(1.12, 0.76, 0.72);
+    eyeGroup.add(sclera);
 
-    // Expressive Furrowed Warrior Brow
-    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.01, 0.016), hairMat);
-    brow.position.set(side * 0.034, 0.034, 0.094);
-    brow.rotation.z = -side * 0.22;
+    const iris = new THREE.Mesh(new THREE.SphereGeometry(0.0076, 12, 10), irisMat);
+    iris.scale.set(1.0, 1.0, 0.48);
+    iris.position.set(0, 0, 0.0088);
+    eyeGroup.add(iris);
+
+    const limbalRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.0073, 0.0007, 6, 16),
+      limbalMat
+    );
+    limbalRing.position.set(0, 0, 0.0106);
+    eyeGroup.add(limbalRing);
+
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.0041, 10, 8), pupilMat);
+    pupil.scale.set(1.0, 1.0, 0.45);
+    pupil.position.set(0, 0, 0.011);
+    eyeGroup.add(pupil);
+
+    const catchlight = new THREE.Mesh(
+      new THREE.SphereGeometry(0.0014, 6, 6),
+      catchlightMat
+    );
+    catchlight.position.set(0.0022, 0.0024, 0.0126);
+    eyeGroup.add(catchlight);
+
+    const upperLidCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(-side * 0.015, -0.0015, 0.0045),
+      new THREE.Vector3(-side * 0.006, 0.0072, 0.0104),
+      new THREE.Vector3(side * 0.005, 0.0068, 0.01),
+      new THREE.Vector3(side * 0.0155, -0.0005, 0.0038),
+    ]);
+    const upperLid = new THREE.Mesh(
+      new THREE.TubeGeometry(upperLidCurve, 12, 0.0024, 6, false),
+      skinMat
+    );
+    eyeGroup.add(upperLid);
+
+    const lowerLidCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(-side * 0.0145, -0.002, 0.0045),
+      new THREE.Vector3(0, -0.0068, 0.0098),
+      new THREE.Vector3(side * 0.015, -0.0015, 0.0038),
+    ]);
+    const lowerLid = new THREE.Mesh(
+      new THREE.TubeGeometry(lowerLidCurve, 10, 0.0018, 6, false),
+      skinMat
+    );
+    eyeGroup.add(lowerLid);
+
+    headGroup.add(eyeGroup);
+
+    // Expressive Arched Brow
+    const browCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(side * 0.014, 0.032, 0.095),
+      new THREE.Vector3(side * 0.032, 0.037, 0.092),
+      new THREE.Vector3(side * 0.05, 0.035, 0.083),
+      new THREE.Vector3(side * 0.063, 0.028, 0.07),
+    ]);
+    const brow = new THREE.Mesh(new THREE.TubeGeometry(browCurve, 12, 0.0032, 6, false), hairMat);
     headGroup.add(brow);
 
-    // Vanara Ear + Large Golden Kundala Ring
-    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.026, 6, 5), skinMat);
-    ear.scale.set(0.42, 1.18, 0.82);
-    ear.position.set(side * 0.095, 0.005, -0.006);
+    // Subtle Shaded Nostril Opening
+    const nostrilHole = new THREE.Mesh(
+      new THREE.SphereGeometry(0.0034, 8, 6),
+      cavityDarkMat
+    );
+    nostrilHole.scale.set(1.0, 0.55, 1.3);
+    nostrilHole.position.set(side * 0.0074, -0.026, 0.1045);
+    headGroup.add(nostrilHole);
+
+    // Sculpted Human Auricle Ear + Golden Kundala Ring
+    const earShape = new THREE.Shape();
+    earShape.moveTo(0, 0.028);
+    earShape.quadraticCurveTo(0.017, 0.028, 0.018, 0.005);
+    earShape.quadraticCurveTo(0.016, -0.02, 0.006, -0.03);
+    earShape.quadraticCurveTo(-0.004, -0.032, -0.004, -0.015);
+    earShape.lineTo(-0.004, 0.02);
+    earShape.closePath();
+
+    const earGeo = new THREE.ExtrudeGeometry(earShape, {
+      depth: 0.009,
+      bevelEnabled: true,
+      bevelThickness: 0.003,
+      bevelSize: 0.0025,
+      bevelSegments: 2,
+    });
+    const ear = new THREE.Mesh(earGeo, skinMat);
+    ear.position.set(side * 0.083, -0.004, -0.004);
+    ear.rotation.y = side > 0 ? Math.PI * 0.42 : -Math.PI * 0.42;
+    if (side < 0) ear.scale.x = -1;
+    ear.castShadow = true;
     headGroup.add(ear);
 
-    const kundala = new THREE.Mesh(new THREE.TorusGeometry(0.022, 0.0055, 5, 10), goldMat);
+    const kundala = new THREE.Mesh(new THREE.TorusGeometry(0.022, 0.0055, 6, 12), goldMat);
     kundala.rotation.y = Math.PI / 2;
-    kundala.position.set(side * 0.1, -0.042, -0.006);
+    kundala.position.set(side * 0.094, -0.042, -0.006);
     headGroup.add(kundala);
 
-    // Thick flowing mane sideburn whiskers
-    const sideburn = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.09, 5), furTrimMat);
-    sideburn.rotation.x = Math.PI;
-    sideburn.rotation.z = side * 0.22;
-    sideburn.position.set(side * 0.086, -0.028, 0.018);
-    headGroup.add(sideburn);
+    // Natural Warrior Sideburns & Temple Locks
+    const sideLock = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.014, 0.008, 0.098, 10),
+      hairMat
+    );
+    sideLock.position.set(side * 0.078, -0.018, -0.022);
+    sideLock.rotation.z = side * 0.14;
+    headGroup.add(sideLock);
   });
 
-  // Glowing Saffron-Vermilion Sindoor Tilak
-  const tilak = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.042, 0.012), sindoorMat);
-  tilak.position.set(0, 0.056, 0.098);
+  // Sculpted Lifelike Lips
+  const upperLipCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(-0.024, -0.051, 0.084),
+    new THREE.Vector3(-0.01, -0.049, 0.095),
+    new THREE.Vector3(0, -0.051, 0.097),
+    new THREE.Vector3(0.01, -0.049, 0.095),
+    new THREE.Vector3(0.024, -0.051, 0.084),
+  ]);
+  headGroup.add(
+    new THREE.Mesh(new THREE.TubeGeometry(upperLipCurve, 14, 0.0036, 6, false), lipMat)
+  );
+  const lowerLipCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(-0.021, -0.053, 0.084),
+    new THREE.Vector3(-0.009, -0.059, 0.093),
+    new THREE.Vector3(0, -0.0595, 0.0945),
+    new THREE.Vector3(0.009, -0.059, 0.093),
+    new THREE.Vector3(0.021, -0.053, 0.084),
+  ]);
+  headGroup.add(
+    new THREE.Mesh(new THREE.TubeGeometry(lowerLipCurve, 14, 0.0042, 6, false), lipMat)
+  );
+  const lipSeamCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(-0.024, -0.052, 0.083),
+    new THREE.Vector3(0, -0.0545, 0.095),
+    new THREE.Vector3(0.024, -0.052, 0.083),
+  ]);
+  headGroup.add(
+    new THREE.Mesh(new THREE.TubeGeometry(lipSeamCurve, 12, 0.0011, 5, false), cavityDarkMat)
+  );
+
+  // Subtle Well-Groomed Warrior Jawline Beard Framing the Chin
+  const jawBeardCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(-0.068, -0.024, 0.022),
+    new THREE.Vector3(-0.044, -0.068, 0.06),
+    new THREE.Vector3(0, -0.084, 0.082),
+    new THREE.Vector3(0.044, -0.068, 0.06),
+    new THREE.Vector3(0.068, -0.024, 0.022),
+  ]);
+  headGroup.add(
+    new THREE.Mesh(new THREE.TubeGeometry(jawBeardCurve, 18, 0.0085, 6, false), hairMat)
+  );
+
+  // Saffron-Vermilion Sindoor Tilak
+  const tilak = new THREE.Mesh(new THREE.BoxGeometry(0.011, 0.04, 0.011), sindoorMat);
+  tilak.position.set(0, 0.056, 0.099);
   headGroup.add(tilak);
 
-  // Flowing Lion-like Back Mane
-  const mane = new THREE.Mesh(new THREE.SphereGeometry(0.096, 8, 7), furTrimMat);
-  mane.scale.set(1.06, 1.15, 0.96);
-  mane.position.set(0, 0.01, -0.035);
+  // Natural Cranial Hair Cap & Flowing Warrior Locks behind Head
+  const hairCap = new THREE.Mesh(
+    new THREE.SphereGeometry(0.092, 18, 14, 0, Math.PI * 2, 0, Math.PI * 0.54),
+    hairMat
+  );
+  hairCap.scale.set(0.94, 1.05, 0.96);
+  hairCap.position.set(0, 0.028, -0.022);
+  headGroup.add(hairCap);
+
+  const mane = new THREE.Mesh(new THREE.SphereGeometry(0.092, 14, 12), hairMat);
+  mane.scale.set(1.04, 1.16, 0.92);
+  mane.position.set(0, -0.002, -0.046);
   headGroup.add(mane);
 
   // Ornate Golden Bajrangbali Ratna-Mukut Crown
@@ -9794,7 +10029,7 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     armPivot.position.set(xOffset, 0.545, 0);
     const sideSign = isLeft ? -1 : 1;
 
-    const shoulderCap = new THREE.Mesh(new THREE.SphereGeometry(0.068, 7, 6), skinMat);
+    const shoulderCap = new THREE.Mesh(new THREE.SphereGeometry(0.068, 14, 12), skinMat);
     shoulderCap.position.set(-sideSign * 0.008, -0.006, 0);
     shoulderCap.castShadow = true;
     armPivot.add(shoulderCap);
@@ -9807,11 +10042,12 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
         [0.58, 0.064, 0.072, 0, 0.005], // bulging bicep peak
         [1.0, 0.044, 0.048, 0, 0],
       ],
-      6,
-      7
+      12,
+      16
     );
     const upperArm = new THREE.Mesh(upperArmGeo, skinMat);
     upperArm.castShadow = true;
+    upperArm.receiveShadow = true;
     armPivot.add(upperArm);
 
     const keyura = new THREE.Mesh(new THREE.TorusGeometry(0.066, 0.011, 5, 10), goldMat);
@@ -9823,7 +10059,7 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     elbowPivot.position.set(0, -0.295, 0);
     armPivot.add(elbowPivot);
 
-    const elbowCap = new THREE.Mesh(new THREE.SphereGeometry(0.046, 6, 5), skinMat);
+    const elbowCap = new THREE.Mesh(new THREE.SphereGeometry(0.046, 12, 10), skinMat);
     elbowPivot.add(elbowCap);
 
     const forearmGeo = createRamAnatomicalLimbGeometry(
@@ -9834,12 +10070,13 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
         [0.85, 0.036, 0.039, 0, 0],
         [1.0, 0.034, 0.036, 0, 0],
       ],
-      6,
-      7
+      12,
+      16
     );
     const forearm = new THREE.Mesh(forearmGeo, skinMat);
     forearm.position.y = 0.01;
     forearm.castShadow = true;
+    forearm.receiveShadow = true;
     elbowPivot.add(forearm);
 
     const bracer = new THREE.Mesh(new THREE.CylinderGeometry(0.044, 0.038, 0.082, 8), goldMat);
@@ -9898,19 +10135,38 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
 }
 
 export function createLakshmanModel(textures: ProceduralTextures): CharacterRig {
-  const rig = createLordRamModel(textures);
+  const rig = createLordRamModel(textures, { highResSkin: true });
 
-  // Custom royal golden-wheat complexion & emerald-silver Seshanaga armor accents for Lakshman
-  const fairSkinMat = new THREE.MeshPhysicalMaterial({
-    map: textures.royalSkin,
-    normalMap: textures.royalSkinNormal,
-    normalScale: new THREE.Vector2(0.15, 0.15),
-    color: 0xf4cfa8,
-    roughness: 0.42,
-    metalness: 0.02,
-    sheen: 0.34,
-    sheenColor: new THREE.Color(0x8ee8ff),
+  // Natural fair golden-wheat human complexion + lifelike rose-terracotta lips & espresso hair
+  const fairSkinMat = createLifelikeHumanSkinMaterial(textures, {
+    colorHex: 0xe6b68f,
+    sheenHex: 0xf7d0b3,
+    sssRgb: [0.16, 0.058, 0.034],
+    roughness: 0.41,
+    normalScale: 0.12,
+    cacheTag: 'lakshman',
   });
+  const naturalLipMat = new THREE.MeshPhysicalMaterial({
+    color: 0xa66252,
+    roughness: 0.4,
+    metalness: 0.0,
+    ior: 1.4,
+    sheen: 0.2,
+    sheenColor: new THREE.Color(0xd9907e),
+    flatShading: false,
+  });
+  naturalLipMat.userData.lifelikeSkin = true;
+  const naturalHairMat = new THREE.MeshPhysicalMaterial({
+    color: 0x191311,
+    roughness: 0.44,
+    metalness: 0.04,
+    sheen: 0.34,
+    sheenRoughness: 0.48,
+    sheenColor: new THREE.Color(0x4b3528),
+    flatShading: false,
+  });
+  naturalHairMat.userData.lifelikeSkin = true;
+
   const silverGoldMat = new THREE.MeshPhysicalMaterial({
     map: textures.armorMetal,
     normalMap: textures.armorNormal,
@@ -9926,21 +10182,31 @@ export function createLakshmanModel(textures: ProceduralTextures): CharacterRig 
     roughness: 0.62,
     metalness: 0.14,
     sheen: 0.72,
-    sheenColor: new THREE.Color(0x66f5d5),
+    sheenColor: new THREE.Color(0xf6d88c),
   });
 
-  // Retint Ram's Shyam-Varna skin & red sash to Lakshman's golden complexion + emerald-azure silk
-  const origMats = new Set<THREE.Material>();
+  // Replace Shyam-Varna skin/lips/hair with Lakshman's lifelike human complexion & emerald-silver silk
   rig.root.traverse((obj) => {
     const m = obj as THREE.Mesh;
     if (!m.isMesh) return;
     const mat = m.material as THREE.MeshPhysicalMaterial;
     if (!mat) return;
-    origMats.add(mat);
     if (mat.map === textures.royalSkin && mat.color.getHex() === 0xffffff) {
       m.material = fairSkinMat;
+    } else if (mat.color && mat.color.getHex() === 0x4b3c60) {
+      m.material = naturalLipMat;
+    } else if (mat.color && mat.color.getHex() === 0x11131a) {
+      m.material = naturalHairMat;
     } else if (mat.map === textures.silkGold && mat.color.getHex() === 0xb83524) {
       m.material = emeraldSilkMat;
+    } else if (
+      mat.color &&
+      (mat.color.getHex() === 0xf5f2eb ||
+        mat.color.getHex() === 0x4b2f19 ||
+        mat.color.getHex() === 0x1c1410 ||
+        mat.color.getHex() === 0x050508)
+    ) {
+      mat.userData.lifelikeSkin = true;
     }
   });
 
@@ -9979,18 +10245,38 @@ export function createLakshmanModel(textures: ProceduralTextures): CharacterRig 
 }
 
 export function createBharatModel(textures: ProceduralTextures): CharacterRig {
-  const rig = createLordRamModel(textures);
+  const rig = createLordRamModel(textures, { highResSkin: true });
 
-  const bronzeSkinMat = new THREE.MeshPhysicalMaterial({
-    map: textures.royalSkin,
-    normalMap: textures.royalSkinNormal,
-    normalScale: new THREE.Vector2(0.16, 0.16),
-    color: 0xd9b086,
+  // Natural warm medium olive-bronze / toasted-almond human complexion + lifelike lips & hair
+  const bronzeSkinMat = createLifelikeHumanSkinMaterial(textures, {
+    colorHex: 0xd19f74,
+    sheenHex: 0xebc09a,
+    sssRgb: [0.145, 0.05, 0.026],
     roughness: 0.43,
-    metalness: 0.02,
-    sheen: 0.32,
-    sheenColor: new THREE.Color(0x9ff6c8),
+    normalScale: 0.13,
+    cacheTag: 'bharat',
   });
+  const naturalLipMat = new THREE.MeshPhysicalMaterial({
+    color: 0x945546,
+    roughness: 0.42,
+    metalness: 0.0,
+    ior: 1.4,
+    sheen: 0.18,
+    sheenColor: new THREE.Color(0xc98371),
+    flatShading: false,
+  });
+  naturalLipMat.userData.lifelikeSkin = true;
+  const naturalHairMat = new THREE.MeshPhysicalMaterial({
+    color: 0x1b1411,
+    roughness: 0.45,
+    metalness: 0.04,
+    sheen: 0.32,
+    sheenRoughness: 0.48,
+    sheenColor: new THREE.Color(0x4f382b),
+    flatShading: false,
+  });
+  naturalHairMat.userData.lifelikeSkin = true;
+
   const jadeMat = new THREE.MeshPhysicalMaterial({
     map: textures.silkGold,
     normalMap: textures.silkNormal,
@@ -10016,8 +10302,20 @@ export function createBharatModel(textures: ProceduralTextures): CharacterRig {
     if (!mat) return;
     if (mat.map === textures.royalSkin && mat.color.getHex() === 0xffffff) {
       m.material = bronzeSkinMat;
+    } else if (mat.color && mat.color.getHex() === 0x4b3c60) {
+      m.material = naturalLipMat;
+    } else if (mat.color && mat.color.getHex() === 0x11131a) {
+      m.material = naturalHairMat;
     } else if (mat.map === textures.silkGold && mat.color.getHex() === 0xb83524) {
       m.material = jadeMat;
+    } else if (
+      mat.color &&
+      (mat.color.getHex() === 0xf5f2eb ||
+        mat.color.getHex() === 0x4b2f19 ||
+        mat.color.getHex() === 0x1c1410 ||
+        mat.color.getHex() === 0x050508)
+    ) {
+      mat.userData.lifelikeSkin = true;
     }
   });
 

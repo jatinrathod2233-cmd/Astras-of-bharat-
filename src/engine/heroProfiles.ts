@@ -7,6 +7,7 @@ export interface HeroProfileConfig {
   accentHex: string;
   badgeBgHex: string;
   maxHp: number;
+  maxPrana: number;
   walkSpeed: number;
   sprintSpeed: number;
   flySpeed: number;
@@ -18,6 +19,9 @@ export interface HeroProfileConfig {
   specialShort: string;
   specialCooldownSec: number;
   specialDamage: number;
+  attackDamageMultiplier: number;
+  damageResistance: number;
+  pranaRegenMultiplier: number;
   specialDescription: string;
   powerRating: number; // 1..100
   speedRating: number; // 1..100
@@ -39,6 +43,7 @@ export const HERO_PROFILES: Record<PlayableHeroId, HeroProfileConfig> = {
     accentHex: '#F6C343',
     badgeBgHex: '#281F10',
     maxHp: 100,
+    maxPrana: 100,
     walkSpeed: 9.4,
     sprintSpeed: 14.5,
     flySpeed: 0,
@@ -50,6 +55,9 @@ export const HERO_PROFILES: Record<PlayableHeroId, HeroProfileConfig> = {
     specialShort: 'Wave',
     specialCooldownSec: 4.5,
     specialDamage: 145,
+    attackDamageMultiplier: 1.0,
+    damageResistance: 0.1,
+    pranaRegenMultiplier: 1.0,
     specialDescription:
       'Unleashes a blazing solar fire slash across nearby demons with high burn damage.',
     powerRating: 88,
@@ -62,23 +70,27 @@ export const HERO_PROFILES: Record<PlayableHeroId, HeroProfileConfig> = {
     sanskritTitle: 'Bajrangbali · Pawanputra',
     accentHex: '#FB923C',
     badgeBgHex: '#2C160C',
-    maxHp: 165,
-    walkSpeed: 11.4,
-    sprintSpeed: 18.6,
-    flySpeed: 28.5,
+    maxHp: 1000,
+    maxPrana: 200,
+    walkSpeed: 13.5,
+    sprintSpeed: 22.0,
+    flySpeed: 36.0,
     canFly: true,
-    jumpVelocity: 13.5,
+    jumpVelocity: 16.0,
     scale: 1.24,
     weaponLabel: 'Colossal Golden Vajra Gada',
     specialName: 'Vajra-Gada Meteor Slam',
     specialShort: 'Slam',
-    specialCooldownSec: 3.5,
-    specialDamage: 235,
+    specialCooldownSec: 2.2,
+    specialDamage: 480,
+    attackDamageMultiplier: 2.25,
+    damageResistance: 0.55,
+    pranaRegenMultiplier: 2.0,
     specialDescription:
-      'Soars freely through the sky (Fly / double-Jump) and crushes demon armies with a devastating shockwave slam.',
+      'Unmatched Bajrangbali supremacy: highest vitality, defense, speed, and Divyastra might; soars freely and shatters armies with seismic slams.',
     powerRating: 100,
-    speedRating: 96,
-    defenseRating: 98,
+    speedRating: 100,
+    defenseRating: 100,
   },
   LAKSHMAN: {
     id: 'LAKSHMAN',
@@ -87,6 +99,7 @@ export const HERO_PROFILES: Record<PlayableHeroId, HeroProfileConfig> = {
     accentHex: '#38BDF8',
     badgeBgHex: '#0F2233',
     maxHp: 115,
+    maxPrana: 110,
     walkSpeed: 10.6,
     sprintSpeed: 16.8,
     flySpeed: 0,
@@ -98,6 +111,9 @@ export const HERO_PROFILES: Record<PlayableHeroId, HeroProfileConfig> = {
     specialShort: 'Volley',
     specialCooldownSec: 3.2,
     specialDamage: 130,
+    attackDamageMultiplier: 1.1,
+    damageResistance: 0.05,
+    pranaRegenMultiplier: 1.1,
     specialDescription:
       'Fires three fanned spectral serpent arrows that lock onto foes at blistering velocity.',
     powerRating: 86,
@@ -111,6 +127,7 @@ export const HERO_PROFILES: Record<PlayableHeroId, HeroProfileConfig> = {
     accentHex: '#34D399',
     badgeBgHex: '#0E261E',
     maxHp: 140,
+    maxPrana: 115,
     walkSpeed: 9.6,
     sprintSpeed: 15.2,
     flySpeed: 0,
@@ -122,6 +139,9 @@ export const HERO_PROFILES: Record<PlayableHeroId, HeroProfileConfig> = {
     specialShort: 'Aegis',
     specialCooldownSec: 5.0,
     specialDamage: 165,
+    attackDamageMultiplier: 1.05,
+    damageResistance: 0.3,
+    pranaRegenMultiplier: 1.15,
     specialDescription:
       'Sweeps a 360-degree emerald shockwave knocking foes back while restoring Health & Prana.',
     powerRating: 84,
