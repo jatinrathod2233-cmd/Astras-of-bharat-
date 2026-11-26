@@ -102,6 +102,7 @@ import {
   createCitizenModel,
   createColossalGoldenArcherMonument,
   createCrocodileModel,
+  createDeerModel,
   createDemonModel,
   createDemonStructureModel,
   createDolphinModel,
@@ -112,9 +113,13 @@ import {
   createHeroModel,
   createHorseStableModel,
   createJellyfishModel,
+  createLeopardModel,
+  createLionModel,
   createLordRamModel,
   createMahadevStatueModel,
   createMonumentalStepwellModel,
+  createMountainCaveModel,
+  createMountainGardenModel,
   createPavilionModel,
   createRathaChariotModel,
   createRoyalHorseUnit,
@@ -123,10 +128,14 @@ import {
   createSharkModel,
   createSkeletonDebrisCluster,
   createTempleModel,
+  createTigerModel,
   createTrainingGroundsModel,
   createVolcanoModel,
   createWheelDebris,
+  createWildElephantModel,
   updateDynamicReinMesh,
+  WildlifeRig,
+  WildlifeSpecies,
 } from './models';
 import { createProceduralTexturesAsync, ProceduralTextures } from './textures';
 import {
@@ -152,6 +161,15 @@ import {
   isInRiverWater,
   isInsideStepwellBasin,
   MISSIONS,
+  MOUNTAIN_CAVES,
+  MOUNTAIN_GARDENS,
+  MOUNTAIN_RANGES,
+  MOUNTAIN_STREAMS,
+  MOUNTAIN_TRAILS,
+  mountainCaveProximity,
+  mountainGardenProximity,
+  mountainStreamProximity,
+  mountainTrailProximity,
   PALACE_CORE_POS,
   PALACE_STORIES,
   palaceFloorHeightAt,
@@ -1025,6 +1043,25 @@ export class RamayanaWorldEngine {
     radius: number;
     phase: number;
   }> = [];
+  private mountainWildlife: Array<{
+    rig: WildlifeRig;
+    species: WildlifeSpecies;
+    homeX: number;
+    homeZ: number;
+    x: number;
+    y: number;
+    z: number;
+    yaw: number;
+    patrolRadius: number;
+    patrolAngle: number;
+    angularDir: number;
+    baseSpeed: number;
+    gaitPhase: number;
+    pauseTimer: number;
+    moveTimer: number;
+    phase: number;
+    isCaveDweller: boolean;
+  }> = [];
   private ascensionActive = false;
   private ascensionElapsed = 0;
   private ascensionCompleted = false;
@@ -1103,6 +1140,8 @@ export class RamayanaWorldEngine {
     uTime: { value: number };
     uDaylight: { value: number };
   } | null = null;
+  private sharedWaterMat: THREE.MeshPhysicalMaterial | null = null;
+  private sharedWaterfallMat: THREE.ShaderMaterial | null = null;
   private foliageWindUniforms: {
     uWindTime: { value: number };
   } | null = null;
@@ -3305,7 +3344,14 @@ export class RamayanaWorldEngine {
     const cVulcanChar = new THREE.Color(0x191520);
     const cMagmaSeam = new THREE.Color(0x882812);
     const cDrySteppe = new THREE.Color(0xa29c54);
+    const cTrailPath = new THREE.Color(0xc9a574);
+    const cGardenMoss = new THREE.Color(0x4cb04c);
+    const cStreamBed = new THREE.Color(0x476978);
+    const cAlpineForest = new THREE.Color(0x3a7a38);
+    const cGranite = new THREE.Color(0x736f6d);
+    const cSnow = new THREE.Color(0xeef6fc);
     const cTmp = new THREE.Color();
+    const cMtnCol = new THREE.Color();
 
     const buildChunkedTerrainZone = (
       zoneCenterX: number,
@@ -3366,13 +3412,45 @@ export class RamayanaWorldEngine {
             const rw = riverHalfWidth(wz);
             const riverDist = Math.abs(wx - rc);
             let col = cGrass;
-            if (riverDist < rw + 6.8) {
+            if (wz >= -208 && riverDist < rw + 6.8) {
               col = cSand;
             } else if (Math.hypot(wx, wz) < 18.5 || Math.hypot(wx - STEPWELL_POS.x, wz - STEPWELL_POS.z) < 12) {
               col = cSand;
             }
 
-            if (wx > 2100) {
+            if (wz < -156 && Math.abs(wx) < 620) {
+              const entryMask = THREE.MathUtils.smoothstep(-wz, 156, 198);
+              const slopeFactor = 1 - THREE.MathUtils.clamp(_v1.y, 0.35, 1.0);
+              const rockBlend = THREE.MathUtils.clamp(
+                THREE.MathUtils.smoothstep(wy, 130, 215) + slopeFactor * 0.9,
+                0,
+                1
+              );
+              const snowBlend = THREE.MathUtils.smoothstep(wy, 240, 315);
+              cMtnCol.copy(cAlpineForest).lerp(cGranite, rockBlend).lerp(cSnow, snowBlend);
+
+              const gp = mountainGardenProximity(wx, wz);
+              if (gp.garden && gp.dist < gp.garden.radius + 4.5) {
+                const gw = 1 - THREE.MathUtils.smoothstep(gp.dist, gp.garden.radius * 0.78, gp.garden.radius + 4.5);
+                cMtnCol.lerp(cGardenMoss, gw);
+              }
+              const sp = mountainStreamProximity(wx, wz);
+              if (sp.dist < sp.halfWidth + 2.6) {
+                const sw = 1 - THREE.MathUtils.smoothstep(sp.dist, sp.halfWidth * 0.5, sp.halfWidth + 2.6);
+                cMtnCol.lerp(cStreamBed, sw);
+              }
+              const tp = mountainTrailProximity(wx, wz);
+              if (tp.dist < tp.halfWidth + 2.2) {
+                const tw = 1 - THREE.MathUtils.smoothstep(tp.dist, tp.halfWidth * 0.72, tp.halfWidth + 2.2);
+                cMtnCol.lerp(cTrailPath, tw);
+              }
+              const cp = mountainCaveProximity(wx, wz);
+              if (cp.cave && cp.dist < cp.cave.radius + 2.6) {
+                const cw = 1 - THREE.MathUtils.smoothstep(cp.dist, cp.cave.radius * 0.65, cp.cave.radius + 2.6);
+                cMtnCol.lerp(cGranite, cw * 0.85);
+              }
+              cTmp.copy(col).lerp(cMtnCol, entryMask);
+            } else if (wx > 2100) {
               const ashBlend = THREE.MathUtils.smoothstep(wx, 2100, 2320);
               const charPattern = Math.sin(wx * 0.17) * Math.cos(wz * 0.19);
               const ashCol = charPattern > 0.2 ? cVulcanChar : cVulcanAsh;
@@ -3418,8 +3496,12 @@ export class RamayanaWorldEngine {
       }
     };
 
-    buildChunkedTerrainZone(0, 0, 720, 720, 220, 220, 4, 4);
-    await checkStage(0.18, 'Sculpting 2.5 km highway & volcanic plains');
+    buildChunkedTerrainZone(0, 0, 720, 720, 240, 240, 4, 4);
+    await checkStage(0.16, 'Sculpting colossal 7-range Himalayan peaks & mountain trails');
+    buildChunkedTerrainZone(0, -700, 1200, 680, 400, 224, 5, 4);
+    buildChunkedTerrainZone(-480, 0, 240, 720, 80, 240, 1, 3);
+    buildChunkedTerrainZone(480, -310, 240, 100, 80, 32, 1, 1);
+    await checkStage(0.22, 'Sculpting 2.5 km highway & volcanic plains');
     buildChunkedTerrainZone(1200, 0, 1680, 520, 220, 64, 5, 2);
     buildChunkedTerrainZone(2560, 0, 1040, 900, 220, 180, 4, 4);
     await checkStage(0.28, 'Laying Ayodhya stone avenues & Sarayu bridges');
@@ -3658,12 +3740,14 @@ export class RamayanaWorldEngine {
           `
         );
     };
-    const riverChunkCount = 7;
-    const riverTotalLen = 840;
+    this.sharedWaterMat = waterMat;
+    const riverChunkCount = 6;
+    const riverTotalLen = 630;
+    const riverStartZ = -210;
     const riverChunkSpan = riverTotalLen / riverChunkCount;
     let firstWaterMesh: THREE.Mesh | null = null;
     for (let rcIdx = 0; rcIdx < riverChunkCount; rcIdx++) {
-      const cz = -riverTotalLen * 0.5 + (rcIdx + 0.5) * riverChunkSpan;
+      const cz = riverStartZ + (rcIdx + 0.5) * riverChunkSpan;
       const chunkLen = riverChunkSpan + 0.4;
       const chunkGeo = new THREE.PlaneGeometry(1, chunkLen, 14, 32);
       chunkGeo.rotateX(-Math.PI / 2);
@@ -4205,8 +4289,13 @@ export class RamayanaWorldEngine {
     // 6. Active Sarayu River Ecosystem (5 Giant Turtles, Crocodiles, Jellyfish, Dolphins, Sharks & Fish Schools) + Surya-Kund Aquatic Life
     this.buildAquaticEcosystem();
 
-    // 7. Scenic Sarayu Riverbank Waterfalls & Distant Himalayan Foothills
+    // 7. Scenic Sarayu Riverbank Waterfalls & Colossal 7-Range Himalayan Ecosystem (Caves, Gardens, Streams, Forests & Wildlife)
     this.buildSacredWaterfallsAndFoothills();
+    await checkStage(0.88, 'Carving 7 mountain caves, terraced gardens & alpine cascades');
+    this.buildColossalSevenRangeEcosystem();
+    await checkStage(0.93, 'Planting dense mountain forests & releasing ambient wildlife');
+    this.populateMountainForests();
+    this.populateMountainWildlife();
 
     // 8. Realistic Textured Trees, Shrubs, Riverbank Boulders & Flora partitioned into Spatial LOD Sectors
     this.populateInstancedNature();
@@ -4270,6 +4359,7 @@ export class RamayanaWorldEngine {
       depthWrite: false,
       side: THREE.DoubleSide,
     });
+    this.sharedWaterfallMat = waterfallMat;
 
     const splashMat = new THREE.MeshStandardMaterial({
       map: textures.waterfallFoam,
@@ -4379,42 +4469,6 @@ export class RamayanaWorldEngine {
       });
     });
 
-    // Distant Northern Himalayan Foothill Ridge Peaks framing Ayodhya skyline
-    const foothillSites: Array<[number, number, number, number]> = [
-      [-230, -395, 62, 68],
-      [-150, -412, 74, 88],
-      [-65, -422, 82, 102],
-      [25, -418, 78, 94],
-      [115, -405, 68, 76],
-      [195, -390, 58, 62],
-    ];
-    foothillSites.forEach(([fx, fz, fr, fh], fIdx) => {
-      const mtn = createBlackMountainModel(fx, fz, fr, fh, fIdx * 2.13 + 0.8, textures);
-      mtn.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          (child as THREE.Mesh).material = cliffMat;
-        }
-      });
-      const lod = wrapBlackMountainWithLod(
-        mtn,
-        fx,
-        fz,
-        fr,
-        fh,
-        fIdx * 2.13 + 0.8,
-        this.lodCache!,
-        this.lodCache!.foothillRockMat
-      );
-      lod.autoUpdate = false;
-      this.scene.add(lod);
-      this.lockStaticHierarchy(lod);
-      this.occlusionManager.registerFromObject(lod, {
-        alwaysKeepWithinDist: 180,
-        skipFogCull: true,
-        onVisible: () => lod.update(this.camera),
-      });
-    });
-
     // Colossal Golden Warrior-Archer Monument framing Ayodhya & floating celestial temple islands
     const archerX = -56;
     const archerZ = -34;
@@ -4462,6 +4516,709 @@ export class RamayanaWorldEngine {
       this.occlusionManager.registerFromObject(built.group, {
         alwaysKeepWithinDist: 4500,
         skipFogCull: true,
+      });
+    });
+  }
+
+  private buildColossalSevenRangeEcosystem(): void {
+    const textures = this.textures!;
+
+    // 1. Snow-Capped Faceted Alpine Spire Crags Crowned Above the 7 Interconnected Ranges (off-trail high ridges)
+    const cragMat = new THREE.MeshStandardMaterial({
+      map: textures.rockCliff,
+      vertexColors: true,
+      flatShading: true,
+      roughness: 0.88,
+      metalness: 0.04,
+    });
+    const spireDefs: Array<[number, number, number, number]> = [
+      [-342, -392, 54, 92],
+      [-280, -455, 64, 118],
+      [345, -412, 56, 98],
+      [298, -502, 68, 126],
+      [-105, -425, 52, 86],
+      [96, -422, 54, 92],
+      [-245, -738, 74, 142],
+      [-148, -748, 66, 128],
+      [8, -805, 86, 178],
+      [115, -782, 78, 152],
+      [228, -736, 72, 134],
+      [-35, -885, 92, 186],
+    ];
+    spireDefs.forEach(([sx, sz, sr, sh], idx) => {
+      if (
+        mountainTrailProximity(sx, sz).dist < 14 ||
+        mountainStreamProximity(sx, sz).dist < 10
+      ) {
+        return;
+      }
+      const spire = createBlackMountainModel(sx, sz, sr, sh, idx * 1.73 + 0.5, textures);
+      spire.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const pos = mesh.geometry.attributes.position;
+        if (pos) {
+          const cols = new Float32Array(pos.count * 3);
+          for (let vi = 0; vi < pos.count; vi++) {
+            const vy = pos.getY(vi);
+            const t = THREE.MathUtils.clamp(vy / Math.max(1, sh), 0, 1);
+            const snow = THREE.MathUtils.smoothstep(t, 0.42, 0.78);
+            cols[vi * 3] = THREE.MathUtils.lerp(0.42, 0.93, snow);
+            cols[vi * 3 + 1] = THREE.MathUtils.lerp(0.41, 0.96, snow);
+            cols[vi * 3 + 2] = THREE.MathUtils.lerp(0.40, 0.99, snow);
+          }
+          mesh.geometry.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+        }
+        mesh.material = cragMat;
+      });
+      // Embed cleanly into the mountain ridge height below
+      const baseH = groundHeightAt(sx, sz);
+      spire.position.y = baseH - 12;
+      this.scene.add(spire);
+      this.lockStaticHierarchy(spire);
+      this.occlusionManager.registerFromObject(spire, {
+        alwaysKeepWithinDist: 4500,
+        skipFogCull: true,
+      });
+    });
+
+    // 2. Seven Accessible Walk-In Mountain Caves across Ranges 1..7
+    MOUNTAIN_CAVES.forEach((cave) => {
+      const built = createMountainCaveModel(textures, cave);
+      this.scene.add(built.group);
+      this.lockStaticHierarchy(built.group);
+      this.occlusionManager.registerFromObject(built.group, {
+        alwaysKeepWithinDist: 320,
+        skipFogCull: true,
+      });
+      for (let ci = 0; ci < built.colliders.length; ci++) {
+        this.colliders.push(built.colliders[ci]);
+      }
+    });
+
+    // 3. Six Terraced Himalayan Plateau Gardens with Lotus Pools & Lantern Pillars
+    MOUNTAIN_GARDENS.forEach((garden) => {
+      const built = createMountainGardenModel(textures, garden);
+      this.scene.add(built.group);
+      this.lockStaticHierarchy(built.group);
+      this.occlusionManager.registerFromObject(built.group, {
+        alwaysKeepWithinDist: 280,
+        skipFogCull: true,
+      });
+      for (let ci = 0; ci < built.colliders.length; ci++) {
+        this.circleColliders.push(built.colliders[ci]);
+      }
+    });
+
+    // 4. Four Flowing Alpine Streams & Steep Mountain Cascades Feeding the Sarayu Headwaters
+    const streamMat =
+      this.sharedWaterMat ??
+      new THREE.MeshPhysicalMaterial({
+        map: textures.water,
+        normalMap: textures.waterNormal,
+        color: 0x2ca9c6,
+        roughness: 0.08,
+        metalness: 0.08,
+        transparent: true,
+        opacity: 0.82,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+    const wfMat = this.sharedWaterfallMat ?? streamMat;
+
+    MOUNTAIN_STREAMS.forEach((stream) => {
+      const sampled: Array<{ x: number; y: number; z: number }> = [];
+      for (let pi = 0; pi < stream.points.length - 1; pi++) {
+        const a = stream.points[pi];
+        const b = stream.points[pi + 1];
+        const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+        const steps = Math.max(2, Math.ceil(segLen / 6.0));
+        for (let s = 0; s < steps; s++) {
+          const t = s / steps;
+          const sx = THREE.MathUtils.lerp(a.x, b.x, t);
+          const sz = THREE.MathUtils.lerp(a.z, b.z, t);
+          const sy = groundHeightAt(sx, sz) + 0.18;
+          sampled.push({ x: sx, y: sy, z: sz });
+        }
+        // Check steep plunge to place foaming cascade sheet
+        const dy = a.y - b.y;
+        if (dy > 14 && segLen > 2) {
+          const midX = (a.x + b.x) * 0.5;
+          const midZ = (a.z + b.z) * 0.5;
+          const sheetW = stream.halfWidth * 1.9;
+          const sheetH = Math.hypot(dy, segLen) * 0.85;
+          const wfGeo = new THREE.PlaneGeometry(sheetW, sheetH, 4, 8);
+          const wfMesh = new THREE.Mesh(wfGeo, wfMat);
+          wfMesh.position.set(midX, (a.y + b.y) * 0.5 + 0.8, midZ);
+          wfMesh.lookAt(b.x, b.y + 0.8, b.z);
+          wfMesh.rotateX(-Math.PI * 0.28);
+          this.scene.add(wfMesh);
+          this.lockStaticHierarchy(wfMesh);
+          this.occlusionManager.registerFromObject(wfMesh, { alwaysKeepWithinDist: 360 });
+        }
+      }
+      const tail = stream.points[stream.points.length - 1];
+      sampled.push({ x: tail.x, y: groundHeightAt(tail.x, tail.z) + 0.18, z: tail.z });
+
+      if (sampled.length >= 2) {
+        const vCount = sampled.length * 2;
+        const positions = new Float32Array(vCount * 3);
+        const uvs = new Float32Array(vCount * 2);
+        const indices: number[] = [];
+        let distAcc = 0;
+
+        for (let i = 0; i < sampled.length; i++) {
+          const curr = sampled[i];
+          const prev = sampled[Math.max(0, i - 1)];
+          const next = sampled[Math.min(sampled.length - 1, i + 1)];
+          if (i > 0) distAcc += Math.hypot(curr.x - prev.x, curr.z - prev.z);
+
+          let tx = next.x - prev.x;
+          let tz = next.z - prev.z;
+          const tLen = Math.max(1e-4, Math.hypot(tx, tz));
+          tx /= tLen;
+          tz /= tLen;
+          const nx = -tz * stream.halfWidth * 0.94;
+          const nz = tx * stream.halfWidth * 0.94;
+
+          positions[i * 6] = curr.x - nx;
+          positions[i * 6 + 1] = curr.y;
+          positions[i * 6 + 2] = curr.z - nz;
+          positions[i * 6 + 3] = curr.x + nx;
+          positions[i * 6 + 4] = curr.y;
+          positions[i * 6 + 5] = curr.z + nz;
+
+          uvs[i * 4] = 0;
+          uvs[i * 4 + 1] = distAcc * 0.12;
+          uvs[i * 4 + 2] = 1;
+          uvs[i * 4 + 3] = distAcc * 0.12;
+
+          if (i < sampled.length - 1) {
+            const b0 = i * 2;
+            indices.push(b0, b0 + 1, b0 + 2, b0 + 1, b0 + 3, b0 + 2);
+          }
+        }
+        const streamGeo = new THREE.BufferGeometry();
+        streamGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        streamGeo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+        streamGeo.setIndex(indices);
+        streamGeo.computeVertexNormals();
+        const streamMesh = new THREE.Mesh(streamGeo, streamMat);
+        streamMesh.renderOrder = 2;
+        this.scene.add(streamMesh);
+        this.lockStaticHierarchy(streamMesh);
+        this.occlusionManager.registerFromObject(streamMesh, {
+          alwaysKeepWithinDist: 340,
+          skipOccluderCull: true,
+        });
+      }
+    });
+
+    // 5. Carved Trail Marker Cairns & Glowing Lantern Caps Guiding All 7 Mountain Ranges
+    const markerSpots: Array<{ x: number; y: number; z: number; yaw: number }> = [];
+    MOUNTAIN_TRAILS.forEach((tr) => {
+      let sideFlip = 1;
+      for (let i = 0; i < tr.points.length - 1; i++) {
+        const a = tr.points[i];
+        const b = tr.points[i + 1];
+        const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+        const count = Math.max(1, Math.floor(segLen / 24));
+        const ux = (b.x - a.x) / Math.max(1, segLen);
+        const uz = (b.z - a.z) / Math.max(1, segLen);
+        const px = -uz;
+        const pz = ux;
+        for (let k = 0; k < count; k++) {
+          const t = (k + 0.5) / count;
+          const mx = THREE.MathUtils.lerp(a.x, b.x, t) + px * sideFlip * (tr.halfWidth + 0.72);
+          const mz = THREE.MathUtils.lerp(a.z, b.z, t) + pz * sideFlip * (tr.halfWidth + 0.72);
+          sideFlip *= -1;
+          if (mountainStreamProximity(mx, mz).dist < 4.0) continue;
+          const my = groundHeightAt(mx, mz);
+          markerSpots.push({ x: mx, y: my, z: mz, yaw: Math.atan2(ux, uz) });
+        }
+      }
+    });
+
+    if (markerSpots.length > 0) {
+      const cairnGeo = new THREE.CylinderGeometry(0.22, 0.34, 1.05, 6);
+      cairnGeo.translate(0, 0.52, 0);
+      const cairnMat = new THREE.MeshStandardMaterial({
+        map: textures.sandstone,
+        color: 0xd9b88c,
+        roughness: 0.78,
+        flatShading: true,
+      });
+      const lampGeo = new THREE.OctahedronGeometry(0.18, 0);
+      lampGeo.translate(0, 1.2, 0);
+      const lampMat = new THREE.MeshStandardMaterial({
+        color: 0xffe27a,
+        emissive: 0xffa630,
+        emissiveIntensity: 1.45,
+        roughness: 0.25,
+      });
+
+      const cairnInst = new THREE.InstancedMesh(cairnGeo, cairnMat, markerSpots.length);
+      const lampInst = new THREE.InstancedMesh(lampGeo, lampMat, markerSpots.length);
+      cairnInst.castShadow = !this.isSoftwareGl;
+      cairnInst.receiveShadow = true;
+      for (let i = 0; i < markerSpots.length; i++) {
+        const ms = markerSpots[i];
+        _dummy.position.set(ms.x, ms.y - 0.05, ms.z);
+        _dummy.rotation.set(0, ms.yaw, 0);
+        _dummy.scale.setScalar(1.0);
+        _dummy.updateMatrix();
+        cairnInst.setMatrixAt(i, _dummy.matrix);
+        lampInst.setMatrixAt(i, _dummy.matrix);
+      }
+      cairnInst.instanceMatrix.needsUpdate = true;
+      lampInst.instanceMatrix.needsUpdate = true;
+      this.scene.add(cairnInst, lampInst);
+      this.lockStaticHierarchy(cairnInst);
+      this.lockStaticHierarchy(lampInst);
+      this.occlusionManager.registerFromObject(cairnInst, { alwaysKeepWithinDist: 400 });
+      this.occlusionManager.registerFromObject(lampInst, { alwaysKeepWithinDist: 400 });
+    }
+  }
+
+  private populateMountainForests(): void {
+    const textures = this.textures!;
+    let seed = 4099;
+    const nextRand = () => {
+      seed = (seed * 16807) % 2147483647;
+      return (seed - 1) / 2147483646;
+    };
+
+    // Stylized Low-Poly Himalayan Pine Conifer Geometry (trunk + 3 crisp emerald tiers)
+    const pineTrunkGeo = new THREE.CylinderGeometry(0.22, 0.42, 3.6, 6);
+    pineTrunkGeo.translate(0, 1.8, 0);
+    const pineTrunkMat = new THREE.MeshStandardMaterial({
+      map: textures.bark,
+      color: 0x6b472b,
+      roughness: 0.9,
+      flatShading: true,
+    });
+
+    const tier1 = new THREE.ConeGeometry(2.35, 3.4, 7);
+    tier1.translate(0, 4.2, 0);
+    const tier2 = new THREE.ConeGeometry(1.85, 3.0, 7);
+    tier2.translate(0, 6.2, 0);
+    const tier3 = new THREE.ConeGeometry(1.25, 2.5, 7);
+    tier3.translate(0, 8.0, 0);
+    const pineFoliageGeo = mergeGeometries([tier1, tier2, tier3], false);
+    tier1.dispose();
+    tier2.dispose();
+    tier3.dispose();
+
+    const pineFoliageMat = new THREE.MeshStandardMaterial({
+      map: textures.foliage,
+      color: 0xffffff,
+      roughness: 0.82,
+      flatShading: true,
+    });
+
+    // Himalayan Broadleaf Deodar/Oak Tree Geometry
+    const broadTrunkGeo = new THREE.CylinderGeometry(0.24, 0.48, 3.2, 6);
+    broadTrunkGeo.translate(0, 1.6, 0);
+    const crownA = new THREE.DodecahedronGeometry(2.2, 1);
+    crownA.scale(1.15, 0.82, 1.15);
+    crownA.translate(0, 4.4, 0);
+    const crownB = new THREE.DodecahedronGeometry(1.45, 0);
+    crownB.translate(1.1, 3.9, 0.65);
+    const crownC = new THREE.DodecahedronGeometry(1.35, 0);
+    crownC.translate(-1.0, 4.1, -0.7);
+    const broadCrownGeo = mergeGeometries([crownA, crownB, crownC], false);
+    crownA.dispose();
+    crownB.dispose();
+    crownC.dispose();
+
+    const shrubGeo = new THREE.DodecahedronGeometry(0.95, 0);
+    shrubGeo.scale(1.25, 0.72, 1.15);
+    shrubGeo.translate(0, 0.42, 0);
+
+    const boulderGeo = new THREE.DodecahedronGeometry(1.3, 0);
+    const boulderMat = new THREE.MeshStandardMaterial({
+      map: textures.rockCliff,
+      color: 0x7c7975,
+      roughness: 0.9,
+      flatShading: true,
+    });
+
+    interface TreeItem {
+      x: number;
+      y: number;
+      z: number;
+      ry: number;
+      scale: number;
+      r: number;
+      g: number;
+      b: number;
+    }
+    const pineSectors = new Map<string, TreeItem[]>();
+    const broadSectors = new Map<string, TreeItem[]>();
+    const shrubSectors = new Map<string, TreeItem[]>();
+    const boulderSectors = new Map<string, TreeItem[]>();
+    const SECTOR_SZ = 170;
+    const tint = new THREE.Color();
+
+    const isClearMountainSpot = (x: number, z: number, minTrailClear: number): boolean => {
+      if (z > -168 || z < -890 || Math.abs(x) > 515) return false;
+      const tr = mountainTrailProximity(x, z);
+      if (tr.dist < tr.halfWidth + minTrailClear) return false;
+      const st = mountainStreamProximity(x, z);
+      if (st.dist < st.halfWidth + 2.4) return false;
+      const gd = mountainGardenProximity(x, z);
+      if (gd.garden && gd.dist < gd.garden.radius + 3.0) return false;
+      const cv = mountainCaveProximity(x, z);
+      if (cv.cave && cv.dist < cv.cave.radius + 3.6) return false;
+      return true;
+    };
+
+    let tries = 0;
+    let totalTrees = 0;
+    while (totalTrees < 880 && tries < 5600) {
+      tries++;
+      const rx = (nextRand() - 0.5) * 980;
+      const rz = -170 - nextRand() * 700;
+      if (!isClearMountainSpot(rx, rz, 2.8)) continue;
+
+      const y = groundHeightAt(rx, rz);
+      if (y < 4.0 || y > 248) continue;
+
+      // Avoid extreme sheer cliff walls
+      const slopeX = Math.abs(groundHeightAt(rx + 2.2, rz) - groundHeightAt(rx - 2.2, rz)) / 4.4;
+      const slopeZ = Math.abs(groundHeightAt(rx, rz + 2.2) - groundHeightAt(rx, rz - 2.2)) / 4.4;
+      if (Math.max(slopeX, slopeZ) > 1.25) continue;
+
+      const scale = 0.82 + nextRand() * 0.72;
+      const ry = nextRand() * Math.PI * 2;
+      const isPine = y > 68 || nextRand() > 0.34;
+      if (isPine) {
+        tint.setHSL(0.32 + (nextRand() - 0.5) * 0.06, 0.45 + nextRand() * 0.16, 0.25 + nextRand() * 0.15);
+      } else {
+        tint.setHSL(0.26 + (nextRand() - 0.5) * 0.08, 0.48 + nextRand() * 0.18, 0.33 + nextRand() * 0.16);
+      }
+
+      const key = `${Math.floor(rx / SECTOR_SZ)}:${Math.floor(rz / SECTOR_SZ)}`;
+      const targetMap = isPine ? pineSectors : broadSectors;
+      let list = targetMap.get(key);
+      if (!list) {
+        list = [];
+        targetMap.set(key, list);
+      }
+      list.push({ x: rx, y, z: rz, ry, scale, r: tint.r, g: tint.g, b: tint.b });
+      totalTrees++;
+
+      if (totalTrees % 2 === 0 && y < 225) {
+        this.circleColliders.push({
+          x: rx,
+          z: rz,
+          radius: 0.45 * scale,
+          height: 5.0 * scale,
+          baseY: y,
+        });
+      }
+    }
+
+    // Alpine Shrubs & Wildflowers along trails, forest understory & stream edges
+    for (let s = 0; s < 680; s++) {
+      const rx = (nextRand() - 0.5) * 960;
+      const rz = -168 - nextRand() * 680;
+      if (!isClearMountainSpot(rx, rz, 1.4)) continue;
+      const y = groundHeightAt(rx, rz);
+      if (y < 2.0 || y > 245) continue;
+
+      const scale = 0.65 + nextRand() * 0.75;
+      const ry = nextRand() * Math.PI * 2;
+      if (s % 5 === 0) {
+        // Flowering alpine rhododendron / marigold bush
+        tint.setHSL(nextRand() > 0.5 ? 0.94 : 0.09, 0.76, 0.55);
+      } else {
+        tint.setHSL(0.28 + (nextRand() - 0.5) * 0.07, 0.44, 0.32 + nextRand() * 0.14);
+      }
+      const key = `${Math.floor(rx / SECTOR_SZ)}:${Math.floor(rz / SECTOR_SZ)}`;
+      let list = shrubSectors.get(key);
+      if (!list) {
+        list = [];
+        shrubSectors.set(key, list);
+      }
+      list.push({ x: rx, y, z: rz, ry, scale, r: tint.r, g: tint.g, b: tint.b });
+    }
+
+    // Mountain Granite Boulders across ridges, stream banks & cave aprons
+    for (let b = 0; b < 220; b++) {
+      const rx = (nextRand() - 0.5) * 960;
+      const rz = -170 - nextRand() * 710;
+      if (!isClearMountainSpot(rx, rz, 1.8)) continue;
+      const y = groundHeightAt(rx, rz);
+      if (y < 3.0 || y > 320) continue;
+      const scale = 0.75 + nextRand() * 1.35;
+      const ry = nextRand() * Math.PI * 2;
+      const key = `${Math.floor(rx / SECTOR_SZ)}:${Math.floor(rz / SECTOR_SZ)}`;
+      let list = boulderSectors.get(key);
+      if (!list) {
+        list = [];
+        boulderSectors.set(key, list);
+      }
+      list.push({ x: rx, y: y + 0.15, z: rz, ry, scale, r: 1, g: 1, b: 1 });
+    }
+
+    const emitSectorTrees = (
+      sectors: Map<string, TreeItem[]>,
+      trunkGeo: THREE.BufferGeometry,
+      crownGeo: THREE.BufferGeometry,
+      keepDist: number
+    ) => {
+      sectors.forEach((items) => {
+        const trunks = new THREE.InstancedMesh(trunkGeo, pineTrunkMat, items.length);
+        const crowns = new THREE.InstancedMesh(crownGeo, pineFoliageMat, items.length);
+        trunks.castShadow = !this.isSoftwareGl;
+        crowns.castShadow = !this.isSoftwareGl;
+        crowns.receiveShadow = true;
+        trunks.frustumCulled = false;
+        crowns.frustumCulled = false;
+
+        let minX = Infinity;
+        let minY = Infinity;
+        let minZ = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        let maxZ = -Infinity;
+
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          _dummy.position.set(it.x, it.y - 0.15, it.z);
+          _dummy.rotation.set(0, it.ry, 0);
+          _dummy.scale.setScalar(it.scale);
+          _dummy.updateMatrix();
+          trunks.setMatrixAt(i, _dummy.matrix);
+          crowns.setMatrixAt(i, _dummy.matrix);
+          tint.setRGB(it.r, it.g, it.b);
+          crowns.setColorAt(i, tint);
+
+          const pad = 3.2 * it.scale;
+          if (it.x - pad < minX) minX = it.x - pad;
+          if (it.y - 0.5 < minY) minY = it.y - 0.5;
+          if (it.z - pad < minZ) minZ = it.z - pad;
+          if (it.x + pad > maxX) maxX = it.x + pad;
+          if (it.y + 10.5 * it.scale > maxY) maxY = it.y + 10.5 * it.scale;
+          if (it.z + pad > maxZ) maxZ = it.z + pad;
+        }
+        trunks.instanceMatrix.needsUpdate = true;
+        crowns.instanceMatrix.needsUpdate = true;
+        if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
+        trunks.computeBoundingSphere();
+        crowns.computeBoundingSphere();
+        this.scene.add(trunks, crowns);
+        this.lockStaticHierarchy(trunks);
+        this.lockStaticHierarchy(crowns);
+        const bounds = { minX, minY, minZ, maxX, maxY, maxZ };
+        this.occlusionManager.registerBounds(trunks, bounds, { alwaysKeepWithinDist: keepDist });
+        this.occlusionManager.registerBounds(crowns, bounds, { alwaysKeepWithinDist: keepDist });
+      });
+    };
+
+    emitSectorTrees(pineSectors, pineTrunkGeo, pineFoliageGeo, 140);
+    emitSectorTrees(broadSectors, broadTrunkGeo, broadCrownGeo, 140);
+
+    shrubSectors.forEach((items) => {
+      const mesh = new THREE.InstancedMesh(shrubGeo, pineFoliageMat, items.length);
+      mesh.receiveShadow = true;
+      mesh.frustumCulled = false;
+      let minX = Infinity;
+      let minY = Infinity;
+      let minZ = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      let maxZ = -Infinity;
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        _dummy.position.set(it.x, it.y, it.z);
+        _dummy.rotation.set(0, it.ry, 0);
+        _dummy.scale.setScalar(it.scale);
+        _dummy.updateMatrix();
+        mesh.setMatrixAt(i, _dummy.matrix);
+        tint.setRGB(it.r, it.g, it.b);
+        mesh.setColorAt(i, tint);
+        if (it.x - 2 < minX) minX = it.x - 2;
+        if (it.y - 0.5 < minY) minY = it.y - 0.5;
+        if (it.z - 2 < minZ) minZ = it.z - 2;
+        if (it.x + 2 > maxX) maxX = it.x + 2;
+        if (it.y + 2 > maxY) maxY = it.y + 2;
+        if (it.z + 2 > maxZ) maxZ = it.z + 2;
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.computeBoundingSphere();
+      this.scene.add(mesh);
+      this.lockStaticHierarchy(mesh);
+      this.occlusionManager.registerBounds(
+        mesh,
+        { minX, minY, minZ, maxX, maxY, maxZ },
+        { alwaysKeepWithinDist: 95 }
+      );
+    });
+
+    boulderSectors.forEach((items) => {
+      const mesh = new THREE.InstancedMesh(boulderGeo, boulderMat, items.length);
+      mesh.castShadow = !this.isSoftwareGl;
+      mesh.receiveShadow = true;
+      mesh.frustumCulled = false;
+      let minX = Infinity;
+      let minY = Infinity;
+      let minZ = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      let maxZ = -Infinity;
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        _dummy.position.set(it.x, it.y, it.z);
+        _dummy.rotation.set(it.ry * 0.3, it.ry, it.ry * 0.2);
+        _dummy.scale.set(it.scale * 1.15, it.scale * 0.78, it.scale);
+        _dummy.updateMatrix();
+        mesh.setMatrixAt(i, _dummy.matrix);
+        if (it.x - 3 < minX) minX = it.x - 3;
+        if (it.y - 1 < minY) minY = it.y - 1;
+        if (it.z - 3 < minZ) minZ = it.z - 3;
+        if (it.x + 3 > maxX) maxX = it.x + 3;
+        if (it.y + 3 > maxY) maxY = it.y + 3;
+        if (it.z + 3 > maxZ) maxZ = it.z + 3;
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingSphere();
+      this.scene.add(mesh);
+      this.lockStaticHierarchy(mesh);
+      this.occlusionManager.registerBounds(
+        mesh,
+        { minX, minY, minZ, maxX, maxY, maxZ },
+        { alwaysKeepWithinDist: 110 }
+      );
+    });
+  }
+
+  private populateMountainWildlife(): void {
+    const textures = this.textures!;
+    this.mountainWildlife.length = 0;
+
+    interface WildlifeSpawnSpec {
+      species: WildlifeSpecies;
+      x: number;
+      z: number;
+      patrolRadius: number;
+      baseSpeed: number;
+      isCaveDweller?: boolean;
+      hasAntlers?: boolean;
+    }
+
+    const spawns: WildlifeSpawnSpec[] = [
+      // Tigers (9) — Range 1–6 forests, stream banks & Vyaghra Guha Cave (R3)
+      { species: 'TIGER', x: 46, z: -339, patrolRadius: 4.5, baseSpeed: 2.3, isCaveDweller: true },
+      { species: 'TIGER', x: -72, z: -206, patrolRadius: 14, baseSpeed: 3.1 },
+      { species: 'TIGER', x: 98, z: -215, patrolRadius: 16, baseSpeed: 3.2 },
+      { species: 'TIGER', x: -162, z: -310, patrolRadius: 15, baseSpeed: 3.0 },
+      { species: 'TIGER', x: 14, z: -395, patrolRadius: 16, baseSpeed: 3.2 },
+      { species: 'TIGER', x: -248, z: -445, patrolRadius: 18, baseSpeed: 3.1 },
+      { species: 'TIGER', x: 245, z: -435, patrolRadius: 17, baseSpeed: 3.0 },
+      { species: 'TIGER', x: -120, z: -598, patrolRadius: 16, baseSpeed: 2.9 },
+      { species: 'TIGER', x: 58, z: -630, patrolRadius: 15, baseSpeed: 3.0 },
+
+      // Lions (8) — Simha-Dvara Cave (R2), rocky ridge overlooks & sunny meadows
+      { species: 'LION', x: 176, z: -236, patrolRadius: 4.2, baseSpeed: 2.2, isCaveDweller: true },
+      { species: 'LION', x: 155, z: -268, patrolRadius: 15, baseSpeed: 3.0 },
+      { species: 'LION', x: -128, z: -262, patrolRadius: 14, baseSpeed: 2.9 },
+      { species: 'LION', x: 35, z: -318, patrolRadius: 15, baseSpeed: 3.1 },
+      { species: 'LION', x: 295, z: -460, patrolRadius: 16, baseSpeed: 3.0 },
+      { species: 'LION', x: -292, z: -492, patrolRadius: 16, baseSpeed: 2.9 },
+      { species: 'LION', x: -168, z: -685, patrolRadius: 15, baseSpeed: 2.8 },
+      { species: 'LION', x: 96, z: -692, patrolRadius: 16, baseSpeed: 2.9 },
+
+      // Wild Elephants (8) — Gaja-Mandira Cave (R4), foothill groves & alpine streams
+      { species: 'ELEPHANT', x: -252, z: -386, patrolRadius: 5.0, baseSpeed: 1.9, isCaveDweller: true },
+      { species: 'ELEPHANT', x: -38, z: -185, patrolRadius: 12, baseSpeed: 2.2 },
+      { species: 'ELEPHANT', x: 64, z: -195, patrolRadius: 12, baseSpeed: 2.1 },
+      { species: 'ELEPHANT', x: -112, z: -255, patrolRadius: 14, baseSpeed: 2.2 },
+      { species: 'ELEPHANT', x: 122, z: -258, patrolRadius: 14, baseSpeed: 2.1 },
+      { species: 'ELEPHANT', x: -195, z: -356, patrolRadius: 15, baseSpeed: 2.2 },
+      { species: 'ELEPHANT', x: 218, z: -362, patrolRadius: 15, baseSpeed: 2.1 },
+      { species: 'ELEPHANT', x: 18, z: -495, patrolRadius: 14, baseSpeed: 2.0 },
+
+      // Spotted Mountain Deer (16) — Gardens, forest glades, trail edges & Mriga-Vana Grotto (R7)
+      { species: 'DEER', x: 258, z: -393, patrolRadius: 4.5, baseSpeed: 2.5, isCaveDweller: true, hasAntlers: true },
+      { species: 'DEER', x: -16, z: -176, patrolRadius: 11, baseSpeed: 3.4, hasAntlers: true },
+      { species: 'DEER', x: 26, z: -178, patrolRadius: 11, baseSpeed: 3.3, hasAntlers: false },
+      { species: 'DEER', x: -92, z: -236, patrolRadius: 12, baseSpeed: 3.2, hasAntlers: true },
+      { species: 'DEER', x: -86, z: -244, patrolRadius: 12, baseSpeed: 3.3, hasAntlers: false },
+      { species: 'DEER', x: 132, z: -242, patrolRadius: 12, baseSpeed: 3.2, hasAntlers: true },
+      { species: 'DEER', x: 140, z: -252, patrolRadius: 12, baseSpeed: 3.4, hasAntlers: false },
+      { species: 'DEER', x: -16, z: -322, patrolRadius: 13, baseSpeed: 3.1, hasAntlers: true },
+      { species: 'DEER', x: -24, z: -330, patrolRadius: 13, baseSpeed: 3.2, hasAntlers: false },
+      { species: 'DEER', x: 282, z: -492, patrolRadius: 12, baseSpeed: 3.1, hasAntlers: true },
+      { species: 'DEER', x: 290, z: -502, patrolRadius: 12, baseSpeed: 3.3, hasAntlers: false },
+      { species: 'DEER', x: -202, z: -692, patrolRadius: 12, baseSpeed: 3.1, hasAntlers: true },
+      { species: 'DEER', x: -212, z: -700, patrolRadius: 12, baseSpeed: 3.0, hasAntlers: false },
+      { species: 'DEER', x: 40, z: -642, patrolRadius: 13, baseSpeed: 3.2, hasAntlers: true },
+      { species: 'DEER', x: 48, z: -652, patrolRadius: 13, baseSpeed: 3.1, hasAntlers: false },
+      { species: 'DEER', x: -58, z: -468, patrolRadius: 14, baseSpeed: 3.3, hasAntlers: true },
+
+      // Leopards (9) — Chita-Shila Cave (R5), Gupt-Nidhi Cave (R6), high alpine crags & forests
+      { species: 'LEOPARD', x: -244, z: -611, patrolRadius: 4.5, baseSpeed: 2.4, isCaveDweller: true },
+      { species: 'LEOPARD', x: 68, z: -677, patrolRadius: 4.5, baseSpeed: 2.4, isCaveDweller: true },
+      { species: 'LEOPARD', x: -128, z: -219, patrolRadius: 4.2, baseSpeed: 2.3, isCaveDweller: true },
+      { species: 'LEOPARD', x: -138, z: -288, patrolRadius: 15, baseSpeed: 3.5 },
+      { species: 'LEOPARD', x: 162, z: -308, patrolRadius: 15, baseSpeed: 3.4 },
+      { species: 'LEOPARD', x: -268, z: -535, patrolRadius: 16, baseSpeed: 3.3 },
+      { species: 'LEOPARD', x: 215, z: -545, patrolRadius: 16, baseSpeed: 3.4 },
+      { species: 'LEOPARD', x: -72, z: -718, patrolRadius: 16, baseSpeed: 3.2 },
+      { species: 'LEOPARD', x: 24, z: -726, patrolRadius: 15, baseSpeed: 3.3 },
+    ];
+
+    spawns.forEach((sp, idx) => {
+      let rig: WildlifeRig;
+      switch (sp.species) {
+        case 'TIGER':
+          rig = createTigerModel(textures);
+          break;
+        case 'LION':
+          rig = createLionModel(textures);
+          break;
+        case 'ELEPHANT':
+          rig = createWildElephantModel(textures);
+          break;
+        case 'DEER':
+          rig = createDeerModel(sp.hasAntlers ?? idx % 2 === 0);
+          break;
+        case 'LEOPARD':
+          rig = createLeopardModel(textures);
+          break;
+      }
+
+      const startAngle = (idx * 1.17) % (Math.PI * 2);
+      const sx = sp.x + Math.cos(startAngle) * Math.min(sp.patrolRadius * 0.5, 4);
+      const sz = sp.z + Math.sin(startAngle) * Math.min(sp.patrolRadius * 0.5, 4);
+      const sy = groundHeightAt(sx, sz);
+
+      rig.group.position.set(sx, sy, sz);
+      rig.group.rotation.order = 'YXZ';
+      rig.group.rotation.y = startAngle;
+      this.scene.add(rig.group);
+
+      this.mountainWildlife.push({
+        rig,
+        species: sp.species,
+        homeX: sp.x,
+        homeZ: sp.z,
+        x: sx,
+        y: sy,
+        z: sz,
+        yaw: startAngle,
+        patrolRadius: sp.patrolRadius,
+        patrolAngle: startAngle,
+        angularDir: idx % 2 === 0 ? 1 : -1,
+        baseSpeed: sp.baseSpeed,
+        gaitPhase: idx * 0.9,
+        pauseTimer: idx % 4 === 0 ? 1.5 + (idx % 3) * 0.8 : 0,
+        moveTimer: 4.5 + (idx % 5) * 1.4,
+        phase: idx * 1.31,
+        isCaveDweller: Boolean(sp.isCaveDweller),
       });
     });
   }
@@ -5143,7 +5900,7 @@ export class RamayanaWorldEngine {
         ox = anchor.x + (nextRand() - 0.5) * 9.5;
         oz = anchor.z + (nextRand() - 0.5) * 9.5;
       } else {
-        oz = -280 + nextRand() * 560;
+        oz = -202 + nextRand() * 482;
         const nearBridge = BRIDGE_Z_LIST.some((bz) => Math.abs(oz - bz) < 9.5);
         if (nearBridge) oz += 12;
         ox = riverCenterX(oz) - (riverHalfWidth(oz) + 1.8 + nextRand() * 4.2);
@@ -5244,7 +6001,7 @@ export class RamayanaWorldEngine {
     }
     const rockSectors = new Map<number, RockPlacement[]>();
     for (let i = 0; i < bankRockCount; i++) {
-      let rz = -260 + (i / bankRockCount) * 520 + (nextRand() - 0.5) * 4.5;
+      let rz = -202 + (i / bankRockCount) * 462 + (nextRand() - 0.5) * 4.5;
       if (BRIDGE_Z_LIST.some((bz) => Math.abs(rz - bz) < 9.2)) {
         rz += 11.5;
       }
@@ -6534,10 +7291,18 @@ export class RamayanaWorldEngine {
 
   private restoreRamStandingClothes(): void {
     if (this.ramRig.centerPleat) {
-      this.ramRig.centerPleat.scale.set(1.12, 1.0, 0.34);
+      if (this.ramRig.centerPleat.userData.customPleatScale) {
+        this.ramRig.centerPleat.scale.set(1, 1, 1);
+      } else {
+        this.ramRig.centerPleat.scale.set(1.12, 1.0, 0.34);
+      }
     }
     if (this.ramRig.capePivot) {
-      this.ramRig.capePivot.position.set(-0.118, 0.605, -0.096);
+      if (this.ramRig.capePivot.userData.backMantle) {
+        this.ramRig.capePivot.position.set(0, 0.642, -0.16);
+      } else {
+        this.ramRig.capePivot.position.set(-0.118, 0.605, -0.096);
+      }
       this.ramRig.capePivot.scale.set(1, 1, 1);
     }
   }
@@ -8387,6 +9152,18 @@ export class RamayanaWorldEngine {
       const safeIslCeil = islCeil - 0.28;
       if (bestCeil === null || safeIslCeil < bestCeil) {
         bestCeil = safeIslCeil;
+      }
+    }
+    const caveProx = mountainCaveProximity(px, pz);
+    if (
+      caveProx.cave &&
+      caveProx.dist < caveProx.cave.radius * 0.72 &&
+      py >= caveProx.cave.y - 0.6 &&
+      py < caveProx.cave.y + 5.1
+    ) {
+      const caveCeil = caveProx.cave.y + 4.35;
+      if (bestCeil === null || caveCeil < bestCeil) {
+        bestCeil = caveCeil;
       }
     }
     return bestCeil;
@@ -10546,12 +11323,18 @@ export class RamayanaWorldEngine {
     }
 
     if (this.ramRig.capePivot) {
+      const isBackMantle = !!this.ramRig.capePivot.userData.backMantle;
       if (this.mountedChariotIndex !== null) {
-        this.ramRig.capePivot.position.set(-0.118, 0.605, -0.042);
-        this.ramRig.capePivot.scale.set(1, 0.48, 1);
+        if (isBackMantle) {
+          this.ramRig.capePivot.position.set(0, 0.642, -0.16);
+          this.ramRig.capePivot.scale.set(1, 0.85, 1);
+        } else {
+          this.ramRig.capePivot.position.set(-0.118, 0.605, -0.042);
+          this.ramRig.capePivot.scale.set(1, 0.48, 1);
+        }
         this.ramRig.capePivot.rotation.x = THREE.MathUtils.damp(
           this.ramRig.capePivot.rotation.x,
-          0.02 + Math.sin(elapsed * 3.1) * 0.015,
+          (isBackMantle ? 0.14 : 0.02) + Math.sin(elapsed * 3.1) * 0.015,
           10,
           clampedDt
         );
@@ -10562,10 +11345,15 @@ export class RamayanaWorldEngine {
           clampedDt
         );
       } else {
-        this.ramRig.capePivot.position.set(-0.118, 0.605, -0.096);
+        if (isBackMantle) {
+          this.ramRig.capePivot.position.set(0, 0.642, -0.16);
+        } else {
+          this.ramRig.capePivot.position.set(-0.118, 0.605, -0.096);
+        }
         this.ramRig.capePivot.scale.set(1, 1, 1);
+        const baseRest = isBackMantle ? 0.12 : 0.04;
         const targetCapeX =
-          0.04 + speedFactor * 0.48 + Math.sin(elapsed * 2.8) * 0.035 + Math.max(0, jumpLift * 0.7);
+          baseRest + speedFactor * 0.48 + Math.sin(elapsed * 2.8) * 0.035 + Math.max(0, jumpLift * 0.7);
         const targetCapeZ =
           THREE.MathUtils.clamp(-this.playerTurnRate * 0.05, -0.22, 0.22);
         this.ramRig.capePivot.rotation.x = THREE.MathUtils.damp(
@@ -10735,12 +11523,22 @@ export class RamayanaWorldEngine {
 
     if (rig.centerPleat) {
       rig.centerPleat.rotation.x = p.pleatRotX;
-      rig.centerPleat.scale.set(1.06, 0.88, 0.34);
+      if (rig.centerPleat.userData.customPleatScale) {
+        rig.centerPleat.scale.set(1, 0.9, 1);
+      } else {
+        rig.centerPleat.scale.set(1.06, 0.88, 0.34);
+      }
     }
     if (rig.capePivot) {
-      rig.capePivot.position.set(-0.118, 0.605, -0.042);
-      rig.capePivot.scale.set(1, 0.48, 1);
-      rig.capePivot.rotation.x = 0.02;
+      if (rig.capePivot.userData.backMantle) {
+        rig.capePivot.position.set(0, 0.642, -0.16);
+        rig.capePivot.scale.set(1, 0.85, 1);
+        rig.capePivot.rotation.x = 0.14;
+      } else {
+        rig.capePivot.position.set(-0.118, 0.605, -0.042);
+        rig.capePivot.scale.set(1, 0.48, 1);
+        rig.capePivot.rotation.x = 0.02;
+      }
     }
 
     rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
@@ -10795,9 +11593,15 @@ export class RamayanaWorldEngine {
       rig.centerPleat.scale.set(1.0, 1.0, 1.0);
     }
     if (rig.capePivot) {
-      rig.capePivot.position.set(-0.118, 0.605, -0.052);
-      rig.capePivot.scale.set(1, 1, 1);
-      rig.capePivot.rotation.x = 0.08 + Math.sin(elapsed * 2.8) * 0.03;
+      if (rig.capePivot.userData.backMantle) {
+        rig.capePivot.position.set(0, 0.642, -0.16);
+        rig.capePivot.scale.set(1, 1, 1);
+        rig.capePivot.rotation.x = 0.14 + Math.sin(elapsed * 2.8) * 0.03;
+      } else {
+        rig.capePivot.position.set(-0.118, 0.605, -0.052);
+        rig.capePivot.scale.set(1, 1, 1);
+        rig.capePivot.rotation.x = 0.08 + Math.sin(elapsed * 2.8) * 0.03;
+      }
     }
 
     rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
@@ -10847,12 +11651,22 @@ export class RamayanaWorldEngine {
 
     if (rig.centerPleat) {
       rig.centerPleat.rotation.x = p.pleatRotX;
-      rig.centerPleat.scale.set(1.06, 0.88, 0.34);
+      if (rig.centerPleat.userData.customPleatScale) {
+        rig.centerPleat.scale.set(1, 0.9, 1);
+      } else {
+        rig.centerPleat.scale.set(1.06, 0.88, 0.34);
+      }
     }
     if (rig.capePivot) {
-      rig.capePivot.position.set(-0.118, 0.605, -0.042);
-      rig.capePivot.scale.set(1, 0.48, 1);
-      rig.capePivot.rotation.x = 0.02;
+      if (rig.capePivot.userData.backMantle) {
+        rig.capePivot.position.set(0, 0.642, -0.16);
+        rig.capePivot.scale.set(1, 0.85, 1);
+        rig.capePivot.rotation.x = 0.14;
+      } else {
+        rig.capePivot.position.set(-0.118, 0.605, -0.042);
+        rig.capePivot.scale.set(1, 0.48, 1);
+        rig.capePivot.rotation.x = 0.02;
+      }
     }
 
     rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
@@ -10922,12 +11736,22 @@ export class RamayanaWorldEngine {
 
     if (rig.centerPleat) {
       rig.centerPleat.rotation.x = p.pleatRotX;
-      rig.centerPleat.scale.set(1.06, 0.85, 0.34);
+      if (rig.centerPleat.userData.customPleatScale) {
+        rig.centerPleat.scale.set(1, 0.88, 1);
+      } else {
+        rig.centerPleat.scale.set(1.06, 0.85, 0.34);
+      }
     }
     if (rig.capePivot) {
-      rig.capePivot.position.set(-0.118, 0.605, -0.06);
-      rig.capePivot.scale.set(1, 0.65, 1);
-      rig.capePivot.rotation.x = 0.08 + speedNorm * 0.28 + Math.sin(elapsed * 3.1) * 0.03;
+      if (rig.capePivot.userData.backMantle) {
+        rig.capePivot.position.set(0, 0.642, -0.16);
+        rig.capePivot.scale.set(1, 0.9, 1);
+        rig.capePivot.rotation.x = 0.14 + speedNorm * 0.28 + Math.sin(elapsed * 3.1) * 0.03;
+      } else {
+        rig.capePivot.position.set(-0.118, 0.605, -0.06);
+        rig.capePivot.scale.set(1, 0.65, 1);
+        rig.capePivot.rotation.x = 0.08 + speedNorm * 0.28 + Math.sin(elapsed * 3.1) * 0.03;
+      }
     }
 
     rig.torso.rotation.set(p.torsoRotX, p.torsoRotY, p.torsoRotZ);
@@ -14686,6 +15510,7 @@ export class RamayanaWorldEngine {
     }
 
     this.stepAquaticEcosystem(dt, elapsed);
+    this.stepMountainWildlife(dt, elapsed);
 
     // Update Underwater Post-Processing Volume based on exact camera submergence below Sarayu / Stepwell surface
     this.updateUnderwaterPostProcessing(elapsed);
@@ -15084,6 +15909,129 @@ export class RamayanaWorldEngine {
       for (let i = 0; i < this.stepwellTurtles.length; i++) {
         this.stepwellTurtles[i].root.visible = false;
       }
+    }
+  }
+
+  private stepMountainWildlife(dt: number, elapsed: number): void {
+    if (this.mountainWildlife.length === 0) return;
+    const camX = this.camera.position.x;
+    const camZ = this.camera.position.z;
+    const maxVisDistSq = 255 * 255;
+
+    for (let i = 0; i < this.mountainWildlife.length; i++) {
+      const w = this.mountainWildlife[i];
+      const dxCam = w.x - camX;
+      const dzCam = w.z - camZ;
+      const distSq = dxCam * dxCam + dzCam * dzCam;
+      if (distSq > maxVisDistSq) {
+        w.rig.group.visible = false;
+        continue;
+      }
+      if (!this.occlusionManager.isSphereVisible(w.x, w.y + 1.1, w.z, 3.2, maxVisDistSq, 140)) {
+        w.rig.group.visible = false;
+        continue;
+      }
+      w.rig.group.visible = true;
+
+      const dxP = w.x - this.playerX;
+      const dzP = w.z - this.playerZ;
+      const pDistSq = dxP * dxP + dzP * dzP;
+      const nearPlayer = pDistSq < 10.5 * 10.5 && Math.abs(w.y - this.playerY) < 5.0;
+
+      if (w.pauseTimer > 0 && !nearPlayer) {
+        w.pauseTimer -= dt;
+        if (w.pauseTimer <= 0) {
+          w.moveTimer = 4.2 + ((i * 37) % 10) * 0.45;
+        }
+        // Calm idle breathing & looking around
+        for (let l = 0; l < w.rig.legs.length; l++) {
+          w.rig.legs[l].rotation.x *= Math.max(0, 1 - dt * 6);
+        }
+        w.rig.headPivot.rotation.y = Math.sin(elapsed * 0.85 + w.phase) * 0.24;
+        w.rig.headPivot.rotation.x = Math.sin(elapsed * 1.4 + w.phase) * 0.08;
+        w.rig.tailPivot.rotation.y = Math.sin(elapsed * 2.2 + w.phase) * 0.2;
+      } else {
+        w.moveTimer -= dt;
+        if (w.moveTimer <= 0 && !nearPlayer) {
+          w.pauseTimer = 1.6 + ((i * 19) % 7) * 0.5;
+        }
+
+        const speedScale = w.species === 'DEER' && nearPlayer ? 1.55 : 1.0;
+        const speed = w.baseSpeed * speedScale;
+        const angularStep = (speed / Math.max(2.5, w.patrolRadius)) * w.angularDir * dt;
+        w.patrolAngle += angularStep;
+
+        const targetX = w.homeX + Math.cos(w.patrolAngle) * w.patrolRadius;
+        const targetZ = w.homeZ + Math.sin(w.patrolAngle) * w.patrolRadius;
+        let vx = targetX - w.x;
+        let vz = targetZ - w.z;
+
+        // Softly steer away if player walks directly into personal space
+        if (pDistSq > 0.04 && pDistSq < 16.0 && Math.abs(w.y - this.playerY) < 4.5) {
+          const invP = 1 / Math.sqrt(pDistSq);
+          vx += dxP * invP * 3.5;
+          vz += dzP * invP * 3.5;
+        }
+
+        const vLen = Math.hypot(vx, vz);
+        if (vLen > 0.05) {
+          vx /= vLen;
+          vz /= vLen;
+          const stepDist = Math.min(speed * dt, vLen + speed * dt * 0.5);
+          const nx = w.x + vx * stepDist;
+          const nz = w.z + vz * stepDist;
+          const ny = groundHeightAt(nx, nz);
+
+          // Avoid leaping off vertical cliff faces
+          if (Math.abs(ny - w.y) <= 2.4 * Math.max(0.4, stepDist + 0.35)) {
+            w.x = nx;
+            w.z = nz;
+            w.y = ny;
+          } else {
+            w.angularDir *= -1;
+          }
+
+          const targetYaw = Math.atan2(vx, vz);
+          let yawDiff = targetYaw - w.yaw;
+          while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+          while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+          w.yaw += yawDiff * Math.min(1, dt * 5.2);
+        }
+
+        const gaitFreq = w.species === 'ELEPHANT' ? 4.2 : w.species === 'DEER' ? 8.2 : 6.6;
+        w.gaitPhase += dt * gaitFreq * speedScale;
+        const swingAmp = w.species === 'ELEPHANT' ? 0.34 : 0.48;
+        const swing = Math.sin(w.gaitPhase) * swingAmp;
+        // Diagonal quadruped gait: [FL, FR, BL, BR]
+        w.rig.legs[0].rotation.x = swing;
+        w.rig.legs[1].rotation.x = -swing;
+        w.rig.legs[2].rotation.x = -swing * 0.92;
+        w.rig.legs[3].rotation.x = swing * 0.92;
+
+        w.rig.headPivot.rotation.x = Math.sin(w.gaitPhase * 2) * 0.05;
+        w.rig.headPivot.rotation.y = Math.sin(elapsed * 0.7 + w.phase) * 0.08;
+        w.rig.tailPivot.rotation.y = Math.sin(elapsed * 3.8 + w.phase) * 0.28;
+      }
+
+      if (w.rig.earPivots) {
+        const earFlap = Math.sin(elapsed * 2.4 + w.phase) * 0.18;
+        w.rig.earPivots[0].rotation.y = earFlap;
+        w.rig.earPivots[1].rotation.y = -earFlap;
+      }
+      if (w.rig.trunkPivot) {
+        w.rig.trunkPivot.rotation.x = Math.sin(elapsed * 1.9 + w.phase) * 0.22;
+        w.rig.trunkPivot.rotation.z = Math.cos(elapsed * 1.3 + w.phase) * 0.08;
+      }
+
+      // Align body pitch with local mountain slope
+      const fx = Math.sin(w.yaw) * 0.65;
+      const fz = Math.cos(w.yaw) * 0.65;
+      const hFront = groundHeightAt(w.x + fx, w.z + fz);
+      const hBack = groundHeightAt(w.x - fx, w.z - fz);
+      const slopePitch = THREE.MathUtils.clamp(-Math.atan2(hFront - hBack, 1.3) * 0.65, -0.45, 0.45);
+
+      w.rig.group.position.set(w.x, w.y, w.z);
+      w.rig.group.rotation.set(slopePitch, w.yaw, 0);
     }
   }
 

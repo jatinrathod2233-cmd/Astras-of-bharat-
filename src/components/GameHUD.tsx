@@ -411,7 +411,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
               type="button"
               onClick={onToggleCameraPerspective}
               title="Toggle Camera Perspective (K)"
-              aria-label={`Camera: ${hud.cameraPerspective === 'SECOND_PERSON' ? 'Second Person waist framing' : 'First Person'}. Click to switch.`}
+              aria-label={`Camera: ${hud.cameraPerspective === 'SECOND_PERSON' ? 'Pulled-back rear view' : 'First Person'}. Click to switch.`}
               className={`inline-flex h-8 items-center gap-1 rounded-md border px-2 text-[10px] font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                 hud.cameraPerspective === 'SECOND_PERSON'
                   ? 'border-amber-300/65 bg-amber-400/20 text-amber-200'
@@ -419,7 +419,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
               }`}
             >
               <Camera className="h-3.5 w-3.5 text-amber-300 shrink-0" aria-hidden="true" />
-              <span>{hud.cameraPerspective === 'SECOND_PERSON' ? '2P Waist' : '1P View'}</span>
+              <span>{hud.cameraPerspective === 'SECOND_PERSON' ? '2P Rear' : '1P View'}</span>
             </button>
 
             <button

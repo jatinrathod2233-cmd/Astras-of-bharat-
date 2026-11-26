@@ -16,9 +16,9 @@ export const DEMON_VILLAGE_CENTER_X = 2500;
 export const DEMON_VILLAGE_CENTER_Z = 0;
 
 export const WORLD_BOUNDS = {
-  minX: -360,
+  minX: -620,
   maxX: 3060,
-  minZ: -420,
+  minZ: -1020,
   maxZ: 420,
 };
 
@@ -193,6 +193,7 @@ export function isOnBridge(x: number, z: number): boolean {
 }
 
 export function isInRiverWater(x: number, z: number): boolean {
+  if (z < -208) return false;
   if (isOnBridge(x, z)) return false;
   return Math.abs(x - riverCenterX(z)) < riverHalfWidth(z);
 }
@@ -434,22 +435,26 @@ export function groundHeightAt(x: number, z: number): number {
     }
   }
 
+  // Colossal 7-Range Mountain Ecosystem behind the 7-story palace (z < -158)
+  const mountainY = mountainHeightContributionAt(x, z);
+
   // Gentle organic elevation along dry riverbanks strictly ABOVE waterline (-0.62m)
   const rCenter = riverCenterX(z);
   const rHalfW = riverHalfWidth(z);
   const riverDist = Math.abs(x - rCenter);
+  const riverNorthFade = smoothstep(-214, -186, z);
   const bankBerm =
     smoothstep(rHalfW + 0.6, rHalfW + 5.5, riverDist) *
     (1 - smoothstep(rHalfW + 5.5, rHalfW + 16.0, riverDist)) *
     (0.44 + 0.24 * Math.sin(z * 0.08 + x * 0.05)) *
-    roadFlatness;
+    roadFlatness *
+    riverNorthFade;
 
-  const baseTerrainY = Math.max(-0.04, gentleWave * hillMask + bankBerm + volcanicLift);
+  const baseTerrainY = Math.max(-0.04, gentleWave * hillMask + bankBerm + volcanicLift + mountainY);
 
-  // High-Fidelity Sarayu River Channel excavated strictly inside riverHalfWidth to -6.75m (20+ ft deep)
-  // Outside rHalfW, shore rises cleanly above RIVER_SURFACE_Y (-0.62m) so NO riverbank boulder, shrub, or structure ever sinks
+  // High-Fidelity Sarayu River Channel excavated strictly inside riverHalfWidth south of mountain headwaters (z >= -214)
   const bankMargin = rHalfW + 4.4;
-  if (riverDist < bankMargin) {
+  if (riverDist < bankMargin && z >= -214) {
     let minBridgeDz = Infinity;
     for (let i = 0; i < BRIDGE_Z_LIST.length; i++) {
       minBridgeDz = Math.min(minBridgeDz, Math.abs(z - BRIDGE_Z_LIST[i]));
@@ -486,7 +491,8 @@ export function groundHeightAt(x: number, z: number): number {
         shoreFloorY * (1 - bankT) + Math.max(0.02, baseTerrainY) * bankT;
     }
 
-    return approachFlat * (1 - bridgeSideBlend) + channelProfileY * bridgeSideBlend;
+    const riverBlend = approachFlat * (1 - bridgeSideBlend) + channelProfileY * bridgeSideBlend;
+    return baseTerrainY * (1 - riverNorthFade) + riverBlend * riverNorthFade;
   }
 
   return baseTerrainY;
@@ -1321,6 +1327,22 @@ export function getDistrictName(x: number, z: number): {
       label: x >= 2400 ? 'Volcanic Demon Village (2.5 km)' : 'Ash Frontier Wasteland',
     };
   }
+  if (z < -172 && x > -610 && x < 610) {
+    let bestRange = MOUNTAIN_RANGES[0];
+    let bestDist = Infinity;
+    for (let i = 0; i < MOUNTAIN_RANGES.length; i++) {
+      const r = MOUNTAIN_RANGES[i];
+      const d = Math.hypot(x - r.centerX, z - r.centerZ);
+      if (d < bestDist) {
+        bestDist = d;
+        bestRange = r;
+      }
+    }
+    return {
+      id: 'PANCHAVATI_GROVE',
+      label: `Range ${bestRange.index}: ${bestRange.name}`,
+    };
+  }
   const rc = riverCenterX(z);
   const rw = riverHalfWidth(z);
   if (x > rc + rw + 12) {
@@ -1392,3 +1414,597 @@ export const COURTYARD_ASHVA_SPAWNS = [
   { x: -15, z: -6, yaw: Math.PI * 0.5, coat: 0xf8f5ed, mane: 0xf2eee3 },
   { x: 18, z: -46, yaw: -Math.PI * 0.5, coat: 0xd9b37c, mane: 0xf2e4c9 },
 ];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLOSSAL 7-RANGE MOUNTAIN ECOSYSTEM BEHIND THE 7-STORY PALACE
+// Seven distinct, interconnected mountain ranges with climbable switchback trails,
+// terraced sacred gardens, alpine streams, and accessible walk-in caves.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export interface MountainLobeSpec {
+  cx: number;
+  cz: number;
+  rx: number;
+  rz: number;
+  height: number;
+  rotY: number;
+  sharpness: number;
+}
+
+export interface MountainRangeSpec {
+  index: number; // 1..7
+  name: string;
+  centerX: number;
+  centerZ: number;
+  peakHeight: number;
+  lobes: MountainLobeSpec[];
+}
+
+export const MOUNTAIN_RANGES: MountainRangeSpec[] = [
+  {
+    index: 1,
+    name: 'Giri-Vana Foothills',
+    centerX: -158,
+    centerZ: -268,
+    peakHeight: 132,
+    lobes: [
+      { cx: -158, cz: -268, rx: 122, rz: 94, height: 132, rotY: 0.25, sharpness: 1.32 },
+      { cx: -88, cz: -242, rx: 92, rz: 76, height: 86, rotY: -0.3, sharpness: 1.22 },
+      { cx: -225, cz: -315, rx: 112, rz: 92, height: 124, rotY: 0.45, sharpness: 1.25 },
+    ],
+  },
+  {
+    index: 2,
+    name: 'Surabhi-Kunj Crest',
+    centerX: 198,
+    centerZ: -282,
+    peakHeight: 146,
+    lobes: [
+      { cx: 198, cz: -282, rx: 126, rz: 96, height: 146, rotY: -0.28, sharpness: 1.34 },
+      { cx: 126, cz: -248, rx: 92, rz: 74, height: 94, rotY: 0.35, sharpness: 1.22 },
+      { cx: 255, cz: -342, rx: 118, rz: 98, height: 142, rotY: -0.4, sharpness: 1.28 },
+    ],
+  },
+  {
+    index: 3,
+    name: 'Meru-Mandara Spire',
+    centerX: 6,
+    centerZ: -408,
+    peakHeight: 236,
+    lobes: [
+      { cx: 6, cz: -408, rx: 154, rz: 122, height: 236, rotY: 0.12, sharpness: 1.42 },
+      { cx: -68, cz: -366, rx: 114, rz: 96, height: 162, rotY: 0.55, sharpness: 1.28 },
+      { cx: 76, cz: -372, rx: 114, rz: 96, height: 168, rotY: -0.52, sharpness: 1.28 },
+      { cx: -12, cz: -492, rx: 126, rz: 108, height: 192, rotY: 0.08, sharpness: 1.24 },
+    ],
+  },
+  {
+    index: 4,
+    name: 'Nilagiri Western Massif',
+    centerX: -318,
+    centerZ: -495,
+    peakHeight: 272,
+    lobes: [
+      { cx: -318, cz: -495, rx: 158, rz: 132, height: 272, rotY: -0.32, sharpness: 1.4 },
+      { cx: -245, cz: -415, rx: 122, rz: 102, height: 184, rotY: 0.4, sharpness: 1.25 },
+      { cx: -415, cz: -455, rx: 138, rz: 124, height: 224, rotY: 0.18, sharpness: 1.32 },
+      { cx: -178, cz: -435, rx: 115, rz: 96, height: 168, rotY: -0.25, sharpness: 1.22 },
+    ],
+  },
+  {
+    index: 5,
+    name: 'Kailasha-Sikhara Highs',
+    centerX: -225,
+    centerZ: -788,
+    peakHeight: 338,
+    lobes: [
+      { cx: -225, cz: -788, rx: 175, rz: 148, height: 338, rotY: 0.22, sharpness: 1.45 },
+      { cx: -355, cz: -718, rx: 148, rz: 132, height: 274, rotY: -0.38, sharpness: 1.36 },
+      { cx: -275, cz: -615, rx: 138, rz: 118, height: 226, rotY: 0.14, sharpness: 1.24 },
+      { cx: -115, cz: -725, rx: 132, rz: 112, height: 244, rotY: 0.42, sharpness: 1.24 },
+    ],
+  },
+  {
+    index: 6,
+    name: 'Gandhamadana Grand Crest',
+    centerX: 26,
+    centerZ: -795,
+    peakHeight: 376,
+    lobes: [
+      { cx: 26, cz: -795, rx: 188, rz: 156, height: 376, rotY: -0.15, sharpness: 1.48 },
+      { cx: 14, cz: -628, rx: 142, rz: 122, height: 246, rotY: 0.24, sharpness: 1.26 },
+      { cx: -52, cz: -885, rx: 164, rz: 134, height: 352, rotY: 0.32, sharpness: 1.44 },
+      { cx: 122, cz: -845, rx: 152, rz: 132, height: 318, rotY: -0.45, sharpness: 1.38 },
+    ],
+  },
+  {
+    index: 7,
+    name: 'Suryodaya Eastern Bastion',
+    centerX: 335,
+    centerZ: -565,
+    peakHeight: 296,
+    lobes: [
+      { cx: 335, cz: -565, rx: 166, rz: 148, height: 296, rotY: 0.36, sharpness: 1.42 },
+      { cx: 285, cz: -708, rx: 154, rz: 132, height: 268, rotY: -0.28, sharpness: 1.35 },
+      { cx: 418, cz: -485, rx: 142, rz: 126, height: 232, rotY: 0.18, sharpness: 1.34 },
+      { cx: 175, cz: -468, rx: 124, rz: 106, height: 194, rotY: -0.35, sharpness: 1.24 },
+    ],
+  },
+];
+
+// Flattened lobe array with precomputed trig for O(1) hot-path evaluation
+const _FLAT_LOBES = MOUNTAIN_RANGES.flatMap((r) =>
+  r.lobes.map((l) => ({
+    ...l,
+    cosR: Math.cos(l.rotY),
+    sinR: Math.sin(l.rotY),
+    invRxSq: 1 / (l.rx * l.rx),
+    invRzSq: 1 / (l.rz * l.rz),
+    maxR: Math.max(l.rx, l.rz) * 1.18,
+  }))
+);
+
+export interface TrailWaypoint {
+  x: number;
+  z: number;
+  y: number;
+}
+
+export interface MountainTrailSpec {
+  id: string;
+  name: string;
+  halfWidth: number;
+  points: TrailWaypoint[];
+}
+
+export const MOUNTAIN_TRAILS: MountainTrailSpec[] = [
+  {
+    id: 'TRAIL_CENTRAL_MERU',
+    name: 'Meru-Mandara Pilgrim Switchback',
+    halfWidth: 4.0,
+    points: [
+      { x: -2, z: -156, y: 0.2 },
+      { x: 4, z: -182, y: 5.5 },
+      { x: -26, z: -214, y: 18.0 },
+      { x: 34, z: -248, y: 36.0 },
+      { x: -22, z: -282, y: 60.0 },
+      { x: -18, z: -325, y: 86.0 }, // Deva-Udyan Garden Terrace
+      { x: 38, z: -352, y: 118.0 },
+      { x: -34, z: -378, y: 152.0 },
+      { x: 24, z: -396, y: 188.0 },
+      { x: 6, z: -408, y: 226.0 }, // Meru-Mandara Summit
+    ],
+  },
+  {
+    id: 'TRAIL_WEST_R1_R4_R5',
+    name: 'Western Giri-Vana to Kailasha Trail',
+    halfWidth: 3.9,
+    points: [
+      { x: -26, z: -214, y: 18.0 },
+      { x: -66, z: -220, y: 32.0 },
+      { x: -95, z: -240, y: 52.0 }, // Vana-Vatika Garden Terrace
+      { x: -124, z: -230, y: 66.0 }, // Near Rishi Guha Cave 1
+      { x: -166, z: -252, y: 98.0 },
+      { x: -158, z: -268, y: 126.0 }, // Range 1 Peak Overlook
+      { x: -208, z: -325, y: 108.0 }, // Range 1 -> Range 4 Pass
+      { x: -248, z: -396, y: 132.0 }, // Near Gaja-Mandira Cave 4
+      { x: -292, z: -445, y: 174.0 },
+      { x: -348, z: -482, y: 214.0 },
+      { x: -318, z: -495, y: 264.0 }, // Range 4 Nilagiri Crest
+      { x: -275, z: -595, y: 204.0 }, // Range 4 -> Range 5 Pass
+      { x: -238, z: -622, y: 180.0 }, // Near Chita-Shila Cave 5
+      { x: -205, z: -695, y: 216.0 }, // Hima-Padma Alpine Garden
+      { x: -258, z: -745, y: 274.0 },
+      { x: -225, z: -788, y: 330.0 }, // Range 5 Kailasha Peak
+    ],
+  },
+  {
+    id: 'TRAIL_EAST_R2_R7',
+    name: 'Eastern Surabhi to Suryodaya Trail',
+    halfWidth: 3.9,
+    points: [
+      { x: 4, z: -182, y: 5.5 },
+      { x: 46, z: -198, y: 12.0 }, // Sarayu Headwater Crossing
+      { x: 96, z: -218, y: 28.0 },
+      { x: 135, z: -245, y: 56.0 }, // Pushpa-Vatika Garden Terrace
+      { x: 168, z: -244, y: 74.0 }, // Near Simha-Dvara Cave 2
+      { x: 214, z: -268, y: 108.0 },
+      { x: 198, z: -282, y: 140.0 }, // Range 2 Summit
+      { x: 242, z: -345, y: 118.0 }, // Range 2 -> Range 7 Pass
+      { x: 252, z: -404, y: 126.0 }, // Near Mriga-Vana Cave 7
+      { x: 285, z: -495, y: 158.0 }, // Surya-Kanti Garden Terrace
+      { x: 348, z: -535, y: 224.0 },
+      { x: 335, z: -565, y: 288.0 }, // Range 7 Suryodaya Peak
+      { x: 262, z: -642, y: 234.0 },
+      { x: 165, z: -705, y: 214.0 }, // Connects toward Range 6
+    ],
+  },
+  {
+    id: 'TRAIL_HIGH_GANDHAMADANA',
+    name: 'Gandhamadana Grand Spine (R3 -> R6)',
+    halfWidth: 4.0,
+    points: [
+      { x: 6, z: -408, y: 226.0 },
+      { x: -12, z: -482, y: 186.0 },
+      { x: 18, z: -545, y: 168.0 }, // Alpine Stream Crossing
+      { x: 42, z: -645, y: 224.0 }, // Sanjeevani Herbal Garden
+      { x: 60, z: -686, y: 246.0 }, // Near Gupt-Nidhi Crystal Cave 6
+      { x: -18, z: -735, y: 294.0 },
+      { x: 26, z: -795, y: 368.0 }, // Gandhamadana Grand Crest
+    ],
+  },
+  {
+    id: 'TRAIL_SADDLE_R1_R3',
+    name: 'Vana-Deva Saddle Link',
+    halfWidth: 3.6,
+    points: [
+      { x: -95, z: -240, y: 52.0 },
+      { x: -68, z: -298, y: 72.0 },
+      { x: -18, z: -325, y: 86.0 },
+    ],
+  },
+  {
+    id: 'TRAIL_SADDLE_R2_R3',
+    name: 'Pushpa-Meru Saddle Link',
+    halfWidth: 3.6,
+    points: [
+      { x: 135, z: -245, y: 56.0 },
+      { x: 86, z: -305, y: 88.0 },
+      { x: 38, z: -352, y: 118.0 },
+    ],
+  },
+  {
+    id: 'TRAIL_SADDLE_R5_R6_R7',
+    name: 'Northern Trans-Himalayan Pass',
+    halfWidth: 3.7,
+    points: [
+      { x: -205, z: -695, y: 216.0 },
+      { x: -115, z: -715, y: 218.0 },
+      { x: -45, z: -732, y: 254.0 },
+      { x: -18, z: -735, y: 294.0 },
+      { x: 60, z: -686, y: 246.0 },
+      { x: 110, z: -696, y: 232.0 },
+      { x: 165, z: -705, y: 214.0 },
+    ],
+  },
+];
+
+interface FlatTrailSegment {
+  x0: number;
+  z0: number;
+  y0: number;
+  x1: number;
+  z1: number;
+  y1: number;
+  dx: number;
+  dz: number;
+  lenSq: number;
+  halfWidth: number;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+const _TRAIL_SEGMENTS: FlatTrailSegment[] = [];
+for (const tr of MOUNTAIN_TRAILS) {
+  for (let i = 0; i < tr.points.length - 1; i++) {
+    const a = tr.points[i];
+    const b = tr.points[i + 1];
+    const pad = tr.halfWidth + 9.0;
+    _TRAIL_SEGMENTS.push({
+      x0: a.x,
+      z0: a.z,
+      y0: a.y,
+      x1: b.x,
+      z1: b.z,
+      y1: b.y,
+      dx: b.x - a.x,
+      dz: b.z - a.z,
+      lenSq: Math.max(1e-4, (b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z)),
+      halfWidth: tr.halfWidth,
+      minX: Math.min(a.x, b.x) - pad,
+      maxX: Math.max(a.x, b.x) + pad,
+      minZ: Math.min(a.z, b.z) - pad,
+      maxZ: Math.max(a.z, b.z) + pad,
+    });
+  }
+}
+
+export interface MountainGardenSpec {
+  id: string;
+  name: string;
+  rangeIndex: number;
+  x: number;
+  z: number;
+  y: number;
+  radius: number;
+}
+
+export const MOUNTAIN_GARDENS: MountainGardenSpec[] = [
+  { id: 'GARDEN_R1', name: 'Vana-Vatika Grove', rangeIndex: 1, x: -95, z: -240, y: 52.0, radius: 14.5 },
+  { id: 'GARDEN_R2', name: 'Pushpa-Vatika Terrace', rangeIndex: 2, x: 135, z: -245, y: 56.0, radius: 14.5 },
+  { id: 'GARDEN_R3', name: 'Deva-Udyan Hanging Garden', rangeIndex: 3, x: -18, z: -325, y: 86.0, radius: 16.5 },
+  { id: 'GARDEN_R7', name: 'Surya-Kanti Vatika', rangeIndex: 7, x: 285, z: -495, y: 158.0, radius: 15.5 },
+  { id: 'GARDEN_R5', name: 'Hima-Padma Sanctuary', rangeIndex: 5, x: -205, z: -695, y: 216.0, radius: 16.5 },
+  { id: 'GARDEN_R6', name: 'Sanjeevani Herbal Terrace', rangeIndex: 6, x: 42, z: -645, y: 224.0, radius: 16.5 },
+];
+
+export interface MountainCaveSpec {
+  id: string;
+  name: string;
+  rangeIndex: number;
+  x: number;
+  z: number;
+  y: number;
+  yaw: number; // Direction mouth (+Z local) faces outward toward the trail
+  crystalHex: number;
+  radius: number;
+}
+
+export const MOUNTAIN_CAVES: MountainCaveSpec[] = [
+  { id: 'CAVE_R1', name: 'Rishi Guha', rangeIndex: 1, x: -128, z: -222, y: 66.0, yaw: 0.45, crystalHex: 0xffd27a, radius: 9.2 },
+  { id: 'CAVE_R2', name: 'Simha-Dvara Guha', rangeIndex: 2, x: 176, z: -238, y: 74.0, yaw: -0.48, crystalHex: 0xffa64d, radius: 9.2 },
+  { id: 'CAVE_R3', name: 'Vyaghra Guha', rangeIndex: 3, x: 46, z: -342, y: 118.0, yaw: -0.45, crystalHex: 0xff8a3c, radius: 9.5 },
+  { id: 'CAVE_R4', name: 'Gaja-Mandira Guha', rangeIndex: 4, x: -256, z: -390, y: 132.0, yaw: 0.58, crystalHex: 0x72f2c8, radius: 9.8 },
+  { id: 'CAVE_R5', name: 'Chita-Shila Guha', rangeIndex: 5, x: -244, z: -614, y: 180.0, yaw: 0.25, crystalHex: 0x7bc8ff, radius: 9.5 },
+  { id: 'CAVE_R6', name: 'Gupt-Nidhi Crystal Cave', rangeIndex: 6, x: 68, z: -680, y: 246.0, yaw: -0.52, crystalHex: 0xd08aff, radius: 10.2 },
+  { id: 'CAVE_R7', name: 'Mriga-Vana Grotto', rangeIndex: 7, x: 258, z: -396, y: 126.0, yaw: -0.48, crystalHex: 0x8effa8, radius: 9.4 },
+];
+
+export interface MountainStreamSpec {
+  id: string;
+  name: string;
+  halfWidth: number;
+  points: TrailWaypoint[];
+}
+
+export const MOUNTAIN_STREAMS: MountainStreamSpec[] = [
+  {
+    id: 'STREAM_CENTRAL_SARAYU_HEAD',
+    name: 'Meru-Sarayu Glacial Headwater',
+    halfWidth: 3.4,
+    points: [
+      { x: 18, z: -618, y: 220.0 },
+      { x: 16, z: -545, y: 166.8 },
+      { x: 26, z: -455, y: 148.0 },
+      { x: 20, z: -368, y: 124.0 },
+      { x: 10, z: -292, y: 66.0 },
+      { x: 34, z: -248, y: 34.8 },
+      { x: 46, z: -198, y: 10.8 },
+      { x: 46, z: -178, y: 0.4 },
+    ],
+  },
+  {
+    id: 'STREAM_WEST_CASCADE',
+    name: 'Nilagiri Emerald Brook',
+    halfWidth: 2.8,
+    points: [
+      { x: -288, z: -472, y: 212.0 },
+      { x: -232, z: -386, y: 128.0 },
+      { x: -165, z: -312, y: 94.0 },
+      { x: -102, z: -242, y: 50.8 },
+      { x: -72, z: -192, y: 14.0 },
+      { x: -58, z: -168, y: 0.4 },
+    ],
+  },
+  {
+    id: 'STREAM_EAST_SPRING',
+    name: 'Suryodaya Crystal Stream',
+    halfWidth: 2.8,
+    points: [
+      { x: 278, z: -500, y: 156.8 },
+      { x: 228, z: -412, y: 126.0 },
+      { x: 178, z: -328, y: 106.0 },
+      { x: 130, z: -245, y: 54.8 },
+      { x: 86, z: -206, y: 20.0 },
+      { x: 52, z: -182, y: 2.0 },
+    ],
+  },
+  {
+    id: 'STREAM_NORTH_ALPINE',
+    name: 'Kailasha Snowmelt Creek',
+    halfWidth: 2.6,
+    points: [
+      { x: -198, z: -700, y: 214.8 },
+      { x: -135, z: -648, y: 176.0 },
+      { x: -76, z: -578, y: 158.0 },
+      { x: -12, z: -540, y: 164.0 },
+      { x: 16, z: -545, y: 166.8 },
+    ],
+  },
+];
+
+const _STREAM_SEGMENTS: FlatTrailSegment[] = [];
+for (const st of MOUNTAIN_STREAMS) {
+  for (let i = 0; i < st.points.length - 1; i++) {
+    const a = st.points[i];
+    const b = st.points[i + 1];
+    const pad = st.halfWidth + 4.5;
+    _STREAM_SEGMENTS.push({
+      x0: a.x,
+      z0: a.z,
+      y0: a.y,
+      x1: b.x,
+      z1: b.z,
+      y1: b.y,
+      dx: b.x - a.x,
+      dz: b.z - a.z,
+      lenSq: Math.max(1e-4, (b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z)),
+      halfWidth: st.halfWidth,
+      minX: Math.min(a.x, b.x) - pad,
+      maxX: Math.max(a.x, b.x) + pad,
+      minZ: Math.min(a.z, b.z) - pad,
+      maxZ: Math.max(a.z, b.z) + pad,
+    });
+  }
+}
+
+function smoothMax(a: number, b: number, k = 22): number {
+  const h = Math.max(k - Math.abs(a - b), 0) / k;
+  return Math.max(a, b) + h * h * k * 0.25;
+}
+
+export function mountainTrailProximity(
+  x: number,
+  z: number
+): { dist: number; trailY: number; halfWidth: number } {
+  let bestDist = Infinity;
+  let bestY = 0;
+  let bestHw = 3.8;
+  let weightedY = 0;
+  let weightSum = 0;
+
+  for (let i = 0; i < _TRAIL_SEGMENTS.length; i++) {
+    const s = _TRAIL_SEGMENTS[i];
+    if (x < s.minX || x > s.maxX || z < s.minZ || z > s.maxZ) continue;
+    const t = Math.max(0, Math.min(1, ((x - s.x0) * s.dx + (z - s.z0) * s.dz) / s.lenSq));
+    const px = s.x0 + s.dx * t;
+    const pz = s.z0 + s.dz * t;
+    const d = Math.hypot(x - px, z - pz);
+    const py = s.y0 + (s.y1 - s.y0) * t;
+    if (d < bestDist) {
+      bestDist = d;
+      bestY = py;
+      bestHw = s.halfWidth;
+    }
+    const outer = s.halfWidth + 7.5;
+    if (d < outer) {
+      const w = 1 - smoothstep(s.halfWidth * 0.65, outer, d);
+      weightedY += py * w;
+      weightSum += w;
+    }
+  }
+
+  return {
+    dist: bestDist,
+    trailY: weightSum > 0.001 ? weightedY / weightSum : bestY,
+    halfWidth: bestHw,
+  };
+}
+
+export function mountainStreamProximity(
+  x: number,
+  z: number
+): { dist: number; streamY: number; halfWidth: number } {
+  let bestDist = Infinity;
+  let bestY = 0;
+  let bestHw = 3.0;
+  for (let i = 0; i < _STREAM_SEGMENTS.length; i++) {
+    const s = _STREAM_SEGMENTS[i];
+    if (x < s.minX || x > s.maxX || z < s.minZ || z > s.maxZ) continue;
+    const t = Math.max(0, Math.min(1, ((x - s.x0) * s.dx + (z - s.z0) * s.dz) / s.lenSq));
+    const px = s.x0 + s.dx * t;
+    const pz = s.z0 + s.dz * t;
+    const d = Math.hypot(x - px, z - pz);
+    if (d < bestDist) {
+      bestDist = d;
+      bestY = s.y0 + (s.y1 - s.y0) * t;
+      bestHw = s.halfWidth;
+    }
+  }
+  return { dist: bestDist, streamY: bestY, halfWidth: bestHw };
+}
+
+export function mountainGardenProximity(
+  x: number,
+  z: number
+): { dist: number; garden: MountainGardenSpec | null } {
+  let bestDist = Infinity;
+  let best: MountainGardenSpec | null = null;
+  for (let i = 0; i < MOUNTAIN_GARDENS.length; i++) {
+    const g = MOUNTAIN_GARDENS[i];
+    const d = Math.hypot(x - g.x, z - g.z);
+    if (d < bestDist) {
+      bestDist = d;
+      best = g;
+    }
+  }
+  return { dist: bestDist, garden: best };
+}
+
+export function mountainCaveProximity(
+  x: number,
+  z: number
+): { dist: number; cave: MountainCaveSpec | null } {
+  let bestDist = Infinity;
+  let best: MountainCaveSpec | null = null;
+  for (let i = 0; i < MOUNTAIN_CAVES.length; i++) {
+    const c = MOUNTAIN_CAVES[i];
+    const d = Math.hypot(x - c.x, z - c.z);
+    if (d < bestDist) {
+      bestDist = d;
+      best = c;
+    }
+  }
+  return { dist: bestDist, cave: best };
+}
+
+function mountainHeightContributionAt(x: number, z: number): number {
+  // Zero mountain contribution south of palace stable boundary (z >= -156)
+  if (z >= -156 || x < -650 || x > 650) return 0;
+
+  const entryFade = smoothstep(-156, -196, z);
+  const sideFade = (1 - smoothstep(460, 620, Math.abs(x)));
+  const envMask = entryFade * sideFade;
+  if (envMask <= 0.0001) return 0;
+
+  let mtnH = 0;
+  for (let i = 0; i < _FLAT_LOBES.length; i++) {
+    const l = _FLAT_LOBES[i];
+    const dx = x - l.cx;
+    const dz = z - l.cz;
+    if (Math.abs(dx) > l.maxR || Math.abs(dz) > l.maxR) continue;
+    const ux = dx * l.cosR - dz * l.sinR;
+    const uz = dx * l.sinR + dz * l.cosR;
+    const q = ux * ux * l.invRxSq + uz * uz * l.invRzSq;
+    if (q >= 1.35) continue;
+    const t = 1 - q / 1.35;
+    const dome = l.height * Math.pow(t, l.sharpness);
+    const crag =
+      (Math.sin(ux * 0.055 + uz * 0.042) * 0.55 + Math.cos(ux * 0.095 - uz * 0.078) * 0.45) *
+      9.5 *
+      t;
+    const lobeVal = Math.max(0, dome + crag);
+    mtnH = smoothMax(mtnH, lobeVal, 20);
+  }
+
+  let h = mtnH * envMask;
+
+  // Blend structured climbable trails cleanly into mountain slopes
+  const tr = mountainTrailProximity(x, z);
+  if (tr.dist < tr.halfWidth + 8.5) {
+    const w = 1 - smoothstep(tr.halfWidth * 0.92, tr.halfWidth + 8.5, tr.dist);
+    h = h * (1 - w) + tr.trailY * w;
+  }
+
+  // Blend terraced mountain gardens flat onto their shoulder pads
+  for (let i = 0; i < MOUNTAIN_GARDENS.length; i++) {
+    const g = MOUNTAIN_GARDENS[i];
+    const d = Math.hypot(x - g.x, z - g.z);
+    if (d < g.radius + 9.0) {
+      const gw = 1 - smoothstep(g.radius * 0.85, g.radius + 9.0, d);
+      h = h * (1 - gw) + g.y * gw;
+    }
+  }
+
+  // Carve flat walkable cave entrance & interior cavern floor pads
+  for (let i = 0; i < MOUNTAIN_CAVES.length; i++) {
+    const c = MOUNTAIN_CAVES[i];
+    const d = Math.hypot(x - c.x, z - c.z);
+    if (d < c.radius + 6.5) {
+      const cw = 1 - smoothstep(c.radius * 0.8, c.radius + 6.5, d);
+      h = h * (1 - cw) + c.y * cw;
+    }
+  }
+
+  // Gently carve shallow rocky stream channels along flowing alpine brooks
+  const st = mountainStreamProximity(x, z);
+  if (st.dist < st.halfWidth + 2.8) {
+    const sw = 1 - smoothstep(st.halfWidth * 0.5, st.halfWidth + 2.8, st.dist);
+    const bedDepth = st.dist < st.halfWidth * 0.65 ? 0.65 : 0.3;
+    h = Math.max(0.02, h * (1 - sw * 0.72) + (st.streamY - bedDepth) * (sw * 0.72));
+  }
+
+  return h;
+}

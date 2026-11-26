@@ -6,6 +6,8 @@ import {
   CircleCollider,
   getPalaceStairHole,
   groundHeightAt,
+  MountainCaveSpec,
+  MountainGardenSpec,
   PALACE_STAIRS,
   PALACE_STORIES,
   RIVER_SURFACE_Y,
@@ -9439,12 +9441,12 @@ function createVajraGadaMace(
 export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
   const root = new THREE.Group();
 
-  // Natural lifelike sun-bronzed copper-wheat human skin with warm hemoglobin SSS & micro-pore detail
+  // Natural lifelike warm sun-bronzed human complexion with hemoglobin SSS & micro-pore detail
   const skinMat = createLifelikeHumanSkinMaterial(textures, {
-    colorHex: 0xc68559,
-    sheenHex: 0xf4b686,
-    sssRgb: [0.15, 0.052, 0.026],
-    roughness: 0.43,
+    colorHex: 0xd69e74,
+    sheenHex: 0xf4c7a3,
+    sssRgb: [0.16, 0.056, 0.028],
+    roughness: 0.41,
     normalScale: 0.14,
     cacheTag: 'hanuman',
   });
@@ -9465,6 +9467,15 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     sheen: 0.75,
     sheenColor: new THREE.Color(0xffd268),
   });
+  const dhotiGoldTrimMat = new THREE.MeshPhysicalMaterial({
+    map: textures.silkGold,
+    normalMap: textures.silkNormal,
+    color: 0xf4be3d,
+    roughness: 0.36,
+    metalness: 0.62,
+    sheen: 0.85,
+    sheenColor: new THREE.Color(0xffe794),
+  });
   const capeMat = new THREE.MeshPhysicalMaterial({
     map: textures.silkGold,
     normalMap: textures.silkNormal,
@@ -9479,9 +9490,9 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     roughnessMap: textures.armorRoughness,
     metalnessMap: textures.armorMetalness,
     color: 0xf2c249,
-    roughness: 0.26,
+    roughness: 0.24,
     metalness: 0.94,
-    clearcoat: 0.35,
+    clearcoat: 0.38,
   });
   const rubyMat = new THREE.MeshPhysicalMaterial({
     color: 0xe5243b,
@@ -9489,6 +9500,19 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     emissiveIntensity: 0.45,
     roughness: 0.1,
     clearcoat: 1.0,
+  });
+  const emeraldMat = new THREE.MeshPhysicalMaterial({
+    color: 0x16a34a,
+    emissive: 0x064e24,
+    emissiveIntensity: 0.4,
+    roughness: 0.12,
+    clearcoat: 1.0,
+  });
+  const pearlMat = new THREE.MeshPhysicalMaterial({
+    color: 0xfaf5eb,
+    roughness: 0.18,
+    metalness: 0.08,
+    clearcoat: 0.85,
   });
   const emberMat = new THREE.MeshStandardMaterial({
     color: 0xffaa2b,
@@ -9503,21 +9527,21 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     roughness: 0.52,
   });
   const hairMat = new THREE.MeshPhysicalMaterial({
-    color: 0x221611,
-    roughness: 0.46,
+    color: 0x1c1310,
+    roughness: 0.45,
     metalness: 0.04,
     sheen: 0.34,
     sheenRoughness: 0.48,
-    sheenColor: new THREE.Color(0x5c3c29),
+    sheenColor: new THREE.Color(0x523626),
   });
   hairMat.userData.lifelikeSkin = true;
   const lipMat = new THREE.MeshPhysicalMaterial({
-    color: 0x8f4e3d,
-    roughness: 0.41,
+    color: 0x9c5949,
+    roughness: 0.4,
     metalness: 0.0,
     ior: 1.4,
-    sheen: 0.2,
-    sheenColor: new THREE.Color(0xc47b66),
+    sheen: 0.22,
+    sheenColor: new THREE.Color(0xd28a77),
   });
   lipMat.userData.lifelikeSkin = true;
   const cavityDarkMat = new THREE.MeshStandardMaterial({
@@ -9566,42 +9590,58 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
   const contactShadow = createContactShadowMesh(textures.contactShadow, 0.92, 0.92);
   root.add(contactShadow);
 
-  // Heavy Muscular Warrior Legs
+  // Heavy Muscular Warrior Legs + Clip-Free Traditional Kachchha Dhoti Thigh Wraps
   const makeLeg = (xOffset: number, isLeft: boolean) => {
     const legPivot = new THREE.Group();
     legPivot.position.set(xOffset, 0.94, 0);
+    const sideSign = isLeft ? -1 : 1;
 
-    const hipBall = new THREE.Mesh(new THREE.SphereGeometry(0.105, 12, 10), dhotiMat);
+    // Seamless dhoti hip ball nested inside pelvic wrap
+    const hipBall = new THREE.Mesh(new THREE.SphereGeometry(0.104, 14, 12), dhotiMat);
     legPivot.add(hipBall);
 
-    const thighGeo = createRamAnatomicalLimbGeometry(
-      0.45,
+    // Properly Fitted Kachchha Dhoti Upper-Thigh Wrap (strictly +0.015m clearance outside skin, cuffed at y = -0.31)
+    const upperThighDhotiGeo = createRamAnatomicalLimbGeometry(
+      0.31,
       [
-        [0.0, 0.102, 0.108, 0, 0],
-        [0.35, 0.098, 0.106, 0, 0.005],
-        [0.72, 0.082, 0.088, 0, 0.004],
-        [1.0, 0.062, 0.066, 0, 0],
+        [0.0, 0.114, 0.12, 0, 0],
+        [0.45, 0.112, 0.118, sideSign * 0.003, 0.004],
+        [0.88, 0.102, 0.108, sideSign * 0.002, 0.003],
+        [1.0, 0.097, 0.103, 0, 0.002],
       ],
       14,
       18
     );
-    const upperThigh = new THREE.Mesh(
-      createRamAnatomicalLimbGeometry(
-        0.29,
-        [
-          [0.0, 0.106, 0.112, 0, 0],
-          [0.65, 0.098, 0.105, 0, 0.003],
-          [1.0, 0.0, 0.0, 0, 0],
-        ],
-        8,
-        12
-      ),
-      dhotiMat
-    );
+    const upperThigh = new THREE.Mesh(upperThighDhotiGeo, dhotiMat);
     upperThigh.castShadow = true;
+    upperThigh.receiveShadow = true;
     legPivot.add(upperThigh);
 
+    // Woven Golden Jari Hem Cuff Framing the Thigh Dhoti Opening (zero mid-thigh pinch clipping)
+    const thighCuff = new THREE.Mesh(
+      new THREE.TorusGeometry(0.097, 0.011, 8, 18),
+      dhotiGoldTrimMat
+    );
+    thighCuff.rotation.x = Math.PI / 2 + 0.08;
+    thighCuff.rotation.y = sideSign * 0.06;
+    thighCuff.scale.set(1.0, 1.06, 1.0);
+    thighCuff.position.set(0, -0.305, 0.002);
+    legPivot.add(thighCuff);
+
+    // Exposed Muscular Lower Thigh emerging cleanly from inside Dhoti Cuff (-0.28 -> -0.445)
+    const thighGeo = createRamAnatomicalLimbGeometry(
+      0.185,
+      [
+        [0.0, 0.076, 0.082, 0, 0.002],
+        [0.35, 0.082, 0.088, 0, 0.005],
+        [0.72, 0.074, 0.08, -sideSign * 0.003, 0.004],
+        [1.0, 0.06, 0.064, 0, 0],
+      ],
+      14,
+      18
+    );
     const thighMesh = new THREE.Mesh(thighGeo, skinMat);
+    thighMesh.position.y = -0.265;
     thighMesh.castShadow = true;
     thighMesh.receiveShadow = true;
     legPivot.add(thighMesh);
@@ -9610,9 +9650,14 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     kneePivot.position.set(0, -0.445, 0);
     legPivot.add(kneePivot);
 
-    const kneeCap = new THREE.Mesh(new THREE.SphereGeometry(0.062, 12, 10), goldMat);
-    kneeCap.scale.set(1.0, 0.9, 0.85);
-    kneeCap.position.set(0, 0, 0.025);
+    // Seamless Anatomical Patella Cap + Gold Knee Ornament Guard
+    const kneeSkinCap = new THREE.Mesh(new THREE.SphereGeometry(0.059, 14, 12), skinMat);
+    kneeSkinCap.scale.set(0.98, 1.02, 1.04);
+    kneePivot.add(kneeSkinCap);
+
+    const kneeCap = new THREE.Mesh(new THREE.SphereGeometry(0.052, 12, 10), goldMat);
+    kneeCap.scale.set(0.92, 0.78, 0.52);
+    kneeCap.position.set(0, 0.004, 0.044);
     kneePivot.add(kneeCap);
 
     const shinGeo = createRamAnatomicalLimbGeometry(
@@ -9623,8 +9668,8 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
         [0.7, 0.048, 0.056, 0, -0.006],
         [1.0, 0.038, 0.042, 0, 0],
       ],
-      14,
-      18
+      16,
+      20
     );
     const shin = new THREE.Mesh(shinGeo, skinMat);
     shin.position.y = 0.012;
@@ -9632,7 +9677,7 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     shin.receiveShadow = true;
     kneePivot.add(shin);
 
-    const anklet = new THREE.Mesh(new THREE.TorusGeometry(0.046, 0.01, 5, 10), goldMat);
+    const anklet = new THREE.Mesh(new THREE.TorusGeometry(0.046, 0.01, 6, 16), goldMat);
     anklet.rotation.x = Math.PI / 2;
     anklet.position.y = -0.38;
     kneePivot.add(anklet);
@@ -9667,118 +9712,225 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
   torso.position.y = 0.94;
   root.add(torso);
 
+  // Properly Draped Traditional Kachchha Dhoti Pelvis Wrap (completely encloses hips/pelvis with zero clipping)
   const waistWrap = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.148, 0.175, 0.25, 10),
+    new THREE.CylinderGeometry(0.16, 0.194, 0.28, 24),
     dhotiMat
   );
-  waistWrap.position.y = -0.02;
-  waistWrap.scale.set(1.12, 1.0, 0.84);
+  waistWrap.position.y = -0.025;
+  waistWrap.scale.set(1.18, 1.0, 0.88);
   waistWrap.castShadow = true;
+  waistWrap.receiveShadow = true;
   torso.add(waistWrap);
 
-  const centerPleatGeo = new THREE.CylinderGeometry(0.058, 0.075, 0.46, 7);
-  centerPleatGeo.translate(0, -0.22, 0.01);
+  // Lower Dhoti Golden Jari Border Hem & Rear Kachchha Drape Folds
+  const dhotiLowerRim = new THREE.Mesh(
+    new THREE.TorusGeometry(0.193, 0.011, 8, 26),
+    dhotiGoldTrimMat
+  );
+  dhotiLowerRim.rotation.x = Math.PI / 2;
+  dhotiLowerRim.scale.set(1.18, 0.88, 1.0);
+  dhotiLowerRim.position.y = -0.158;
+  torso.add(dhotiLowerRim);
+
+  [-1, 1].forEach((side) => {
+    const kachchhaSwag = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(side * 0.04, 0.065, 0.152),
+      new THREE.Vector3(side * 0.155, -0.015, 0.125),
+      new THREE.Vector3(side * 0.218, -0.04, 0.0),
+      new THREE.Vector3(side * 0.165, 0.015, -0.125),
+      new THREE.Vector3(side * 0.035, 0.055, -0.155),
+    ]);
+    const swagMesh = new THREE.Mesh(
+      new THREE.TubeGeometry(kachchhaSwag, 18, 0.018, 8, false),
+      dhotiMat
+    );
+    swagMesh.castShadow = true;
+    torso.add(swagMesh);
+
+    const swagBorderCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(side * 0.04, 0.05, 0.156),
+      new THREE.Vector3(side * 0.158, -0.03, 0.128),
+      new THREE.Vector3(side * 0.222, -0.055, 0.0),
+      new THREE.Vector3(side * 0.168, 0.0, -0.128),
+      new THREE.Vector3(side * 0.035, 0.042, -0.158),
+    ]);
+    const borderMesh = new THREE.Mesh(
+      new THREE.TubeGeometry(swagBorderCurve, 18, 0.0065, 6, false),
+      dhotiGoldTrimMat
+    );
+    torso.add(borderMesh);
+  });
+
+  // Multi-Fold Draped Front Dhoti Center Pleat Fan (strictly outside waistWrap at z = +0.162)
+  const pleatFanShape = new THREE.Shape();
+  pleatFanShape.moveTo(-0.062, 0.02);
+  pleatFanShape.lineTo(0.062, 0.02);
+  pleatFanShape.quadraticCurveTo(0.092, -0.22, 0.082, -0.45);
+  pleatFanShape.lineTo(0.03, -0.475);
+  pleatFanShape.lineTo(0, -0.455);
+  pleatFanShape.lineTo(-0.03, -0.475);
+  pleatFanShape.lineTo(-0.082, -0.45);
+  pleatFanShape.quadraticCurveTo(-0.092, -0.22, -0.062, 0.02);
+  const centerPleatGeo = new THREE.ExtrudeGeometry(pleatFanShape, {
+    depth: 0.022,
+    bevelEnabled: true,
+    bevelThickness: 0.006,
+    bevelSize: 0.006,
+    bevelSegments: 2,
+  });
   const centerPleat = new THREE.Mesh(centerPleatGeo, dhotiMat);
-  centerPleat.scale.set(1.18, 1.0, 0.36);
-  centerPleat.position.set(0, 0.02, 0.112);
-  centerPleat.rotation.x = -0.045;
+  centerPleat.position.set(0, 0.048, 0.164);
+  centerPleat.rotation.x = -0.095;
+  centerPleat.castShadow = true;
+  centerPleat.receiveShadow = true;
+  centerPleat.userData.customPleatScale = true;
+
+  // Vertical Woven Gold Jari Center Rib & Bottom Border on Front Dhoti Pleats
+  const pleatGoldRib = new THREE.Mesh(
+    new THREE.BoxGeometry(0.018, 0.45, 0.008),
+    dhotiGoldTrimMat
+  );
+  pleatGoldRib.position.set(0, -0.215, 0.026);
+  centerPleat.add(pleatGoldRib);
+
+  const pleatHemTrim = new THREE.Mesh(
+    new THREE.BoxGeometry(0.164, 0.022, 0.028),
+    dhotiGoldTrimMat
+  );
+  pleatHemTrim.position.set(0, -0.448, 0.012);
+  centerPleat.add(pleatHemTrim);
+
   torso.add(centerPleat);
 
-  // Heavy Golden Kamarbandh Belt + Sun Medallion
-  const belt = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.158, 0.105, 10), goldMat);
-  belt.position.y = 0.11;
-  belt.scale.set(1.12, 1.0, 0.85);
+  // Heavy Golden Kamarbandh Belt + Sun Medallion (snug around dhoti top)
+  const belt = new THREE.Mesh(new THREE.CylinderGeometry(0.162, 0.168, 0.102, 22), goldMat);
+  belt.position.y = 0.106;
+  belt.scale.set(1.18, 1.0, 0.88);
   torso.add(belt);
 
-  const beltRuby = new THREE.Mesh(new THREE.OctahedronGeometry(0.026, 0), rubyMat);
-  beltRuby.position.set(0, 0.11, 0.142);
+  [-0.048, 0.048].forEach((by) => {
+    const beltRim = new THREE.Mesh(new THREE.TorusGeometry(0.166, 0.008, 7, 24), goldMat);
+    beltRim.rotation.x = Math.PI / 2;
+    beltRim.scale.set(1.18, 0.88, 1.0);
+    beltRim.position.y = 0.106 + by;
+    torso.add(beltRim);
+  });
+
+  const beltBuckle = new THREE.Mesh(new THREE.OctahedronGeometry(0.036, 0), goldMat);
+  beltBuckle.scale.set(1.25, 1.0, 0.45);
+  beltBuckle.position.set(0, 0.106, 0.148);
+  torso.add(beltBuckle);
+
+  const beltRuby = new THREE.Mesh(new THREE.OctahedronGeometry(0.02, 0), rubyMat);
+  beltRuby.scale.set(1.0, 1.0, 0.55);
+  beltRuby.position.set(0, 0.106, 0.162);
   torso.add(beltRuby);
 
-  const torsoMesh = new THREE.Mesh(createHanumanTorsoGeometry(), skinMat);
+  const torsoMesh = new THREE.Mesh(createHanumanTorsoGeometry(22, 24), skinMat);
   torsoMesh.position.y = 0.095;
   torsoMesh.castShadow = true;
   torsoMesh.receiveShadow = true;
   torso.add(torsoMesh);
 
-  // Golden Cross-Chest Kavacha Harness + Central Surya/Vajra Medallion
+  // Golden Cross-Chest Kavacha Harness + Central Surya/Vajra Medallion (contoured outside chest/back)
   [-1, 1].forEach((s) => {
     const strapCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(s * 0.18, 0.61, 0.03),
-      new THREE.Vector3(s * 0.1, 0.52, 0.145),
-      new THREE.Vector3(0, 0.44, 0.165),
-      new THREE.Vector3(-s * 0.12, 0.3, 0.12),
-      new THREE.Vector3(-s * 0.14, 0.25, -0.09),
-      new THREE.Vector3(s * 0.02, 0.44, -0.145),
-      new THREE.Vector3(s * 0.16, 0.59, -0.05),
+      new THREE.Vector3(s * 0.185, 0.635, 0.01),
+      new THREE.Vector3(s * 0.105, 0.562, 0.184),
+      new THREE.Vector3(0, 0.485, 0.174),
+      new THREE.Vector3(-s * 0.14, 0.33, 0.136),
+      new THREE.Vector3(-s * 0.155, 0.27, -0.095),
+      new THREE.Vector3(s * 0.025, 0.45, -0.154),
+      new THREE.Vector3(s * 0.17, 0.618, -0.075),
     ]);
-    const strap = new THREE.Mesh(new THREE.TubeGeometry(strapCurve, 14, 0.015, 5, false), goldMat);
+    const strap = new THREE.Mesh(new THREE.TubeGeometry(strapCurve, 18, 0.013, 6, false), goldMat);
     strap.castShadow = true;
     torso.add(strap);
   });
 
-  const chestMedallion = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.052, 0.022, 8), goldMat);
+  const chestMedallion = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.052, 0.022, 12), goldMat);
   chestMedallion.rotation.x = Math.PI / 2;
-  chestMedallion.position.set(0, 0.44, 0.166);
+  chestMedallion.position.set(0, 0.485, 0.175);
   torso.add(chestMedallion);
 
-  const chestCore = new THREE.Mesh(new THREE.SphereGeometry(0.028, 7, 6), emberMat);
-  chestCore.position.set(0, 0.44, 0.175);
+  const chestCore = new THREE.Mesh(new THREE.SphereGeometry(0.028, 10, 8), emberMat);
+  chestCore.position.set(0, 0.485, 0.184);
   torso.add(chestCore);
 
-  // Heavy Golden Pauldrons / Shoulder Armor
-  [-1, 1].forEach((s) => {
-    const pauldron = new THREE.Mesh(
-      new THREE.SphereGeometry(0.095, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.58),
-      goldMat
-    );
-    pauldron.position.set(s * 0.235, 0.565, 0.0);
-    pauldron.rotation.z = -s * 0.42;
-    pauldron.castShadow = true;
-    torso.add(pauldron);
-
-    const pauldronGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.016, 0), rubyMat);
-    pauldronGem.position.set(s * 0.275, 0.57, 0.032);
-    torso.add(pauldronGem);
-  });
-
-  // Rudraksha & Golden Pearl Garland
+  // Rudraksha & Golden Pearl Garland (draped cleanly over upper chest without sinking into pectorals)
   const malaCurve = new THREE.CatmullRomCurve3([
-    new THREE.Vector3(-0.085, 0.63, 0.03),
-    new THREE.Vector3(-0.075, 0.55, 0.12),
-    new THREE.Vector3(0, 0.49, 0.16),
-    new THREE.Vector3(0.075, 0.55, 0.12),
-    new THREE.Vector3(0.085, 0.63, 0.03),
+    new THREE.Vector3(-0.088, 0.67, 0.018),
+    new THREE.Vector3(-0.082, 0.602, 0.156),
+    new THREE.Vector3(0, 0.548, 0.184),
+    new THREE.Vector3(0.082, 0.602, 0.156),
+    new THREE.Vector3(0.088, 0.67, 0.018),
   ]);
-  for (let b = 0; b < 15; b++) {
-    const pt = malaCurve.getPoint(b / 14);
+  for (let b = 0; b < 17; b++) {
+    const pt = malaCurve.getPoint(b / 16);
     const bead = new THREE.Mesh(
-      new THREE.SphereGeometry(b === 7 ? 0.018 : 0.011, 8, 8),
+      new THREE.SphereGeometry(b === 8 ? 0.017 : 0.0105, 8, 8),
       b % 2 === 0 ? goldMat : leatherMat
     );
     bead.position.copy(pt);
     torso.add(bead);
   }
 
-  // Flowing Heroic Crimson-Saffron Cape
+  // Rear Shoulder Fabric Clasp & Draped Back Mantle (shoulder fabric positioned strictly at the back)
+  const rearShoulderYokeCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(-0.175, 0.618, -0.088),
+    new THREE.Vector3(-0.1, 0.652, -0.142),
+    new THREE.Vector3(0, 0.662, -0.156),
+    new THREE.Vector3(0.1, 0.652, -0.142),
+    new THREE.Vector3(0.175, 0.618, -0.088),
+  ]);
+  const rearShoulderYoke = new THREE.Mesh(
+    new THREE.TubeGeometry(rearShoulderYokeCurve, 20, 0.022, 8, false),
+    capeMat
+  );
+  rearShoulderYoke.castShadow = true;
+  torso.add(rearShoulderYoke);
+
+  [-1, 1].forEach((s) => {
+    const claspDisc = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.024, 0.024, 0.012, 10),
+      goldMat
+    );
+    claspDisc.rotation.x = Math.PI / 2;
+    claspDisc.rotation.z = s * 0.28;
+    claspDisc.position.set(s * 0.148, 0.625, -0.132);
+    torso.add(claspDisc);
+  });
+
   const capePivot = new THREE.Group();
-  capePivot.position.set(0, 0.61, -0.14);
+  capePivot.position.set(0, 0.642, -0.16);
+  capePivot.userData.backMantle = true;
   const drapeShape = new THREE.Shape();
-  drapeShape.moveTo(-0.145, 0.01);
-  drapeShape.lineTo(0.145, 0.01);
-  drapeShape.quadraticCurveTo(0.21, -0.45, 0.16, -0.92);
-  drapeShape.lineTo(-0.16, -0.92);
-  drapeShape.quadraticCurveTo(-0.21, -0.45, -0.145, 0.01);
+  drapeShape.moveTo(-0.142, 0.01);
+  drapeShape.lineTo(0.142, 0.01);
+  drapeShape.quadraticCurveTo(0.195, -0.26, 0.148, -0.53);
+  drapeShape.quadraticCurveTo(0, -0.57, -0.148, -0.53);
+  drapeShape.quadraticCurveTo(-0.195, -0.26, -0.142, 0.01);
   const drapeGeo = new THREE.ExtrudeGeometry(drapeShape, {
-    depth: 0.016,
+    depth: 0.014,
     bevelEnabled: true,
     bevelThickness: 0.005,
     bevelSize: 0.005,
     bevelSegments: 2,
   });
+  drapeGeo.translate(0, 0, -0.014);
   const cape = new THREE.Mesh(drapeGeo, capeMat);
-  cape.rotation.x = 0.14;
+  cape.rotation.x = 0.18;
   cape.castShadow = true;
+  cape.receiveShadow = true;
   capePivot.add(cape);
+
+  const capeGoldHem = new THREE.Mesh(
+    new THREE.BoxGeometry(0.285, 0.018, 0.018),
+    dhotiGoldTrimMat
+  );
+  capeGoldHem.position.set(0, -0.528, -0.007);
+  cape.add(capeGoldHem);
   torso.add(capePivot);
 
   // Articulated 6-Segment Golden-Furred Vanara Tail (positioned cleanly behind his lower back -Z)
@@ -9789,7 +9941,7 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
   tailLengths.forEach((tLen, idx) => {
     const tp = new THREE.Group();
     if (idx === 0) {
-      tp.position.set(0, 0.04, -0.145);
+      tp.position.set(0, 0.04, -0.162);
     } else {
       tp.position.set(0, tailLengths[idx - 1], 0);
     }
@@ -9818,10 +9970,10 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     new THREE.TorusGeometry(0.46, 0.012, 6, 16),
     emberMat
   );
-  heroAuraMesh.position.set(0, 0.58, -0.16);
+  heroAuraMesh.position.set(0, 0.58, -0.185);
   torso.add(heroAuraMesh);
 
-  // Lifelike Noble Cinematic Head + Sculpted Human Features + Sindoor Tilak + Kireeta Mukut Crown
+  // Lifelike Noble Cinematic Head + Sculpted Human Features + Sindoor Tilak + Ornate Traditional Golden Crown
   const headGroup = new THREE.Group();
   headGroup.position.set(0, 0.805, 0.01);
   torso.add(headGroup);
@@ -9991,39 +10143,129 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
   );
 
   // Saffron-Vermilion Sindoor Tilak
-  const tilak = new THREE.Mesh(new THREE.BoxGeometry(0.011, 0.04, 0.011), sindoorMat);
-  tilak.position.set(0, 0.056, 0.099);
+  const tilak = new THREE.Mesh(new THREE.BoxGeometry(0.011, 0.036, 0.011), sindoorMat);
+  tilak.position.set(0, 0.05, 0.099);
   headGroup.add(tilak);
 
   // Natural Cranial Hair Cap & Flowing Warrior Locks behind Head
   const hairCap = new THREE.Mesh(
-    new THREE.SphereGeometry(0.092, 18, 14, 0, Math.PI * 2, 0, Math.PI * 0.54),
+    new THREE.SphereGeometry(0.094, 18, 14, 0, Math.PI * 2, 0, Math.PI * 0.54),
     hairMat
   );
-  hairCap.scale.set(0.94, 1.05, 0.96);
-  hairCap.position.set(0, 0.028, -0.022);
+  hairCap.scale.set(0.95, 1.03, 0.98);
+  hairCap.position.set(0, 0.026, -0.02);
   headGroup.add(hairCap);
 
-  const mane = new THREE.Mesh(new THREE.SphereGeometry(0.092, 14, 12), hairMat);
-  mane.scale.set(1.04, 1.16, 0.92);
-  mane.position.set(0, -0.002, -0.046);
+  const mane = new THREE.Mesh(new THREE.SphereGeometry(0.086, 16, 14), hairMat);
+  mane.scale.set(0.96, 1.08, 0.88);
+  mane.position.set(0, -0.004, -0.046);
   headGroup.add(mane);
 
-  // Ornate Golden Bajrangbali Ratna-Mukut Crown
-  const crownBase = new THREE.Mesh(new THREE.CylinderGeometry(0.098, 0.106, 0.072, 10), goldMat);
-  crownBase.position.set(0, 0.104, -0.006);
-  headGroup.add(crownBase);
+  // Ornate Traditional Golden Ratna-Mukut Crown (replaces conical hat with domed fluted temple Mukut)
+  const crownGroup = new THREE.Group();
+  crownGroup.position.set(0, 0.072, -0.008);
+  crownGroup.scale.set(0.95, 1.0, 1.06);
+  headGroup.add(crownGroup);
 
-  const crownSpire = new THREE.Mesh(new THREE.ConeGeometry(0.068, 0.22, 8), goldMat);
-  crownSpire.position.set(0, 0.245, -0.006);
-  crownSpire.castShadow = true;
-  headGroup.add(crownSpire);
+  // Sculpted Pearl-Studded Forehead Fillet Ring
+  const crownPearlRim = new THREE.Mesh(
+    new THREE.TorusGeometry(0.088, 0.0068, 8, 24),
+    pearlMat
+  );
+  crownPearlRim.rotation.x = Math.PI / 2;
+  crownGroup.add(crownPearlRim);
 
-  const crownRuby = new THREE.Mesh(new THREE.OctahedronGeometry(0.024, 0), rubyMat);
-  crownRuby.position.set(0, 0.115, 0.108);
-  headGroup.add(crownRuby);
+  // Jeweled Base Diadem Collar
+  const crownBaseBand = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.086, 0.092, 0.048, 20),
+    goldMat
+  );
+  crownBaseBand.position.y = 0.024;
+  crownBaseBand.castShadow = true;
+  crownGroup.add(crownBaseBand);
 
-  // Massive Muscular Arms with Keyura Armlets & Kankana Bracers
+  const crownMidBand = new THREE.Mesh(
+    new THREE.TorusGeometry(0.086, 0.0065, 8, 24),
+    goldMat
+  );
+  crownMidBand.rotation.x = Math.PI / 2;
+  crownMidBand.position.y = 0.048;
+  crownGroup.add(crownMidBand);
+
+  // Curved Lotus-Dome Temple Mukut Profile (LatheGeometry: stepped arched tiers -> scalloped dome -> Kalasha spire)
+  const mukutProfile = [
+    new THREE.Vector2(0.082, 0.048),
+    new THREE.Vector2(0.086, 0.068),
+    new THREE.Vector2(0.074, 0.082),
+    new THREE.Vector2(0.076, 0.104),
+    new THREE.Vector2(0.062, 0.122),
+    new THREE.Vector2(0.056, 0.142),
+    new THREE.Vector2(0.036, 0.158),
+    new THREE.Vector2(0.016, 0.168),
+    new THREE.Vector2(0.024, 0.18), // Amalaka neck & lotus bud base
+    new THREE.Vector2(0.018, 0.198),
+    new THREE.Vector2(0.005, 0.214),
+    new THREE.Vector2(0.0, 0.218),
+  ];
+  const mukutDomeGeo = new THREE.LatheGeometry(mukutProfile, 24);
+  mukutDomeGeo.computeVertexNormals();
+  const mukutDome = new THREE.Mesh(mukutDomeGeo, goldMat);
+  mukutDome.castShadow = true;
+  crownGroup.add(mukutDome);
+
+  // Scalloped Amalaka Jewel Ring & Top Pearl Kalasha Finial
+  const amalakaRing = new THREE.Mesh(
+    new THREE.TorusGeometry(0.025, 0.0075, 8, 16),
+    goldMat
+  );
+  amalakaRing.rotation.x = Math.PI / 2;
+  amalakaRing.position.y = 0.172;
+  crownGroup.add(amalakaRing);
+
+  const crownTopPearl = new THREE.Mesh(new THREE.SphereGeometry(0.012, 10, 8), pearlMat);
+  crownTopPearl.position.y = 0.222;
+  crownGroup.add(crownTopPearl);
+
+  // 10 Sculpted Gold Lotus-Petal Crest Arches & Alternating Ruby/Emerald Cabochons Around Crown
+  const crownPetalShape = new THREE.Shape();
+  crownPetalShape.moveTo(-0.015, 0);
+  crownPetalShape.quadraticCurveTo(-0.018, 0.032, 0, 0.052);
+  crownPetalShape.quadraticCurveTo(0.018, 0.032, 0.015, 0);
+  crownPetalShape.closePath();
+  const crownPetalGeo = new THREE.ExtrudeGeometry(crownPetalShape, {
+    depth: 0.006,
+    bevelEnabled: true,
+    bevelThickness: 0.002,
+    bevelSize: 0.002,
+    bevelSegments: 2,
+  });
+
+  for (let p = 0; p < 10; p++) {
+    const a = (p / 10) * Math.PI * 2;
+    const isFront = p === 0;
+    const petal = new THREE.Mesh(crownPetalGeo, goldMat);
+    petal.position.set(Math.sin(a) * 0.088, 0.044, Math.cos(a) * 0.088);
+    petal.rotation.y = a;
+    petal.rotation.x = -0.14;
+    if (isFront) petal.scale.set(1.38, 1.35, 1.25);
+    crownGroup.add(petal);
+
+    const gem = new THREE.Mesh(
+      new THREE.OctahedronGeometry(isFront ? 0.016 : 0.0095, 0),
+      isFront || p % 2 === 0 ? rubyMat : emeraldMat
+    );
+    gem.scale.set(1.0, 1.25, 0.65);
+    gem.position.set(Math.sin(a) * 0.093, isFront ? 0.036 : 0.025, Math.cos(a) * 0.093);
+    gem.rotation.y = a;
+    crownGroup.add(gem);
+  }
+
+  // Ornate Frontal Prabhavali Halo Bezel Framing Central Crown Ruby
+  const frontHaloBezel = new THREE.Mesh(new THREE.TorusGeometry(0.025, 0.0055, 8, 18), goldMat);
+  frontHaloBezel.position.set(0, 0.036, 0.091);
+  crownGroup.add(frontHaloBezel);
+
+  // Massive Muscular Arms with Articulated Deltoid Shoulder Armor, Keyura Armlets & Kankana Bracers
   const makeArm = (xOffset: number, isLeft: boolean) => {
     const armPivot = new THREE.Group();
     armPivot.position.set(xOffset, 0.545, 0);
@@ -10034,6 +10276,21 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     shoulderCap.castShadow = true;
     armPivot.add(shoulderCap);
 
+    // Sculpted Golden Skanda-Kavacha Pauldron attached to armPivot so it articulates smoothly without torso clipping
+    const pauldron = new THREE.Mesh(
+      new THREE.SphereGeometry(0.076, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.52),
+      goldMat
+    );
+    pauldron.scale.set(1.02, 0.92, 1.05);
+    pauldron.position.set(sideSign * 0.006, 0.012, 0);
+    pauldron.rotation.z = -sideSign * 0.45;
+    pauldron.castShadow = true;
+    armPivot.add(pauldron);
+
+    const pauldronGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.014, 0), rubyMat);
+    pauldronGem.position.set(sideSign * 0.044, 0.046, 0.028);
+    armPivot.add(pauldronGem);
+
     const upperArmGeo = createRamAnatomicalLimbGeometry(
       0.305,
       [
@@ -10042,15 +10299,15 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
         [0.58, 0.064, 0.072, 0, 0.005], // bulging bicep peak
         [1.0, 0.044, 0.048, 0, 0],
       ],
-      12,
-      16
+      14,
+      18
     );
     const upperArm = new THREE.Mesh(upperArmGeo, skinMat);
     upperArm.castShadow = true;
     upperArm.receiveShadow = true;
     armPivot.add(upperArm);
 
-    const keyura = new THREE.Mesh(new THREE.TorusGeometry(0.066, 0.011, 5, 10), goldMat);
+    const keyura = new THREE.Mesh(new THREE.TorusGeometry(0.068, 0.011, 6, 16), goldMat);
     keyura.rotation.x = Math.PI / 2;
     keyura.position.y = -0.12;
     armPivot.add(keyura);
@@ -10059,7 +10316,7 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     elbowPivot.position.set(0, -0.295, 0);
     armPivot.add(elbowPivot);
 
-    const elbowCap = new THREE.Mesh(new THREE.SphereGeometry(0.046, 12, 10), skinMat);
+    const elbowCap = new THREE.Mesh(new THREE.SphereGeometry(0.046, 14, 12), skinMat);
     elbowPivot.add(elbowCap);
 
     const forearmGeo = createRamAnatomicalLimbGeometry(
@@ -10070,8 +10327,8 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
         [0.85, 0.036, 0.039, 0, 0],
         [1.0, 0.034, 0.036, 0, 0],
       ],
-      12,
-      16
+      14,
+      18
     );
     const forearm = new THREE.Mesh(forearmGeo, skinMat);
     forearm.position.y = 0.01;
@@ -10079,7 +10336,7 @@ export function createHanumanModel(textures: ProceduralTextures): CharacterRig {
     forearm.receiveShadow = true;
     elbowPivot.add(forearm);
 
-    const bracer = new THREE.Mesh(new THREE.CylinderGeometry(0.044, 0.038, 0.082, 8), goldMat);
+    const bracer = new THREE.Mesh(new THREE.CylinderGeometry(0.044, 0.038, 0.082, 12), goldMat);
     bracer.position.y = -0.22;
     elbowPivot.add(bracer);
 
@@ -10592,6 +10849,895 @@ export function createFloatingCelestialIsland(
   group.add(wfRibbon);
 
   return { group, waterfallUniforms };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACCESSIBLE MOUNTAIN CAVES, TERRACED GARDENS & WILDLIFE ECOSYSTEM RIGS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export interface MountainCaveBuilt {
+  group: THREE.Group;
+  colliders: BoxCollider[];
+}
+
+/**
+ * Open walk-in Mountain Cavern with hollow arched mouth (+Z), granite stone chamber,
+ * glowing crystal formations, stalactites, sacred oil brazier, and perimeter wall colliders.
+ */
+export function createMountainCaveModel(
+  textures: ProceduralTextures,
+  spec: MountainCaveSpec
+): MountainCaveBuilt {
+  const group = new THREE.Group();
+  group.position.set(spec.x, spec.y, spec.z);
+  group.rotation.y = spec.yaw;
+
+  const colliders: BoxCollider[] = [];
+
+  const caveRockMat = new THREE.MeshStandardMaterial({
+    map: textures.rockCliff,
+    normalMap: textures.rockCliffNormal,
+    color: 0x5c5752,
+    roughness: 0.92,
+    metalness: 0.04,
+    flatShading: true,
+  });
+  const floorStoneMat = new THREE.MeshStandardMaterial({
+    map: textures.sandstone,
+    normalMap: textures.sandstoneNormal,
+    color: 0x6f675d,
+    roughness: 0.88,
+    flatShading: true,
+  });
+  const crystalMat = new THREE.MeshPhysicalMaterial({
+    color: spec.crystalHex,
+    emissive: spec.crystalHex,
+    emissiveIntensity: 1.35,
+    roughness: 0.18,
+    metalness: 0.15,
+    flatShading: true,
+  });
+  const flameMat = new THREE.MeshStandardMaterial({
+    color: 0xffb347,
+    emissive: 0xff6b1a,
+    emissiveIntensity: 2.1,
+    roughness: 0.35,
+  });
+
+  // Walkable flat cavern floor
+  const floor = new THREE.Mesh(new THREE.CylinderGeometry(7.2, 7.6, 0.3, 12), floorStoneMat);
+  floor.position.set(0, -0.1, -1.2);
+  floor.receiveShadow = true;
+  group.add(floor);
+
+  // Left & Right Boulder Walls forming hollow walk-in cavern
+  const wallBoulders: Array<[number, number, number, number, number, number]> = [
+    // Left wall boulders
+    [-5.0, 2.2, 2.8, 2.2, 2.8, 2.6],
+    [-5.4, 2.5, 0.2, 2.4, 3.2, 2.8],
+    [-5.2, 2.6, -2.8, 2.5, 3.3, 2.9],
+    [-4.3, 2.7, -5.4, 2.6, 3.4, 2.8],
+    // Right wall boulders
+    [5.0, 2.2, 2.8, 2.2, 2.8, 2.6],
+    [5.4, 2.5, 0.2, 2.4, 3.2, 2.8],
+    [5.2, 2.6, -2.8, 2.5, 3.3, 2.9],
+    [4.3, 2.7, -5.4, 2.6, 3.4, 2.8],
+    // Back cavern enclosure
+    [0.0, 2.8, -6.9, 4.4, 3.5, 2.7],
+    [-2.2, 2.5, -6.5, 2.6, 3.2, 2.4],
+    [2.2, 2.5, -6.5, 2.6, 3.2, 2.4],
+    // Vaulted cavern roof & front mouth arch lintel (leaving y=0..4.9 clear to walk right inside!)
+    [-2.8, 5.4, 2.6, 2.6, 1.8, 2.2],
+    [2.8, 5.4, 2.6, 2.6, 1.8, 2.2],
+    [0.0, 6.2, 2.5, 3.8, 1.7, 2.4],
+    [0.0, 6.4, -0.5, 5.2, 2.1, 3.4],
+    [0.0, 6.1, -3.8, 5.0, 2.2, 3.2],
+    [0.0, 5.4, -6.2, 4.6, 2.4, 2.6],
+  ];
+
+  wallBoulders.forEach(([bx, by, bz, sx, sy, sz], i) => {
+    const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(1.0, 1), caveRockMat);
+    rock.position.set(bx, by, bz);
+    rock.scale.set(sx, sy, sz);
+    rock.rotation.set(i * 0.41, i * 0.77, i * 0.23);
+    rock.castShadow = false;
+    rock.receiveShadow = true;
+    group.add(rock);
+  });
+
+  // Hanging ceiling stalactites
+  const stalactites: Array<[number, number, number, number]> = [
+    [-1.8, 4.8, 0.8, 1.2],
+    [1.6, 4.9, 0.2, 1.1],
+    [-0.4, 5.0, -2.4, 1.3],
+    [2.1, 4.7, -3.2, 1.0],
+    [-2.2, 4.7, -3.5, 1.15],
+  ];
+  stalactites.forEach(([sx, sy, sz, len]) => {
+    const st = new THREE.Mesh(new THREE.ConeGeometry(0.24, len, 5), caveRockMat);
+    st.rotation.x = Math.PI;
+    st.position.set(sx, sy - len * 0.4, sz);
+    group.add(st);
+  });
+
+  // Glowing Crystal Clusters along interior cavern walls
+  const crystalSites: Array<[number, number, number, number]> = [
+    [-3.6, 0.4, -1.6, 0.9],
+    [3.6, 0.4, -2.2, 1.05],
+    [-2.4, 0.5, -4.8, 1.2],
+    [2.5, 0.5, -4.7, 1.1],
+    [0.2, 0.6, -5.2, 1.35],
+  ];
+  crystalSites.forEach(([cx, cy, cz, sc], idx) => {
+    for (let k = 0; k < 3; k++) {
+      const spire = new THREE.Mesh(
+        new THREE.ConeGeometry(0.22 * sc, (0.95 + k * 0.35) * sc, 5),
+        crystalMat
+      );
+      spire.position.set(cx + (k - 1) * 0.28, cy + 0.45 * sc, cz + (k % 2) * 0.22);
+      spire.rotation.set((k - 1) * 0.24, idx + k * 0.8, (k - 1) * 0.22);
+      group.add(spire);
+    }
+  });
+
+  // Sacred Stone Altar & Brazier Flame near back center
+  const altar = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.92, 0.85, 8), floorStoneMat);
+  altar.position.set(0, 0.42, -3.9);
+  group.add(altar);
+  const flame = new THREE.Mesh(new THREE.OctahedronGeometry(0.26, 0), flameMat);
+  flame.position.set(0, 1.05, -3.9);
+  group.add(flame);
+
+  // Register rotated world-space perimeter wall colliders so mouth (+Z) & interior chamber remain wide open
+  const cosY = Math.cos(spec.yaw);
+  const sinY = Math.sin(spec.yaw);
+  const addLocalBoxCollider = (lx: number, lz: number, halfW: number, halfD: number, height: number) => {
+    colliders.push({
+      x: spec.x + lx * cosY + lz * sinY,
+      z: spec.z - lx * sinY + lz * cosY,
+      halfW,
+      halfD,
+      height,
+      rotY: spec.yaw,
+      baseY: spec.y,
+    });
+  };
+  addLocalBoxCollider(-4.7, -1.2, 1.35, 5.2, 5.5); // Left cavern rock wall
+  addLocalBoxCollider(4.7, -1.2, 1.35, 5.2, 5.5); // Right cavern rock wall
+  addLocalBoxCollider(0, -6.3, 4.4, 1.4, 5.5); // Back cavern rock wall
+  addLocalBoxCollider(0, -3.9, 0.85, 0.85, 1.15); // Interior stone altar
+
+  return { group, colliders };
+}
+
+export interface MountainGardenBuilt {
+  group: THREE.Group;
+  colliders: CircleCollider[];
+}
+
+/**
+ * Terraced Himalayan Plateau Garden with carved sandstone curb, sacred lotus pool,
+ * benches, glowing lantern pillars, and vivid floral beds.
+ */
+export function createMountainGardenModel(
+  textures: ProceduralTextures,
+  spec: MountainGardenSpec
+): MountainGardenBuilt {
+  const group = new THREE.Group();
+  group.position.set(spec.x, spec.y, spec.z);
+  const colliders: CircleCollider[] = [];
+
+  const stoneMat = new THREE.MeshStandardMaterial({
+    map: textures.sandstone,
+    normalMap: textures.sandstoneNormal,
+    color: 0xd9b88c,
+    roughness: 0.78,
+    flatShading: true,
+  });
+  const poolWaterMat = new THREE.MeshPhysicalMaterial({
+    map: textures.water,
+    color: 0x3ec5d6,
+    roughness: 0.14,
+    metalness: 0.08,
+    clearcoat: 0.75,
+  });
+  const lanternGlowMat = new THREE.MeshStandardMaterial({
+    color: 0xffd770,
+    emissive: 0xff9b28,
+    emissiveIntensity: 1.9,
+    roughness: 0.3,
+  });
+  const leafPadMat = new THREE.MeshStandardMaterial({
+    color: 0x2c7838,
+    roughness: 0.75,
+    flatShading: true,
+  });
+
+  // Central Sacred Lotus Pool (radius 3.4m)
+  const poolRim = new THREE.Mesh(new THREE.TorusGeometry(3.4, 0.34, 6, 16), stoneMat);
+  poolRim.rotation.x = Math.PI / 2;
+  poolRim.position.y = 0.24;
+  group.add(poolRim);
+
+  const poolWater = new THREE.Mesh(new THREE.CylinderGeometry(3.25, 3.25, 0.18, 16), poolWaterMat);
+  poolWater.position.y = 0.22;
+  group.add(poolWater);
+
+  // Floating Lotus Blossoms & Pads
+  const lotusColors = [0xff82b2, 0xffd1e3, 0xfff5d6, 0xff9466];
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 + 0.3;
+    const r = 1.1 + (i % 2) * 1.1;
+    const pad = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.04, 7), leafPadMat);
+    pad.position.set(Math.cos(a) * r, 0.32, Math.sin(a) * r);
+    group.add(pad);
+
+    const bloomMat = new THREE.MeshStandardMaterial({
+      color: lotusColors[i % lotusColors.length],
+      emissive: lotusColors[i % lotusColors.length],
+      emissiveIntensity: 0.25,
+      roughness: 0.5,
+      flatShading: true,
+    });
+    const lotus = new THREE.Mesh(new THREE.DodecahedronGeometry(0.22, 0), bloomMat);
+    lotus.position.set(Math.cos(a) * r, 0.44, Math.sin(a) * r);
+    group.add(lotus);
+  }
+
+  colliders.push({
+    x: spec.x,
+    z: spec.z,
+    radius: 3.55,
+    height: 1.0,
+    baseY: spec.y,
+  });
+
+  // 4 Carved Sandstone Lantern Pillars & Benches + Colorful Flower Beds (leaving 4 wide entry paths!)
+  const flowerColors = [0xff8c1a, 0xff4f7b, 0xffd23f, 0xd462ff];
+  for (let q = 0; q < 4; q++) {
+    const ang = (q / 4) * Math.PI * 2 + Math.PI * 0.25;
+    const lanternR = Math.min(spec.radius - 3.5, 8.8);
+    const lx = Math.cos(ang) * lanternR;
+    const lz = Math.sin(ang) * lanternR;
+
+    const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.34, 2.3, 6), stoneMat);
+    pillar.position.set(lx, 1.15, lz);
+    group.add(pillar);
+
+    const lamp = new THREE.Mesh(new THREE.OctahedronGeometry(0.28, 0), lanternGlowMat);
+    lamp.position.set(lx, 2.5, lz);
+    group.add(lamp);
+
+    const cap = new THREE.Mesh(new THREE.ConeGeometry(0.46, 0.42, 6), stoneMat);
+    cap.position.set(lx, 2.86, lz);
+    group.add(cap);
+
+    colliders.push({
+      x: spec.x + lx,
+      z: spec.z + lz,
+      radius: 0.45,
+      height: 3.1,
+      baseY: spec.y,
+    });
+
+    // Curved sandstone garden bench facing lotus pool
+    const benchR = 5.4;
+    const bx = Math.cos(ang) * benchR;
+    const bz = Math.sin(ang) * benchR;
+    const bench = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.45, 0.72), stoneMat);
+    bench.position.set(bx, 0.28, bz);
+    bench.rotation.y = -ang + Math.PI * 0.5;
+    group.add(bench);
+
+    // Floral shrub mound beside each lantern
+    const fColor = flowerColors[q % flowerColors.length];
+    const bloomMat = new THREE.MeshStandardMaterial({
+      color: fColor,
+      roughness: 0.68,
+      flatShading: true,
+    });
+    for (let f = -1; f <= 1; f++) {
+      const fAng = ang + f * 0.19;
+      const fRad = lanternR + 1.45;
+      const bush = new THREE.Mesh(new THREE.DodecahedronGeometry(0.75, 0), leafPadMat);
+      bush.scale.set(1.15, 0.72, 1.15);
+      bush.position.set(Math.cos(fAng) * fRad, 0.34, Math.sin(fAng) * fRad);
+      group.add(bush);
+
+      const blossom = new THREE.Mesh(new THREE.DodecahedronGeometry(0.45, 0), bloomMat);
+      blossom.position.set(Math.cos(fAng) * fRad, 0.74, Math.sin(fAng) * fRad);
+      group.add(blossom);
+    }
+  }
+
+  return { group, colliders };
+}
+
+export type WildlifeSpecies = 'TIGER' | 'LION' | 'ELEPHANT' | 'DEER' | 'LEOPARD';
+
+export interface WildlifeRig {
+  group: THREE.Group;
+  species: WildlifeSpecies;
+  legs: THREE.Group[]; // [FL, FR, BL, BR]
+  headPivot: THREE.Group;
+  tailPivot: THREE.Group;
+  earPivots?: THREE.Group[];
+  trunkPivot?: THREE.Group;
+}
+
+function buildQuadrupedLegs(
+  parent: THREE.Group,
+  coatMat: THREE.Material,
+  pawMat: THREE.Material,
+  positions: Array<[number, number, number]>,
+  topR: number,
+  botR: number,
+  legLen: number
+): THREE.Group[] {
+  const legs: THREE.Group[] = [];
+  for (let i = 0; i < positions.length; i++) {
+    const [lx, ly, lz] = positions[i];
+    const pivot = new THREE.Group();
+    pivot.position.set(lx, ly, lz);
+
+    const upper = new THREE.Mesh(
+      new THREE.CylinderGeometry(topR, botR, legLen, 7),
+      coatMat
+    );
+    upper.position.y = -legLen * 0.5;
+    upper.castShadow = true;
+    pivot.add(upper);
+
+    const paw = new THREE.Mesh(
+      new THREE.BoxGeometry(botR * 2.1, botR * 1.1, botR * 2.4),
+      pawMat
+    );
+    paw.position.set(0, -legLen + botR * 0.45, botR * 0.28);
+    pivot.add(paw);
+
+    parent.add(pivot);
+    legs.push(pivot);
+  }
+  return legs;
+}
+
+/**
+ * Stylized low-poly Bengal Tiger with burnt-amber fur, cream belly, dark stripes & curved ringed tail.
+ */
+export function createTigerModel(textures?: ProceduralTextures): WildlifeRig {
+  const root = new THREE.Group();
+  const furMat = new THREE.MeshStandardMaterial({
+    map: textures?.bark ?? null,
+    color: 0xd97320,
+    roughness: 0.78,
+    flatShading: true,
+  });
+  const creamMat = new THREE.MeshStandardMaterial({
+    color: 0xf4e8d0,
+    roughness: 0.82,
+    flatShading: true,
+  });
+  const stripeMat = new THREE.MeshStandardMaterial({
+    color: 0x1a1514,
+    roughness: 0.85,
+    flatShading: true,
+  });
+  const eyeMat = new THREE.MeshStandardMaterial({
+    color: 0xffc436,
+    emissive: 0x664008,
+    emissiveIntensity: 0.5,
+    roughness: 0.2,
+  });
+
+  // Body & chest
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.88, 6, 10), furMat);
+  body.rotation.x = Math.PI / 2;
+  body.position.set(0, 0.76, 0);
+  body.castShadow = true;
+  root.add(body);
+
+  const belly = new THREE.Mesh(new THREE.CapsuleGeometry(0.24, 0.78, 5, 8), creamMat);
+  belly.rotation.x = Math.PI / 2;
+  belly.position.set(0, 0.62, 0.02);
+  root.add(belly);
+
+  // Dark tiger stripes along torso & shoulders
+  [-0.36, -0.18, 0.0, 0.18, 0.36].forEach((sz, idx) => {
+    const band = new THREE.Mesh(
+      new THREE.TorusGeometry(0.315 - Math.abs(idx - 2) * 0.01, 0.028, 5, 10, Math.PI * 1.35),
+      stripeMat
+    );
+    band.position.set(0, 0.77, sz);
+    band.rotation.z = -Math.PI * 0.17;
+    band.rotation.y = Math.PI * 0.5;
+    // Align arch across spine
+    band.rotation.set(0, 0, -Math.PI * 0.18);
+    root.add(band);
+  });
+
+  // Legs resting cleanly at y=0
+  const legs = buildQuadrupedLegs(
+    root,
+    furMat,
+    creamMat,
+    [
+      [-0.19, 0.58, 0.42],
+      [0.19, 0.58, 0.42],
+      [-0.19, 0.58, -0.42],
+      [0.19, 0.58, -0.42],
+    ],
+    0.105,
+    0.072,
+    0.58
+  );
+
+  // Head + muzzle + ears + eyes
+  const headPivot = new THREE.Group();
+  headPivot.position.set(0, 0.92, 0.62);
+  const cranium = new THREE.Mesh(new THREE.DodecahedronGeometry(0.25, 1), furMat);
+  cranium.scale.set(1.04, 0.92, 1.06);
+  cranium.position.set(0, 0.05, 0.12);
+  cranium.castShadow = true;
+  headPivot.add(cranium);
+
+  const muzzle = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.16, 0.22), creamMat);
+  muzzle.position.set(0, -0.02, 0.3);
+  headPivot.add(muzzle);
+
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.05, 0.05), stripeMat);
+  nose.position.set(0, 0.03, 0.41);
+  headPivot.add(nose);
+
+  [-1, 1].forEach((side) => {
+    const ear = new THREE.Mesh(new THREE.ConeGeometry(0.065, 0.11, 5), stripeMat);
+    ear.position.set(side * 0.16, 0.24, 0.05);
+    headPivot.add(ear);
+
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.032, 6, 6), eyeMat);
+    eye.position.set(side * 0.11, 0.09, 0.31);
+    headPivot.add(eye);
+
+    const ruff = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.14, 0.14), creamMat);
+    ruff.position.set(side * 0.21, 0.0, 0.14);
+    headPivot.add(ruff);
+  });
+  root.add(headPivot);
+
+  // Curved ringed tail
+  const tailPivot = new THREE.Group();
+  tailPivot.position.set(0, 0.84, -0.58);
+  const tailGeo = new THREE.CylinderGeometry(0.032, 0.048, 0.72, 6);
+  tailGeo.rotateX(-0.95);
+  tailGeo.translate(0, -0.22, -0.26);
+  const tailMesh = new THREE.Mesh(tailGeo, furMat);
+  tailPivot.add(tailMesh);
+  const tailTip = new THREE.Mesh(new THREE.SphereGeometry(0.048, 6, 6), stripeMat);
+  tailTip.position.set(0, -0.4, -0.52);
+  tailPivot.add(tailTip);
+  root.add(tailPivot);
+
+  root.scale.setScalar(1.08);
+  return { group: root, species: 'TIGER', legs, headPivot, tailPivot };
+}
+
+/**
+ * Stylized low-poly Asiatic Lion with tawny-ochre body, voluminous dark chestnut mane, and tufted tail.
+ */
+export function createLionModel(textures?: ProceduralTextures): WildlifeRig {
+  const root = new THREE.Group();
+  const tawnyMat = new THREE.MeshStandardMaterial({
+    map: textures?.bark ?? null,
+    color: 0xd49a42,
+    roughness: 0.78,
+    flatShading: true,
+  });
+  const maneMat = new THREE.MeshStandardMaterial({
+    color: 0x583115,
+    roughness: 0.88,
+    flatShading: true,
+  });
+  const bellyMat = new THREE.MeshStandardMaterial({
+    color: 0xf0dfbd,
+    roughness: 0.82,
+    flatShading: true,
+  });
+  const eyeMat = new THREE.MeshStandardMaterial({
+    color: 0xffc948,
+    emissive: 0x5c3806,
+    emissiveIntensity: 0.45,
+    roughness: 0.2,
+  });
+
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.84, 6, 10), tawnyMat);
+  body.rotation.x = Math.PI / 2;
+  body.position.set(0, 0.78, 0);
+  body.castShadow = true;
+  root.add(body);
+
+  const belly = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.72, 5, 8), bellyMat);
+  belly.rotation.x = Math.PI / 2;
+  belly.position.set(0, 0.63, 0.02);
+  root.add(belly);
+
+  const legs = buildQuadrupedLegs(
+    root,
+    tawnyMat,
+    bellyMat,
+    [
+      [-0.19, 0.6, 0.42],
+      [0.19, 0.6, 0.42],
+      [-0.19, 0.6, -0.4],
+      [0.19, 0.6, -0.4],
+    ],
+    0.108,
+    0.074,
+    0.6
+  );
+
+  // Head with grand layered mane
+  const headPivot = new THREE.Group();
+  headPivot.position.set(0, 0.94, 0.56);
+
+  const maneRuff = new THREE.Mesh(new THREE.DodecahedronGeometry(0.38, 1), maneMat);
+  maneRuff.scale.set(1.08, 1.12, 0.95);
+  maneRuff.position.set(0, 0.04, 0.04);
+  maneRuff.castShadow = true;
+  headPivot.add(maneRuff);
+
+  const chestMane = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.48, 7), maneMat);
+  chestMane.rotation.x = Math.PI * 0.92;
+  chestMane.position.set(0, -0.22, 0.04);
+  headPivot.add(chestMane);
+
+  const face = new THREE.Mesh(new THREE.DodecahedronGeometry(0.22, 1), tawnyMat);
+  face.position.set(0, 0.06, 0.22);
+  headPivot.add(face);
+
+  const muzzle = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.15, 0.2), bellyMat);
+  muzzle.position.set(0, -0.01, 0.36);
+  headPivot.add(muzzle);
+
+  [-1, 1].forEach((side) => {
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 5), tawnyMat);
+    ear.position.set(side * 0.16, 0.24, 0.16);
+    headPivot.add(ear);
+
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.032, 6, 6), eyeMat);
+    eye.position.set(side * 0.095, 0.1, 0.37);
+    headPivot.add(eye);
+  });
+  root.add(headPivot);
+
+  const tailPivot = new THREE.Group();
+  tailPivot.position.set(0, 0.85, -0.56);
+  const tailGeo = new THREE.CylinderGeometry(0.026, 0.038, 0.68, 6);
+  tailGeo.rotateX(-0.98);
+  tailGeo.translate(0, -0.2, -0.24);
+  tailPivot.add(new THREE.Mesh(tailGeo, tawnyMat));
+  const tuft = new THREE.Mesh(new THREE.DodecahedronGeometry(0.075, 0), maneMat);
+  tuft.position.set(0, -0.38, -0.49);
+  tailPivot.add(tuft);
+  root.add(tailPivot);
+
+  root.scale.setScalar(1.12);
+  return { group: root, species: 'LION', legs, headPivot, tailPivot };
+}
+
+/**
+ * Natural wild mountain Elephant with slate-grey hide, ivory tusks, flapping ears & animated trunk (no saddle).
+ */
+export function createWildElephantModel(textures?: ProceduralTextures): WildlifeRig {
+  const root = new THREE.Group();
+  const hideMat = new THREE.MeshStandardMaterial({
+    map: textures?.bark ?? null,
+    color: 0x5c5d66,
+    roughness: 0.86,
+    flatShading: true,
+  });
+  const tuskMat = new THREE.MeshPhysicalMaterial({
+    color: 0xf4ecd6,
+    roughness: 0.32,
+    clearcoat: 0.25,
+    flatShading: true,
+  });
+
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.95, 1.45, 7, 12), hideMat);
+  body.rotation.x = Math.PI / 2;
+  body.position.set(0, 1.85, 0);
+  body.castShadow = true;
+  root.add(body);
+
+  const legs = buildQuadrupedLegs(
+    root,
+    hideMat,
+    hideMat,
+    [
+      [-0.54, 1.38, 0.7],
+      [0.54, 1.38, 0.7],
+      [-0.54, 1.38, -0.7],
+      [0.54, 1.38, -0.7],
+    ],
+    0.25,
+    0.22,
+    1.38
+  );
+
+  const headPivot = new THREE.Group();
+  headPivot.position.set(0, 2.18, 1.32);
+
+  const cranium = new THREE.Mesh(new THREE.DodecahedronGeometry(0.74, 1), hideMat);
+  cranium.castShadow = true;
+  headPivot.add(cranium);
+
+  const earPivots: THREE.Group[] = [];
+  [-1, 1].forEach((side) => {
+    const earPivot = new THREE.Group();
+    earPivot.position.set(side * 0.68, 0.08, -0.15);
+    const ear = new THREE.Mesh(new THREE.DodecahedronGeometry(0.56, 0), hideMat);
+    ear.scale.set(0.18, 1.1, 0.88);
+    ear.position.set(side * 0.18, -0.08, -0.12);
+    earPivot.add(ear);
+    headPivot.add(earPivot);
+    earPivots.push(earPivot);
+
+    const tuskCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(side * 0.28, -0.28, 0.45),
+      new THREE.Vector3(side * 0.34, -0.46, 0.92),
+      new THREE.Vector3(side * 0.32, -0.26, 1.34),
+    ]);
+    const tusk = new THREE.Mesh(new THREE.TubeGeometry(tuskCurve, 10, 0.068, 6, false), tuskMat);
+    headPivot.add(tusk);
+  });
+
+  const trunkPivot = new THREE.Group();
+  trunkPivot.position.set(0, -0.18, 0.62);
+  const trunkCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, -0.48, 0.26),
+    new THREE.Vector3(0, -0.98, 0.15),
+    new THREE.Vector3(0, -1.12, 0.38),
+  ]);
+  const trunk = new THREE.Mesh(new THREE.TubeGeometry(trunkCurve, 12, 0.13, 7, false), hideMat);
+  trunkPivot.add(trunk);
+  headPivot.add(trunkPivot);
+  root.add(headPivot);
+
+  const tailPivot = new THREE.Group();
+  tailPivot.position.set(0, 1.9, -1.35);
+  const tailMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.06, 0.68, 5), hideMat);
+  tailMesh.rotation.x = 0.25;
+  tailMesh.position.set(0, -0.32, -0.08);
+  tailPivot.add(tailMesh);
+  root.add(tailPivot);
+
+  return { group: root, species: 'ELEPHANT', legs, headPivot, tailPivot, earPivots, trunkPivot };
+}
+
+/**
+ * Graceful Spotted Mountain Deer (Chital) with slender neck, fawn spots, white tail & optional stag antlers.
+ */
+export function createDeerModel(hasAntlers = true): WildlifeRig {
+  const root = new THREE.Group();
+  const coatMat = new THREE.MeshStandardMaterial({
+    color: 0xb9743d,
+    roughness: 0.76,
+    flatShading: true,
+  });
+  const whiteMat = new THREE.MeshStandardMaterial({
+    color: 0xf7f1e3,
+    roughness: 0.82,
+    flatShading: true,
+  });
+  const hoofMat = new THREE.MeshStandardMaterial({
+    color: 0x261d17,
+    roughness: 0.85,
+  });
+  const antlerMat = new THREE.MeshStandardMaterial({
+    color: 0xe9dec8,
+    roughness: 0.6,
+    flatShading: true,
+  });
+
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.72, 6, 8), coatMat);
+  body.rotation.x = Math.PI / 2;
+  body.position.set(0, 0.84, 0);
+  body.castShadow = true;
+  root.add(body);
+
+  const belly = new THREE.Mesh(new THREE.CapsuleGeometry(0.15, 0.62, 5, 7), whiteMat);
+  belly.rotation.x = Math.PI / 2;
+  belly.position.set(0, 0.72, 0.02);
+  root.add(belly);
+
+  // Signature pale fawn spots along back & flanks
+  const spotOffsets: Array<[number, number, number]> = [
+    [-0.17, 0.96, 0.2],
+    [0.17, 0.95, 0.14],
+    [-0.19, 0.92, -0.06],
+    [0.18, 0.94, -0.14],
+    [-0.15, 0.95, -0.26],
+    [0.16, 0.93, 0.3],
+  ];
+  spotOffsets.forEach(([sx, sy, sz]) => {
+    const spot = new THREE.Mesh(new THREE.SphereGeometry(0.036, 5, 5), whiteMat);
+    spot.scale.set(0.5, 0.8, 1.1);
+    spot.position.set(sx, sy, sz);
+    root.add(spot);
+  });
+
+  const legs = buildQuadrupedLegs(
+    root,
+    coatMat,
+    hoofMat,
+    [
+      [-0.13, 0.68, 0.33],
+      [0.13, 0.68, 0.33],
+      [-0.13, 0.68, -0.33],
+      [0.13, 0.68, -0.33],
+    ],
+    0.056,
+    0.036,
+    0.68
+  );
+
+  const headPivot = new THREE.Group();
+  headPivot.position.set(0, 0.96, 0.42);
+
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.125, 0.48, 7), coatMat);
+  neck.position.set(0, 0.2, 0.08);
+  neck.rotation.x = 0.34;
+  headPivot.add(neck);
+
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.16, 0.28), coatMat);
+  head.position.set(0, 0.44, 0.22);
+  headPivot.add(head);
+
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.05, 0.05), hoofMat);
+  nose.position.set(0, 0.41, 0.37);
+  headPivot.add(nose);
+
+  [-1, 1].forEach((side) => {
+    const ear = new THREE.Mesh(new THREE.ConeGeometry(0.052, 0.14, 5), coatMat);
+    ear.position.set(side * 0.11, 0.54, 0.12);
+    ear.rotation.z = -side * 0.55;
+    headPivot.add(ear);
+
+    if (hasAntlers) {
+      const mainBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.022, 0.36, 5), antlerMat);
+      mainBeam.position.set(side * 0.09, 0.66, 0.14);
+      mainBeam.rotation.z = -side * 0.32;
+      mainBeam.rotation.x = -0.18;
+      headPivot.add(mainBeam);
+
+      const tine = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.015, 0.18, 5), antlerMat);
+      tine.position.set(side * 0.13, 0.72, 0.21);
+      tine.rotation.x = 0.45;
+      headPivot.add(tine);
+    }
+  });
+  root.add(headPivot);
+
+  const tailPivot = new THREE.Group();
+  tailPivot.position.set(0, 0.92, -0.46);
+  const tailMesh = new THREE.Mesh(new THREE.ConeGeometry(0.065, 0.22, 5), whiteMat);
+  tailMesh.rotation.x = -Math.PI * 0.72;
+  tailMesh.position.set(0, 0.04, -0.08);
+  tailPivot.add(tailMesh);
+  root.add(tailPivot);
+
+  return { group: root, species: 'DEER', legs, headPivot, tailPivot };
+}
+
+/**
+ * Lithe Mountain Leopard with tawny-gold coat, rosette spots across flanks/back, and long balancing tail.
+ */
+export function createLeopardModel(textures?: ProceduralTextures): WildlifeRig {
+  const root = new THREE.Group();
+  const goldMat = new THREE.MeshStandardMaterial({
+    map: textures?.bark ?? null,
+    color: 0xd9a845,
+    roughness: 0.76,
+    flatShading: true,
+  });
+  const bellyMat = new THREE.MeshStandardMaterial({
+    color: 0xf5ebd4,
+    roughness: 0.82,
+    flatShading: true,
+  });
+  const spotMat = new THREE.MeshStandardMaterial({
+    color: 0x261d17,
+    roughness: 0.86,
+    flatShading: true,
+  });
+  const eyeMat = new THREE.MeshStandardMaterial({
+    color: 0x7df56c,
+    emissive: 0x2a6614,
+    emissiveIntensity: 0.45,
+    roughness: 0.2,
+  });
+
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.82, 6, 10), goldMat);
+  body.rotation.x = Math.PI / 2;
+  body.position.set(0, 0.7, 0);
+  body.castShadow = true;
+  root.add(body);
+
+  const belly = new THREE.Mesh(new THREE.CapsuleGeometry(0.19, 0.72, 5, 8), bellyMat);
+  belly.rotation.x = Math.PI / 2;
+  belly.position.set(0, 0.58, 0.02);
+  root.add(belly);
+
+  // Rosette spot patches along back & flanks
+  const rosetteSpots: Array<[number, number, number]> = [
+    [-0.22, 0.78, 0.3],
+    [0.22, 0.78, 0.26],
+    [-0.24, 0.74, 0.08],
+    [0.24, 0.74, 0.04],
+    [-0.23, 0.77, -0.14],
+    [0.23, 0.77, -0.18],
+    [-0.2, 0.75, -0.34],
+    [0.2, 0.75, -0.36],
+    [0, 0.94, 0.18],
+    [0, 0.94, -0.05],
+    [0, 0.93, -0.28],
+  ];
+  rosetteSpots.forEach(([rx, ry, rz]) => {
+    const sp = new THREE.Mesh(new THREE.SphereGeometry(0.05, 5, 5), spotMat);
+    sp.scale.set(0.65, 0.75, 1.0);
+    sp.position.set(rx, ry, rz);
+    root.add(sp);
+  });
+
+  const legs = buildQuadrupedLegs(
+    root,
+    goldMat,
+    bellyMat,
+    [
+      [-0.16, 0.54, 0.38],
+      [0.16, 0.54, 0.38],
+      [-0.16, 0.54, -0.38],
+      [0.16, 0.54, -0.38],
+    ],
+    0.088,
+    0.058,
+    0.54
+  );
+
+  const headPivot = new THREE.Group();
+  headPivot.position.set(0, 0.82, 0.56);
+  const head = new THREE.Mesh(new THREE.DodecahedronGeometry(0.21, 1), goldMat);
+  head.scale.set(1.0, 0.92, 1.05);
+  head.position.set(0, 0.04, 0.1);
+  head.castShadow = true;
+  headPivot.add(head);
+
+  const muzzle = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.13, 0.18), bellyMat);
+  muzzle.position.set(0, -0.02, 0.26);
+  headPivot.add(muzzle);
+
+  [-1, 1].forEach((side) => {
+    const ear = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.095, 5), goldMat);
+    ear.position.set(side * 0.14, 0.2, 0.04);
+    headPivot.add(ear);
+
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.028, 6, 6), eyeMat);
+    eye.position.set(side * 0.09, 0.08, 0.26);
+    headPivot.add(eye);
+  });
+  root.add(headPivot);
+
+  const tailPivot = new THREE.Group();
+  tailPivot.position.set(0, 0.76, -0.52);
+  const tailGeo = new THREE.CylinderGeometry(0.026, 0.038, 0.82, 6);
+  tailGeo.rotateX(-0.92);
+  tailGeo.translate(0, -0.24, -0.3);
+  tailPivot.add(new THREE.Mesh(tailGeo, goldMat));
+  const tailTip = new THREE.Mesh(new THREE.SphereGeometry(0.04, 6, 6), spotMat);
+  tailTip.position.set(0, -0.45, -0.6);
+  tailPivot.add(tailTip);
+  root.add(tailPivot);
+
+  return { group: root, species: 'LEOPARD', legs, headPivot, tailPivot };
 }
 
 

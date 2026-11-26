@@ -16,13 +16,13 @@ export interface SecondPersonCameraOutput {
   target: THREE.Vector3;
 }
 
-const _frontDir = new THREE.Vector3();
-const _rightDir = new THREE.Vector3();
+const _backDir = new THREE.Vector3();
 const _rayStep = new THREE.Vector3();
 
 /**
- * Computes a clean medium shot ("second-person" front-facing perspective)
- * framing the active hero from the waist/belt line up to just above the crown.
+ * Computes a pulled-back rear third-person ("second-person" toggle) perspective
+ * positioned behind and slightly above the character, locked to always show
+ * the character's back from a distance so they appear small within the landscape.
  */
 export function computeSecondPersonWaistPose(
   input: SecondPersonCameraInput,
@@ -31,51 +31,43 @@ export function computeSecondPersonWaistPose(
   clampPosition?: (pos: THREE.Vector3, nearPad: number) => void
 ): void {
   const s = Math.max(0.85, input.heroScale);
-  const clampedPitch = THREE.MathUtils.clamp(input.pitch, -0.38, 0.32);
 
-  // Rig local +Z rotated around Y by facingYaw points directly out from the character's chest/face
-  const heroicAngle = input.facingYaw + 0.14;
-  _frontDir.set(Math.sin(heroicAngle), 0, Math.cos(heroicAngle)).normalize();
-  _rightDir.set(_frontDir.z, 0, -_frontDir.x);
+  // Character rig local +Z rotated around Y by facingYaw points directly forward;
+  // therefore behind the character's back is the exact inverse (-sin, 0, -cos).
+  _backDir.set(-Math.sin(input.facingYaw), 0, -Math.cos(input.facingYaw)).normalize();
 
-  // Target chest/collar height so bottom of 62-deg frustum lands cleanly at the waist belt (torso.y)
-  const targetHeightOffset = 0.69 * s;
+  // Look target slightly above mid-back so the entire hero stands clearly centered-low
   outTarget.set(
     input.torsoWorldPos.x,
-    input.torsoWorldPos.y + targetHeightOffset,
+    input.torsoWorldPos.y + 0.52 * s,
     input.torsoWorldPos.z
   );
 
-  // Derive horizontal distance from vertical FOV so framing remains waist-to-crown across aspect ratios
-  const halfFovRad = THREE.MathUtils.degToRad(Math.max(35, Math.min(85, input.fovDeg)) * 0.5);
-  const tanHalf = Math.tan(halfFovRad);
-  const baseHalfSpan = 0.691 * s; // waist (~0.00*s) to crown headroom (~1.38*s)
-  const baseDist = baseHalfSpan / Math.max(0.35, tanHalf);
-
-  const cosPitch = Math.cos(clampedPitch);
-  const sinPitch = Math.sin(clampedPitch);
-  const vertOffset = -sinPitch * baseDist * 0.65 + 0.05 * s;
+  // Pulled-back distance (~21m) & elevated above (~7.6m) with locked orientation
+  // so the character consistently appears small from behind.
+  const fovScale = Math.max(
+    0.85,
+    Math.min(1.25, 0.6008 / Math.max(0.32, Math.tan(THREE.MathUtils.degToRad(input.fovDeg * 0.5))))
+  );
+  const backDist = 21.0 * s * fovScale;
+  const heightAbove = 7.6 * s;
 
   outPos
     .copy(outTarget)
-    .addScaledVector(_frontDir, baseDist * cosPitch)
-    .addScaledVector(_rightDir, 0.06 * s);
-  outPos.y = outTarget.y + vertOffset;
+    .addScaledVector(_backDir, backDist);
+  outPos.y = outTarget.y + heightAbove;
 
   if (clampPosition) {
-    // Sub-step along target -> desired camera ray so walls/pillars don't trap camera behind geometry
-    for (let step = 1; step <= 4; step++) {
-      const t = step * 0.25;
+    // Sub-step along target -> desired camera ray only breaking on horizontal wall/pillar obstruction
+    // (pure upward terrain slope clearance behind the hero should elevate the camera, not shorten distance).
+    for (let step = 1; step <= 8; step++) {
+      const t = step / 8;
       _rayStep.lerpVectors(outTarget, outPos, t);
       const beforeX = _rayStep.x;
-      const beforeY = _rayStep.y;
       const beforeZ = _rayStep.z;
       clampPosition(_rayStep, input.nearPad);
-      const pushed =
-        Math.abs(_rayStep.x - beforeX) > 0.015 ||
-        Math.abs(_rayStep.y - beforeY) > 0.015 ||
-        Math.abs(_rayStep.z - beforeZ) > 0.015;
-      if (pushed) {
+      const horizPushed = Math.hypot(_rayStep.x - beforeX, _rayStep.z - beforeZ);
+      if (horizPushed > 0.08) {
         outPos.copy(_rayStep);
         break;
       }
