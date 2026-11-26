@@ -300,9 +300,9 @@ export class DynamicAssetScaler {
       if (std.isMeshPhysicalMaterial) {
         std.clearcoat = 0;
         std.sheen = 0;
-        std.anisotropy = 0;
+        std.anisotropy = orig.anisotropy;
       }
-      std.envMapIntensity = Math.max(0.35, orig.envMapIntensity * 0.72);
+      std.envMapIntensity = Math.max(0.45, orig.envMapIntensity * 0.85);
     } else {
       // FAST: strip tangent-space normal/roughness/metalness/ao/bump lookups & physical lobes
       std.normalMap = null;
@@ -482,12 +482,13 @@ export class DynamicAssetScaler {
 
       if (snap.vramRatio >= 1.02) {
         this.emergencyVramRelief = true;
-        this.emergencyPixelScale = Math.min(this.emergencyPixelScale, 0.72);
+        // Never downscale render resolution below full native clarity
+        this.emergencyPixelScale = 1.0;
         if (!this.emergencyEnvStripped) {
           this.emergencyEnvStripped = true;
           params.onEmergencyEnvironmentStrip();
         }
-        if (snap.vramRatio >= 1.12) {
+        if (snap.vramRatio >= 1.15) {
           this.emergencyShadowsDisabled = true;
         }
       }

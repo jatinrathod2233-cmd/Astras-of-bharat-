@@ -83,6 +83,7 @@ export type NpcRole =
 export type MountKind = 'NONE' | 'RATHA' | 'HORSE' | 'ELEPHANT';
 
 export type PlayableHeroId = 'RAM' | 'HANUMAN' | 'LAKSHMAN' | 'BHARAT';
+export type CameraPerspective = 'FIRST_PERSON' | 'SECOND_PERSON';
 
 export type QualityTier = 'HIGH' | 'MEDIUM' | 'LOW';
 export type QualityMode = 'AUTO' | QualityTier;
@@ -104,6 +105,7 @@ export interface HardwareBenchmarkSummary {
 
 export interface WorldHudSnapshot {
   activeHeroId: PlayableHeroId;
+  cameraPerspective: CameraPerspective;
   isFlying: boolean;
   heroAbilityCooldown: number;
   heroAbilityMaxCooldown: number;

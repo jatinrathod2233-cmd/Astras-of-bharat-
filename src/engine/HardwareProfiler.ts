@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { HardwareBenchmarkSummary, QualityTier } from '../types/world';
 
 export type ShaderComplexityLevel = 'FULL' | 'BALANCED' | 'FAST';
-export type TextureResolutionTier = 1024 | 512 | 256 | 128;
+export type TextureResolutionTier = 2048 | 1024 | 512 | 256 | 128;
 export type MemoryPressureLevel = 'NONE' | 'ELEVATED' | 'CRITICAL';
 
 export type GpuClass =
@@ -289,11 +289,13 @@ export function probeHardwareEnvelope(): HardwareEnvelope {
   }
 
   const recommendedTextureSize: TextureResolutionTier =
-    initialTier === 'HIGH' && vramBudgetMb >= 190
+    initialTier === 'HIGH' && vramBudgetMb >= 380 && !isMobile && maxTextureSize >= 4096
+      ? 2048
+      : initialTier === 'HIGH' && vramBudgetMb >= 180
       ? 1024
       : initialTier === 'LOW' || vramBudgetMb <= 96
-      ? 256
-      : 512;
+      ? 512
+      : 1024;
 
   const recommendedShaderLevel: ShaderComplexityLevel =
     initialTier === 'HIGH'
@@ -711,13 +713,16 @@ export function applyBenchmarkToEnvelope(
   env.maxSafeTier = report.lockedTier;
   env.initialTier = report.lockedTier;
   if (report.lockedTier === 'LOW') {
-    env.recommendedTextureSize = env.vramBudgetMb <= 72 ? 128 : 256;
+    env.recommendedTextureSize = env.vramBudgetMb <= 72 ? 256 : 512;
     env.recommendedShaderLevel = 'FAST';
   } else if (report.lockedTier === 'MEDIUM') {
-    env.recommendedTextureSize = env.vramBudgetMb < 105 ? 256 : 512;
+    env.recommendedTextureSize = env.vramBudgetMb < 105 ? 512 : 1024;
     env.recommendedShaderLevel = 'BALANCED';
   } else {
-    env.recommendedTextureSize = env.vramBudgetMb >= 190 ? 1024 : 512;
+    env.recommendedTextureSize =
+      env.vramBudgetMb >= 380 && !env.isMobile && env.maxTextureSize >= 4096
+        ? 2048
+        : 1024;
     env.recommendedShaderLevel = 'FULL';
   }
 }
@@ -755,10 +760,10 @@ export async function runLaunchHardwareBenchmark(
     ramRes.ramScore
   );
 
-  // Strictly lock maximum rendering fidelity tier to sustain locked frame rate
+  // Strictly lock maximum rendering fidelity tier while keeping full native 1.0 resolution
   let lockedTier: QualityTier;
-  let targetFps = 60;
-  let recommendedResScale = 1.0;
+  const targetFps = env.isSoftwareGl ? 30 : 60;
+  const recommendedResScale = 1.0;
 
   if (
     env.isSoftwareGl ||
@@ -767,12 +772,6 @@ export async function runLaunchHardwareBenchmark(
     (env.memoryGb !== null && env.memoryGb <= 2)
   ) {
     lockedTier = 'LOW';
-    targetFps = env.isSoftwareGl ? 30 : 60;
-    recommendedResScale = env.isSoftwareGl
-      ? 1.0
-      : compositeScore < 34
-      ? 0.7
-      : 0.85;
   } else if (
     bottleneckScore < 52 ||
     compositeScore < 70 ||
@@ -780,14 +779,8 @@ export async function runLaunchHardwareBenchmark(
     env.gpuClass === 'LOW_MOBILE'
   ) {
     lockedTier = 'MEDIUM';
-    targetFps = 60;
-    recommendedResScale =
-      compositeScore >= 62 && gpuRes.gpuScore >= 58 ? 1.0 : 0.85;
   } else {
     lockedTier = 'HIGH';
-    targetFps = 60;
-    recommendedResScale =
-      compositeScore >= 82 && gpuRes.gpuScore >= 78 ? 1.0 : 0.9;
   }
 
   // Respect hard hardware ceiling derived from capability probe

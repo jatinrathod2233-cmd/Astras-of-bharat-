@@ -127,6 +127,7 @@ const INITIAL_HUD: WorldHudSnapshot = {
   isFlying: false,
   heroAbilityCooldown: 0,
   heroAbilityMaxCooldown: HERO_PROFILES.RAM.specialCooldownSec,
+  cameraPerspective: 'FIRST_PERSON',
 };
 
 const SHOW_FPS_STORAGE_KEY = 'astras_show_fps_v1';
@@ -520,6 +521,8 @@ export default function App() {
         engine.input.heroSpecialPressed = true;
       } else if (e.code === 'KeyU' && !e.repeat) {
         engine.input.flyTogglePressed = true;
+      } else if (e.code === 'KeyK' && !e.repeat) {
+        engine.toggleCameraPerspective();
       }
     };
 
@@ -685,6 +688,9 @@ export default function App() {
   const handleToggleFly = useCallback(() => {
     if (engineRef.current) engineRef.current.input.flyTogglePressed = true;
   }, []);
+  const handleToggleCameraPerspective = useCallback(() => {
+    engineRef.current?.toggleCameraPerspective();
+  }, []);
   const handleSelectHero = useCallback((heroId: PlayableHeroId) => {
     const normalized = normalizeHeroId(heroId);
     engineRef.current?.setActiveHero(normalized);
@@ -787,6 +793,7 @@ export default function App() {
             onSwitchSeat={handleSwitchSeat}
             onToggleStealth={handleToggleStealth}
             onToggleAutoDrive={handleToggleAutoDrive}
+            onToggleCameraPerspective={handleToggleCameraPerspective}
           />
         )}
 

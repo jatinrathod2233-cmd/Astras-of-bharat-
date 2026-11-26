@@ -8,6 +8,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   AstraId,
+  CameraPerspective,
   DemonVariant,
   InputState,
   MountKind,
@@ -19,6 +20,10 @@ import {
   RadarBlip,
   WorldHudSnapshot,
 } from '../types/world';
+import {
+  CameraPerspectiveController,
+  computeSecondPersonWaistPose,
+} from './cameraSystem';
 import { HERO_PROFILES, normalizeHeroId, PLAYABLE_HERO_ORDER } from './heroProfiles';
 import { soundEngine } from '../utils/audio';
 import {
@@ -208,33 +213,12 @@ const PostSmoothAndUnderwaterShader = {
 
       vec4 texel = texture2D(tDiffuse, uv);
 
-      // Lightweight 5-tap subpixel bilinear neighborhood smoothing to soften harsh edges & cut sharpness to ~35%-40%
-      vec2 d = uTexelSize * 0.78;
-      vec3 cNW = texture2D(tDiffuse, clamp(uv + vec2(-d.x, -d.y), 0.001, 0.999)).rgb;
-      vec3 cNE = texture2D(tDiffuse, clamp(uv + vec2( d.x, -d.y), 0.001, 0.999)).rgb;
-      vec3 cSW = texture2D(tDiffuse, clamp(uv + vec2(-d.x,  d.y), 0.001, 0.999)).rgb;
-      vec3 cSE = texture2D(tDiffuse, clamp(uv + vec2( d.x,  d.y), 0.001, 0.999)).rgb;
-      vec3 smoothCol = (texel.rgb * 1.15 + cNW + cNE + cSW + cSE) * (1.0 / 5.15);
-
-      // Perceptual luminance contrast across neighbors to attenuate harsh jagged edges without haloing
-      vec3 lumaW = vec3(0.299, 0.587, 0.114);
-      float lC  = dot(sqrt(max(texel.rgb, 0.0)), lumaW);
-      float lNW = dot(sqrt(max(cNW, 0.0)), lumaW);
-      float lNE = dot(sqrt(max(cNE, 0.0)), lumaW);
-      float lSW = dot(sqrt(max(cSW, 0.0)), lumaW);
-      float lSE = dot(sqrt(max(cSE, 0.0)), lumaW);
-      float lMin = min(lC, min(min(lNW, lNE), min(lSW, lSE)));
-      float lMax = max(lC, max(max(lNW, lNE), max(lSW, lSE)));
-      float edgeStrength = clamp((lMax - lMin) * 2.6, 0.0, 1.0);
-
-      // Retain ~35%-40% sharpness & edge enhancement intensity while smoothing high-contrast edge artifacts
-      float detailKeep = mix(uSharpness, uSharpness * uEdgeEnhance, edgeStrength * uSmoothBlend);
-      vec3 finalCol = mix(smoothCol, texel.rgb, clamp(detailKeep, 0.0, 1.0));
-
+      // 1:1 native pixel pass-through above water (zero blur, zero softening)
       if (uSubmerged <= 0.001) {
-        gl_FragColor = vec4(finalCol, texel.a);
+        gl_FragColor = texel;
         return;
       }
+      vec3 finalCol = texel.rgb;
 
       vec3 absorption = mix(vec3(1.0), vec3(0.30, 0.68, 0.96), uSubmerged);
       vec3 tinted = finalCol * absorption;
@@ -277,8 +261,8 @@ const _shadowUp = new THREE.Vector3();
 const _worldUp = new THREE.Vector3(0, 1, 0);
 const _dummy = new THREE.Object3D();
 
-// Strict first-person near clipping plane & anatomical collision solver scratches (Zero GC)
-const FP_CAMERA_NEAR = 0.06;
+// Strict near clipping plane for razor-sharp 24-bit depth buffer across 4.5 km render distance
+const FP_CAMERA_NEAR = 0.12;
 const FP_HEAD_NECK_RADIUS = 0.22;
 const _fpFwd = new THREE.Vector3();
 const _fpRight = new THREE.Vector3();
@@ -294,24 +278,24 @@ const _fpArmL1 = new THREE.Vector3();
 const _fpArmR0 = new THREE.Vector3();
 const _fpArmR1 = new THREE.Vector3();
 const _fpSpineTop = new THREE.Vector3();
-const _colMist = new THREE.Color(0xc8c2b9);
+const _colMist = new THREE.Color(0xa8d8f8);
 const _colSunset = new THREE.Color(0xc96c42);
 const _colNightMist = new THREE.Color(0x040813);
 const _colAsh = new THREE.Color(0x21171b);
 const _colUnderDay = new THREE.Color(0x0b4b75);
 const _colUnderNight = new THREE.Color(0x04192e);
 const _tmpUnderCol = new THREE.Color();
-const _colHemiDay = new THREE.Color(0xffe7bd);
+const _colHemiDay = new THREE.Color(0xfff0d4);
 const _colHemiNight = new THREE.Color(0x162447);
 const _colHemiAsh = new THREE.Color(0x7a5460);
 const _colGroundNight = new THREE.Color(0x05070c);
-const _colKeyDay = new THREE.Color(0xfff1d6);
+const _colKeyDay = new THREE.Color(0xfff5e0);
 const _colKeySunset = new THREE.Color(0xff9b52);
 const _colKeyMoon = new THREE.Color(0xa6c4ff);
 const _colKeyAsh = new THREE.Color(0xff9666);
-const _colSkyHDay = new THREE.Color(0xc8c2b9);
-const _colSkyMDay = new THREE.Color(0x9ea8b8);
-const _colSkyZDay = new THREE.Color(0x4b6891);
+const _colSkyHDay = new THREE.Color(0xa8d8f8);
+const _colSkyMDay = new THREE.Color(0x5aa4e8);
+const _colSkyZDay = new THREE.Color(0x1e56a6);
 const _colSkyHDusk = new THREE.Color(0xe67c44);
 const _colSkyMDusk = new THREE.Color(0x5b3b68);
 const _colSkyZDusk = new THREE.Color(0x161c3d);
@@ -1079,6 +1063,14 @@ export class RamayanaWorldEngine {
   private heroAbilityMaxCooldown = HERO_PROFILES.RAM.specialCooldownSec;
   private flyWindAccum = 0;
   private floatingIslands: THREE.Group[] = [];
+  private floatingIslandDefs: Array<{
+    x: number;
+    z: number;
+    baseY: number;
+    scale: number;
+    phase: number;
+    group: THREE.Group;
+  }> = [];
   private floatingIslandWfUniforms: Array<{ uTime: { value: number } }> = [];
   private composer: EffectComposer | null = null;
   private composerRenderTarget: THREE.WebGLRenderTarget | null = null;
@@ -1155,13 +1147,17 @@ export class RamayanaWorldEngine {
   private ramLandingImpact = 0;
   private ramPose: CharacterPoseState = createDefaultPoseState(0.93);
 
-  // Strict First-Person Camera State (Locked to player's eyes; no perspective switching or zoom distance)
+  // Standalone Camera Perspective System (toggles between First-Person & Waist-Up Second-Person)
+  private readonly cameraSystem = new CameraPerspectiveController();
   private camYaw = 0;
   private camPitch = 0.02;
   private cameraManualHold = 0;
   private camChariotLockTimer = 0;
   private camSmoothPos = new THREE.Vector3(0, 1.72, 14);
   private camSmoothLook = new THREE.Vector3(0, 1.72, 2);
+  private readonly _spCamPos = new THREE.Vector3();
+  private readonly _spCamTarget = new THREE.Vector3();
+  private readonly _spTorsoWorld = new THREE.Vector3();
   private swimCamTorsoPitch = 0.25;
 
   // Mission & Divine Astras Quest state
@@ -1288,11 +1284,11 @@ export class RamayanaWorldEngine {
     container.appendChild(this.renderer.domElement);
     this.attachContextListeners(this.renderer.domElement);
 
-    // Scene, linear distance fog & matched horizon sky dome
+    // Scene with zero atmospheric fog & crystal-clear azure sky dome
     this.scene = new THREE.Scene();
-    const mistColor = new THREE.Color(0xc8c2b9);
-    this.scene.background = mistColor;
-    this.scene.fog = new THREE.Fog(0xc8c2b9, 44, 340 * initProfile.fogFarScale);
+    const clearSkyColor = new THREE.Color(0xa8d8f8);
+    this.scene.background = clearSkyColor;
+    this.scene.fog = null;
 
     const initW = Math.max(1, container.clientWidth || window.innerWidth || 844);
     const initH = Math.max(1, container.clientHeight || window.innerHeight || 390);
@@ -1313,7 +1309,7 @@ export class RamayanaWorldEngine {
     this.giLightProbe = new THREE.LightProbe(new THREE.SphericalHarmonics3(), 0.72);
     this.scene.add(this.giLightProbe);
 
-    this.hemiLight = new THREE.HemisphereLight(0xffe7bd, 0x4b4032, 0.78);
+    this.hemiLight = new THREE.HemisphereLight(0xffe7bd, 0x5c4f3d, 1.18);
     this.scene.add(this.hemiLight);
 
     this.bounceLight = new THREE.DirectionalLight(0xdcb47d, 0.42);
@@ -1322,7 +1318,7 @@ export class RamayanaWorldEngine {
     this.scene.add(this.bounceLight);
     this.scene.add(this.bounceLight.target);
 
-    this.keyLight = new THREE.DirectionalLight(0xfff1d6, 2.25);
+    this.keyLight = new THREE.DirectionalLight(0xfff5e0, 2.25);
     this.keyLight.position.set(48, 72, 36);
     this.keyLight.castShadow =
       !this.isSoftwareGl && initProfile.shadowsEnabled;
@@ -1336,13 +1332,13 @@ export class RamayanaWorldEngine {
     this.keyLight.shadow.camera.bottom = -d;
     this.keyLight.shadow.camera.near = 4;
     this.keyLight.shadow.camera.far = 148;
-    this.keyLight.shadow.bias = -0.00018;
-    this.keyLight.shadow.normalBias = 0.022;
-    this.keyLight.shadow.radius = 2.8;
+    this.keyLight.shadow.bias = -0.00012;
+    this.keyLight.shadow.normalBias = 0.016;
+    this.keyLight.shadow.radius = 1.0;
     this.scene.add(this.keyLight);
     this.scene.add(this.keyLight.target);
 
-    this.rimLight = new THREE.DirectionalLight(0xc8dcf8, 0.9);
+    this.rimLight = new THREE.DirectionalLight(0xd4e6ff, 0.82);
     this.rimLight.position.set(-18, 12, -22);
     this.scene.add(this.rimLight);
     this.scene.add(this.rimLight.target);
@@ -1359,18 +1355,19 @@ export class RamayanaWorldEngine {
     this.scene.add(this.torchShadowLight);
     this.scene.add(this.torchShadowLight.target);
 
-    // Warm Architectural Bounce RectAreaLights inside Sabha & Palace portals (hardware GPU, HIGH/MEDIUM)
+    // Warm Architectural Bounce RectAreaLights inside Sabha & Palace portals (desktop HIGH only for mobile fillrate budget)
     if (!this.isSoftwareGl) {
+      const allowAreaBounce = initProfile.tier === 'HIGH' && !this.hardwareEnvelope.isMobile;
       this.sabhaBounceLight = new THREE.RectAreaLight(0xffcfa0, 2.2, 8.5, 4.0);
       this.sabhaBounceLight.position.set(SABHA_HALL_POS.x, groundHeightAt(SABHA_HALL_POS.x, SABHA_HALL_POS.z) + 4.4, SABHA_HALL_POS.z);
       this.sabhaBounceLight.lookAt(SABHA_HALL_POS.x, 0, SABHA_HALL_POS.z);
-      this.sabhaBounceLight.visible = initProfile.tier !== 'LOW';
+      this.sabhaBounceLight.visible = allowAreaBounce;
       this.scene.add(this.sabhaBounceLight);
 
       this.palaceBounceLight = new THREE.RectAreaLight(0xffd4a8, 2.0, 9.0, 4.2);
       this.palaceBounceLight.position.set(PALACE_CORE_POS.x, groundHeightAt(PALACE_CORE_POS.x, PALACE_CORE_POS.z) + 4.6, PALACE_CORE_POS.z);
       this.palaceBounceLight.lookAt(PALACE_CORE_POS.x, 0, PALACE_CORE_POS.z);
-      this.palaceBounceLight.visible = initProfile.tier !== 'LOW';
+      this.palaceBounceLight.visible = allowAreaBounce;
       this.scene.add(this.palaceBounceLight);
     }
 
@@ -1469,7 +1466,7 @@ export class RamayanaWorldEngine {
     const width = this.container.clientWidth || window.innerWidth;
     const height = this.container.clientHeight || window.innerHeight;
     const renderer = new THREE.WebGLRenderer({
-      antialias: false,
+      antialias: !this.isSoftwareGl,
       powerPreference: 'high-performance',
       alpha: false,
       stencil: false,
@@ -1477,7 +1474,7 @@ export class RamayanaWorldEngine {
     });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = profile.toneMapping;
-    renderer.toneMappingExposure = 0.98;
+    renderer.toneMappingExposure = 1.08;
     renderer.setPixelRatio(this.getEffectivePixelRatio(profile));
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = !this.isSoftwareGl;
@@ -1828,17 +1825,8 @@ export class RamayanaWorldEngine {
 
   private getEffectivePixelRatio(profile: QualityProfile): number {
     if (this.isSoftwareGl) return 1;
-    const emergencyScale = this.dynamicScaler
-      ? this.dynamicScaler.getPixelScaleOverride()
-      : 1.0;
-    const drsScale = this.qualityManager
-      ? this.qualityManager.getDynamicResolutionScale()
-      : 1.0;
-    const basePr =
-      profile.pixelRatioCap < 1
-        ? profile.pixelRatioCap
-        : Math.min(Math.max(1, window.devicePixelRatio || 1), profile.pixelRatioCap);
-    return Math.max(0.5, basePr * emergencyScale * drsScale);
+    const nativeDpr = Math.max(1, window.devicePixelRatio || 1);
+    return Math.min(nativeDpr, Math.max(2, profile.pixelRatioCap));
   }
 
   private handleVisibilityChange = (): void => {
@@ -1861,8 +1849,8 @@ export class RamayanaWorldEngine {
     profile: QualityProfile
   ): void {
     if (this.isSoftwareGl) return;
-    const w = Math.max(64, Math.floor(width * profile.postProcessScale));
-    const h = Math.max(64, Math.floor(height * profile.postProcessScale));
+    const w = Math.max(64, Math.floor(width));
+    const h = Math.max(64, Math.floor(height));
     const pr = this.getEffectivePixelRatio(profile);
     const rtW = Math.max(64, Math.floor(w * pr));
     const rtH = Math.max(64, Math.floor(h * pr));
@@ -1888,22 +1876,12 @@ export class RamayanaWorldEngine {
     composer.setSize(w, h);
     composer.addPass(new RenderPass(this.scene, this.camera));
 
-    if (profile.bloomEnabled) {
-      const bloom = new UnrealBloomPass(
-        new THREE.Vector2(Math.max(32, Math.floor(w * 0.5)), Math.max(32, Math.floor(h * 0.5))),
-        0.22,
-        0.36,
-        0.92
-      );
-      composer.addPass(bloom);
-      this.bloomPass = bloom;
-    }
-
+    // Zero bloom haze / zero DoF / zero softening blur — underwater shader handles volume only when submerged
     const postPass = new ShaderPass(PostSmoothAndUnderwaterShader);
     postPass.uniforms.uTexelSize.value.set(1 / rtW, 1 / rtH);
-    postPass.uniforms.uSharpness.value = profile.sharpnessFactor;
-    postPass.uniforms.uEdgeEnhance.value = profile.edgeEnhanceIntensity;
-    postPass.uniforms.uSmoothBlend.value = profile.smoothFilterStrength;
+    postPass.uniforms.uSharpness.value = 1.0;
+    postPass.uniforms.uEdgeEnhance.value = 1.0;
+    postPass.uniforms.uSmoothBlend.value = 0.0;
     postPass.uniforms.uSubmerged.value = prevSub;
     postPass.uniforms.uDepthFactor.value = prevDepth;
     postPass.uniforms.uDaylight.value = prevDay;
@@ -1969,11 +1947,12 @@ export class RamayanaWorldEngine {
       this.torchShadowLight.intensity = 0;
     }
 
+    const allowAreaBounce = profile.tier === 'HIGH' && !this.hardwareEnvelope.isMobile;
     if (this.sabhaBounceLight) {
-      this.sabhaBounceLight.visible = profile.tier !== 'LOW';
+      this.sabhaBounceLight.visible = allowAreaBounce;
     }
     if (this.palaceBounceLight) {
-      this.palaceBounceLight.visible = profile.tier !== 'LOW';
+      this.palaceBounceLight.visible = allowAreaBounce;
     }
 
     const envAllowed =
@@ -1986,7 +1965,8 @@ export class RamayanaWorldEngine {
       this.regenerateEnvironmentProbe();
     }
 
-    this.textures?.setAnisotropy(Math.min(this.maxAnisotropy, profile.anisotropyCap));
+    const maxAniso = Math.min(this.maxAnisotropy, Math.max(1, profile.anisotropyCap));
+    this.textures?.setAnisotropy(maxAniso);
 
     this.dynamicScaler.syncWithProfile(
       profile,
@@ -2036,20 +2016,17 @@ export class RamayanaWorldEngine {
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(width, height);
     if (this.composer) {
-      const w = Math.max(64, Math.floor(width * profile.postProcessScale));
-      const h = Math.max(64, Math.floor(height * profile.postProcessScale));
+      const w = Math.max(64, Math.floor(width));
+      const h = Math.max(64, Math.floor(height));
       this.composer.setPixelRatio(pr);
       this.composer.setSize(w, h);
-      if (this.bloomPass) {
-        this.bloomPass.resolution.set(Math.max(32, Math.floor(w * 0.5)), Math.max(32, Math.floor(h * 0.5)));
-      }
       if (this.postPass) {
         const rtW = Math.max(64, Math.floor(w * pr));
         const rtH = Math.max(64, Math.floor(h * pr));
         this.postPass.uniforms.uTexelSize.value.set(1 / rtW, 1 / rtH);
-        this.postPass.uniforms.uSharpness.value = profile.sharpnessFactor;
-        this.postPass.uniforms.uEdgeEnhance.value = profile.edgeEnhanceIntensity;
-        this.postPass.uniforms.uSmoothBlend.value = profile.smoothFilterStrength;
+        this.postPass.uniforms.uSharpness.value = 1.0;
+        this.postPass.uniforms.uEdgeEnhance.value = 1.0;
+        this.postPass.uniforms.uSmoothBlend.value = 0.0;
       }
     }
   }
@@ -2159,12 +2136,12 @@ export class RamayanaWorldEngine {
       if (!(await reportStage(87, 'Indexing spatial colliders & hero rig'))) return;
       this.colliderGrid = new StaticColliderSpatialGrid(this.colliders, this.circleColliders);
       this.heroRigs.clear();
+      const showBodyParts = this.cameraSystem.isSecondPerson();
       for (const hId of PLAYABLE_HERO_ORDER) {
         const hRig = createHeroModel(hId, this.textures);
-        // Strict First-Person occlusion safety: hide local skull/crown/hair/cape/back-bow so internal meshes never block eye view
-        if (hRig.headGroup) hRig.headGroup.visible = false;
-        if (hRig.backBowGroup) hRig.backBowGroup.visible = false;
-        if (hRig.capePivot) hRig.capePivot.visible = false;
+        if (hRig.headGroup) hRig.headGroup.visible = showBodyParts;
+        if (hRig.backBowGroup) hRig.backBowGroup.visible = showBodyParts;
+        if (hRig.capePivot) hRig.capePivot.visible = showBodyParts;
         hRig.root.visible = hId === this.activeHeroId;
         this.scene.add(hRig.root);
         this.heroRigs.set(hId, hRig);
@@ -2788,8 +2765,13 @@ export class RamayanaWorldEngine {
         tex.minFilter = THREE.LinearFilter;
       }
       tex.magFilter = THREE.LinearFilter;
-      tex.anisotropy = Math.min(tex.anisotropy || maxAniso, maxAniso);
+      if (tex.anisotropy !== maxAniso) {
+        tex.anisotropy = maxAniso;
+        tex.needsUpdate = true;
+      }
     };
+    const epigraphNorm = this.textures?.royalEpigraphNormal ?? null;
+    const mythNorm = this.textures?.mythologyArtNormal ?? null;
     root.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       if (!mesh.material) return;
@@ -2797,11 +2779,35 @@ export class RamayanaWorldEngine {
       for (let i = 0; i < mats.length; i++) {
         const m = mats[i] as THREE.MeshPhysicalMaterial;
         if (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) {
-          m.envMapIntensity = Math.max(1.0, m.envMapIntensity || 1.0);
+          const isTransparentOrFoliage =
+            m.transparent || m.opacity < 0.99 || Boolean(m.alphaTest);
+          if (!isTransparentOrFoliage) {
+            m.flatShading = true;
+            m.roughnessMap = null;
+            m.aoMap = null;
+            m.metalnessMap = null;
+            const hasArtworkRelief =
+              m.normalMap !== null &&
+              (m.normalMap === epigraphNorm || m.normalMap === mythNorm);
+            if (hasArtworkRelief) {
+              m.normalScale?.set(0.25, 0.25);
+              tuneTex(m.normalMap);
+            } else {
+              m.normalMap = null;
+            }
+            m.envMapIntensity = 0.52;
+            m.roughness =
+              m.metalness > 0.5
+                ? Math.max(0.28, m.roughness)
+                : Math.max(0.58, m.roughness);
+            m.needsUpdate = true;
+          } else {
+            m.envMapIntensity = Math.min(0.65, m.envMapIntensity || 0.65);
+            m.normalMap = null;
+            m.roughnessMap = null;
+            m.needsUpdate = true;
+          }
           tuneTex(m.map);
-          tuneTex(m.normalMap);
-          tuneTex(m.roughnessMap);
-          tuneTex(m.metalnessMap);
           tuneTex(m.emissiveMap);
         }
       }
@@ -2827,14 +2833,14 @@ export class RamayanaWorldEngine {
     this.roofOccluders = [];
     this.occlusionManager.clear();
 
-    // 0. Dynamic Day-Night Atmospheric Sky Dome Shader (Rayleigh/Mie scattering + drifting FBM clouds + Milky Way + Sun Halo + Prominent Moon)
-    const skyRadius = 780;
-    const skyGeo = new THREE.SphereGeometry(skyRadius, 36, 22);
+    // 0. Dynamic Day-Night Atmospheric Sky Dome Shader (expanded radius for full open-world render distance)
+    const skyRadius = 3100;
+    const skyGeo = new THREE.SphereGeometry(skyRadius, 18, 10);
     const initProf = this.qualityManager.getProfile();
     this.skyUniforms = {
-      uHorizonColor: { value: new THREE.Color(0xc8c2b9) },
-      uMidColor: { value: new THREE.Color(0x9ea8b8) },
-      uZenithColor: { value: new THREE.Color(0x4b6891) },
+      uHorizonColor: { value: new THREE.Color(0xa8d8f8) },
+      uMidColor: { value: new THREE.Color(0x5aa4e8) },
+      uZenithColor: { value: new THREE.Color(0x1e56a6) },
       uSunDir: { value: new THREE.Vector3(0.5, 0.7, -0.4).normalize() },
       uMoonDir: { value: new THREE.Vector3(-0.5, -0.7, 0.4).normalize() },
       uTwilight: { value: 0.0 },
@@ -2935,14 +2941,15 @@ export class RamayanaWorldEngine {
       depthWrite: false,
     });
     this.skyDome = new THREE.Mesh(skyGeo, skyMat);
+    this.skyDome.renderOrder = -10;
     this.scene.add(this.skyDome);
 
-    // Sun Disc + Soft Golden Corona Glow
+    // Sun Disc + Soft Golden Corona Glow (scaled to 2500m orbital distance so apparent angular size stays identical)
     this.sunDisc = new THREE.Mesh(
-      new THREE.SphereGeometry(22, 16, 16),
+      new THREE.SphereGeometry(98, 16, 16),
       new THREE.MeshBasicMaterial({ color: 0xfff0c8, fog: false })
     );
-    this.sunDisc.position.set(340, 260, -310);
+    this.sunDisc.position.set(1520, 1160, -1380);
     const sunHaloCanvas = document.createElement('canvas');
     sunHaloCanvas.width = 256;
     sunHaloCanvas.height = 256;
@@ -2970,7 +2977,7 @@ export class RamayanaWorldEngine {
         fog: false,
       })
     );
-    this.sunHaloSprite.scale.set(175, 175, 1);
+    this.sunHaloSprite.scale.set(780, 780, 1);
     this.sunDisc.add(this.sunHaloSprite);
     this.scene.add(this.sunDisc);
 
@@ -3002,10 +3009,7 @@ export class RamayanaWorldEngine {
         lctx.fill();
       });
     }
-    const maxAniso = Math.min(
-      this.maxAnisotropy,
-      this.qualityManager.getProfile().anisotropyCap
-    );
+    const maxAniso = Math.min(this.maxAnisotropy, 16);
     const lunarTex = new THREE.CanvasTexture(lunarCanvas);
     lunarTex.colorSpace = THREE.SRGBColorSpace;
     lunarTex.generateMipmaps = true;
@@ -3035,7 +3039,7 @@ export class RamayanaWorldEngine {
 
     this.moonGroup = new THREE.Group();
     const moonMesh = new THREE.Mesh(
-      new THREE.SphereGeometry(28, 24, 24),
+      new THREE.SphereGeometry(125, 24, 24),
       new THREE.MeshBasicMaterial({ map: lunarTex, color: 0xf6f9ff, fog: false })
     );
     this.moonGroup.add(moonMesh);
@@ -3050,11 +3054,11 @@ export class RamayanaWorldEngine {
         fog: false,
       })
     );
-    this.moonHaloSprite.scale.set(145, 145, 1);
+    this.moonHaloSprite.scale.set(648, 648, 1);
     this.moonGroup.add(this.moonHaloSprite);
     this.scene.add(this.moonGroup);
 
-    // Dense Twinkling Starlight Canopy (2,400 multi-magnitude stars)
+    // Dense Twinkling Starlight Canopy (2,400 multi-magnitude stars beyond max terrain horizon)
     const starCount = 2400;
     const starPos = new Float32Array(starCount * 3);
     const starCol = new Float32Array(starCount * 3);
@@ -3071,7 +3075,7 @@ export class RamayanaWorldEngine {
       const v = sRand();
       const theta = u * Math.PI * 2;
       const phi = Math.acos(Math.max(0.03, v)); // Upper sky dome above horizon
-      const rad = 710 + sRand() * 35;
+      const rad = 2780 + sRand() * 140;
       starPos[i * 3] = Math.sin(phi) * Math.cos(theta) * rad;
       starPos[i * 3 + 1] = Math.cos(phi) * rad;
       starPos[i * 3 + 2] = Math.sin(phi) * Math.sin(theta) * rad;
@@ -3203,17 +3207,15 @@ export class RamayanaWorldEngine {
 
     await checkStage(0.08, 'Sculpting celestial sky & displaced terrain chunks');
 
-    // 1. Multi-Zone High-Density Displaced Open-World Terrain with Macro Anti-Tiling, Slope Cliffs & Volcanic Magma Seams
+    // 1. Multi-Zone Stylized Low-Poly Displaced Open-World Terrain with Clean Facets & Volcanic Magma Seams
     const terrainMat = new THREE.MeshPhysicalMaterial({
       map: textures.grassEarth,
-      normalMap: textures.grassNormal,
-      normalScale: new THREE.Vector2(0.92, 0.92),
-      roughnessMap: textures.grassRoughness,
       vertexColors: true,
-      roughness: 0.90,
+      flatShading: true,
+      roughness: 0.92,
       metalness: 0.02,
       ior: 1.45,
-      specularIntensity: 0.38,
+      specularIntensity: 0.22,
     });
     this.terrainShaderUniforms = {
       uSlopeDetail: { value: initProf.shaderSlopeBlendEnabled ? 1.0 : 0.0 },
@@ -3290,12 +3292,12 @@ export class RamayanaWorldEngine {
           );
     };
 
-    const cGrass = new THREE.Color(0x5e7841);
-    const cSand = new THREE.Color(0xc29e68);
-    const cVulcanAsh = new THREE.Color(0x1f1b24);
-    const cVulcanChar = new THREE.Color(0x141117);
-    const cMagmaSeam = new THREE.Color(0x6e200d);
-    const cDrySteppe = new THREE.Color(0x887c4b);
+    const cGrass = new THREE.Color(0x62ab46);
+    const cSand = new THREE.Color(0xdba96b);
+    const cVulcanAsh = new THREE.Color(0x26212e);
+    const cVulcanChar = new THREE.Color(0x191520);
+    const cMagmaSeam = new THREE.Color(0x882812);
+    const cDrySteppe = new THREE.Color(0xa29c54);
     const cTmp = new THREE.Color();
 
     const buildChunkedTerrainZone = (
@@ -4273,11 +4275,10 @@ export class RamayanaWorldEngine {
 
     const cliffMat = new THREE.MeshStandardMaterial({
       map: textures.rockCliff,
-      normalMap: textures.rockCliffNormal,
-      normalScale: new THREE.Vector2(1.05, 1.05),
       vertexColors: true,
-      roughness: 0.88,
-      metalness: 0.04,
+      flatShading: true,
+      roughness: 0.9,
+      metalness: 0.02,
     });
 
     // Build two sculpted rocky cascade cliffs pouring from East Bank into the Sarayu River
@@ -4304,7 +4305,7 @@ export class RamayanaWorldEngine {
         { ox: 4.2, oy: site.height * 0.48, oz: 3.4, rx: 5.2, ry: site.height * 0.58, rz: 6.1 },
       ];
       rockTiers.forEach((rt, rIdx) => {
-        const geo = new THREE.DodecahedronGeometry(1.0, 2);
+        const geo = new THREE.DodecahedronGeometry(1.0, 1);
         const pos = geo.attributes.position;
         const cols = new Float32Array(pos.count * 3);
         for (let vi = 0; vi < pos.count; vi++) {
@@ -4355,33 +4356,10 @@ export class RamayanaWorldEngine {
       foamRing.position.set(-7.1, 0.68, 0);
       wfGroup.add(foamRing);
 
-      // Rising mist billboard plume at waterfall plunge pool (scaled by quality profile)
-      if (profile.waterfallDetailEnabled && !this.isSoftwareGl) {
-        const mistCount = profile.tier === 'HIGH' ? 28 : 16;
-        const mistPos = new Float32Array(mistCount * 3);
-        for (let m = 0; m < mistCount; m++) {
-          mistPos[m * 3] = -6.8 + (((m * 37) % 100) / 100 - 0.5) * 4.5;
-          mistPos[m * 3 + 1] = 1.0 + ((m * 19) % 100) / 100 * 4.2;
-          mistPos[m * 3 + 2] = (((m * 53) % 100) / 100 - 0.5) * site.width;
-        }
-        const mistGeo = new THREE.BufferGeometry();
-        mistGeo.setAttribute('position', new THREE.BufferAttribute(mistPos, 3));
-        const mistMat = new THREE.PointsMaterial({
-          map: textures.waterfallFoam,
-          color: 0xeaf8ff,
-          size: 4.4,
-          transparent: true,
-          opacity: 0.28,
-          depthWrite: false,
-        });
-        const mistPts = new THREE.Points(mistGeo, mistMat);
-        wfGroup.add(mistPts);
-      }
-
       this.scene.add(wfGroup);
       this.lockStaticHierarchy(wfGroup);
       this.occlusionManager.registerFromObject(wfGroup, {
-        alwaysKeepWithinDist: 145,
+        alwaysKeepWithinDist: 280,
         skipOccluderCull: true,
       });
 
@@ -4465,9 +4443,17 @@ export class RamayanaWorldEngine {
       built.group.userData.phase = idx * 1.9;
       this.scene.add(built.group);
       this.floatingIslands.push(built.group);
+      this.floatingIslandDefs.push({
+        x: ix,
+        z: iz,
+        baseY: iy,
+        scale: iScale,
+        phase: idx * 1.9,
+        group: built.group,
+      });
       this.floatingIslandWfUniforms.push(built.waterfallUniforms);
       this.occlusionManager.registerFromObject(built.group, {
-        alwaysKeepWithinDist: 290,
+        alwaysKeepWithinDist: 4500,
         skipFogCull: true,
       });
     });
@@ -4813,16 +4799,16 @@ export class RamayanaWorldEngine {
 
   private populateInstancedNature(): void {
     const textures = this.textures!;
-    // Realistic Multi-Branch Bark Trunks + Layered Leaf Cluster Cards (LOD0 closeup + LOD1 far silhouette)
+    // Clean Stylized Multi-Branch Low-Poly Trunks + Layered Leaf Cluster Cards (LOD0 closeup + LOD1 far silhouette)
     const trunkParts: THREE.BufferGeometry[] = [];
-    const mainTrunk = new THREE.CylinderGeometry(0.32, 0.62, 4.4, 10);
+    const mainTrunk = new THREE.CylinderGeometry(0.32, 0.62, 4.4, 6);
     mainTrunk.translate(0, 2.2, 0);
     trunkParts.push(mainTrunk);
 
     // 4 Radiating Boughs
     for (let b = 0; b < 4; b++) {
       const angle = (b / 4) * Math.PI * 2 + 0.35;
-      const branch = new THREE.CylinderGeometry(0.12, 0.24, 2.7, 7);
+      const branch = new THREE.CylinderGeometry(0.12, 0.24, 2.7, 5);
       branch.translate(0, 1.35, 0);
       branch.rotateZ(0.68);
       branch.rotateY(angle);
@@ -4832,7 +4818,7 @@ export class RamayanaWorldEngine {
     // 3 Flared Root Buttresses anchoring tree trunk cleanly into earth
     for (let rb = 0; rb < 3; rb++) {
       const rAng = (rb / 3) * Math.PI * 2 + 0.4;
-      const root = new THREE.CylinderGeometry(0.14, 0.34, 1.25, 6);
+      const root = new THREE.CylinderGeometry(0.14, 0.34, 1.25, 5);
       root.translate(0, 0.55, 0);
       root.rotateZ(0.45);
       root.rotateY(rAng);
@@ -4847,9 +4833,8 @@ export class RamayanaWorldEngine {
 
     const trunkMat = new THREE.MeshStandardMaterial({
       map: textures.bark,
-      normalMap: textures.barkNormal,
-      normalScale: new THREE.Vector2(0.88, 0.88),
-      roughness: 0.88,
+      flatShading: true,
+      roughness: 0.9,
       metalness: 0.02,
     });
 
@@ -4905,12 +4890,10 @@ export class RamayanaWorldEngine {
     this.foliageWindUniforms = { uWindTime: { value: 0 } };
     const canopyMat = new THREE.MeshStandardMaterial({
       map: textures.foliage,
-      normalMap: textures.foliageNormal,
-      normalScale: new THREE.Vector2(0.8, 0.8),
       alphaTest: 0.42,
       vertexColors: true,
       side: THREE.DoubleSide,
-      roughness: 0.78,
+      roughness: 0.82,
       metalness: 0.02,
     });
     canopyMat.customProgramCacheKey = () => 'ayodhya-foliage-wind-v1';
@@ -5797,6 +5780,7 @@ export class RamayanaWorldEngine {
     this.ramRig.root.position.set(this.playerX, this.playerY, this.playerZ);
     this.ramRig.root.rotation.order = 'YXZ';
     this.ramRig.root.rotation.set(0, this.playerYaw, 0);
+    this.syncRigVisibilityForPerspective(false);
     this.camYaw = 0;
     this.camPitch = 0.02;
     this.isFlying = false;
@@ -6085,7 +6069,419 @@ export class RamayanaWorldEngine {
     if (skyH !== null && skyH !== undefined && skyH > h) {
       h = skyH;
     }
+
+    // Walkable Floating Celestial Islands (meadow crown, ceremonial -Z stairs & gilded temple terrace)
+    const islandH = this.floatingIslandSupportHeightAt(x, z, refY);
+    if (islandH !== null && islandH > h) {
+      h = islandH;
+    }
     return h;
+  }
+
+  private isInsideRegularOctagonXZ(dx: number, dz: number, apothem: number): boolean {
+    const c8 = 0.9238795325;
+    const s8 = 0.3826834324;
+    return (
+      Math.abs(dx * s8 + dz * c8) <= apothem &&
+      Math.abs(dx * c8 + dz * s8) <= apothem &&
+      Math.abs(dx * c8 - dz * s8) <= apothem &&
+      Math.abs(dx * s8 - dz * c8) <= apothem
+    );
+  }
+
+  private pushOutRegularOctagonXZ(
+    nx: number,
+    nz: number,
+    cx: number,
+    cz: number,
+    apothem: number,
+    radius: number,
+    out: { x: number; z: number }
+  ): void {
+    const c8 = 0.9238795325;
+    const s8 = 0.3826834324;
+    const dx = nx - cx;
+    const dz = nz - cz;
+    const lim = apothem + radius;
+    const p0 = dx * s8 + dz * c8;
+    const p1 = dx * c8 + dz * s8;
+    const p2 = dx * c8 - dz * s8;
+    const p3 = dx * s8 - dz * c8;
+    const a0 = Math.abs(p0);
+    const a1 = Math.abs(p1);
+    const a2 = Math.abs(p2);
+    const a3 = Math.abs(p3);
+    if (a0 >= lim || a1 >= lim || a2 >= lim || a3 >= lim) {
+      out.x = nx;
+      out.z = nz;
+      return;
+    }
+    // Push along the face normal with smallest penetration (largest projection)
+    let bestPen = lim - a0;
+    let pushX = s8;
+    let pushZ = c8;
+    let sign = p0 >= 0 ? 1 : -1;
+
+    const pen1 = lim - a1;
+    if (pen1 < bestPen) {
+      bestPen = pen1;
+      pushX = c8;
+      pushZ = s8;
+      sign = p1 >= 0 ? 1 : -1;
+    }
+    const pen2 = lim - a2;
+    if (pen2 < bestPen) {
+      bestPen = pen2;
+      pushX = c8;
+      pushZ = -s8;
+      sign = p2 >= 0 ? 1 : -1;
+    }
+    const pen3 = lim - a3;
+    if (pen3 < bestPen) {
+      bestPen = pen3;
+      pushX = s8;
+      pushZ = -c8;
+      sign = p3 >= 0 ? 1 : -1;
+    }
+    out.x = nx + pushX * sign * bestPen;
+    out.z = nz + pushZ * sign * bestPen;
+  }
+
+  private floatingIslandSupportHeightAt(
+    x: number,
+    z: number,
+    refY: number
+  ): number | null {
+    let best: number | null = null;
+    for (let i = 0; i < this.floatingIslandDefs.length; i++) {
+      const isl = this.floatingIslandDefs[i];
+      const s = isl.scale;
+      const dx = x - isl.x;
+      const dz = z - isl.z;
+      const maxSpan = 17.5 * s;
+      if (Math.abs(dx) > maxSpan || Math.abs(dz) > maxSpan) continue;
+
+      const curY = isl.group.position.y;
+      const meadowY = curY + 1.4 * s;
+      if (refY + 1.55 < meadowY) continue;
+
+      // 1. Top Gilded Temple Citadel Terrace (+4.8s)
+      const templeHalf = 6.0 * s;
+      if (Math.abs(dx) <= templeHalf && Math.abs(dz) <= templeHalf) {
+        const templeTopY = curY + 4.8 * s;
+        if (templeTopY <= refY + 1.55 && (best === null || templeTopY > best)) {
+          best = templeTopY;
+        }
+      }
+
+      // 2. Ceremonial -Z Sandstone Stairway connecting meadow (+1.4s) to temple terrace (+4.8s)
+      if (Math.abs(dx) <= 2.0 * s && dz >= -10.4 * s && dz <= -6.0 * s) {
+        const stairT = THREE.MathUtils.clamp((dz + 10.4 * s) / (4.4 * s), 0, 1);
+        const stairY = curY + (1.4 + 3.4 * stairT) * s;
+        if (stairY <= refY + 1.55 && (best === null || stairY > best)) {
+          best = stairY;
+        }
+      }
+
+      // 3. Verdant Octagonal Meadow Crown (+1.4s)
+      const meadowApothem = 16.5 * s * 0.9238795325;
+      if (this.isInsideRegularOctagonXZ(dx, dz, meadowApothem)) {
+        if (meadowY <= refY + 1.55 && (best === null || meadowY > best)) {
+          best = meadowY;
+        }
+      }
+    }
+    return best;
+  }
+
+  private floatingIslandCeilingLimitAt(
+    px: number,
+    py: number,
+    pz: number
+  ): number | null {
+    let minCeil: number | null = null;
+    for (let i = 0; i < this.floatingIslandDefs.length; i++) {
+      const isl = this.floatingIslandDefs[i];
+      const s = isl.scale;
+      const curY = isl.group.position.y;
+      if (py >= curY + 1.3 * s) continue;
+
+      const dx = px - isl.x;
+      const dz = pz - isl.z;
+      if (Math.abs(dx) > 17.5 * s || Math.abs(dz) > 17.5 * s) continue;
+
+      // Main inverted cone underside + topDisc bottom
+      const rMain = Math.hypot(dx, dz);
+      if (rMain <= 16.0 * s) {
+        let hullY = curY - (1.0 - rMain / (16.0 * s)) * 28.0 * s;
+        if (rMain <= 14.8 * s) {
+          hullY = Math.min(hullY, curY - 1.4 * s);
+        }
+        if (py <= hullY + 0.8 && (minCeil === null || hullY < minCeil)) {
+          minCeil = hullY;
+        }
+      }
+
+      // subSpire1 at (8.5s, -11s, -4s), r=7s, h=18s (tip -20s, top -2s)
+      const rSub1 = Math.hypot(dx - 8.5 * s, dz + 4.0 * s);
+      if (rSub1 <= 7.0 * s) {
+        const sub1Y = curY - 2.0 * s - (1.0 - rSub1 / (7.0 * s)) * 18.0 * s;
+        if (py <= sub1Y + 0.8 && (minCeil === null || sub1Y < minCeil)) {
+          minCeil = sub1Y;
+        }
+      }
+
+      // subSpire2 at (-7.5s, -10s, 5.5s), r=6s, h=15s (tip -17.5s, top -2.5s)
+      const rSub2 = Math.hypot(dx + 7.5 * s, dz - 5.5 * s);
+      if (rSub2 <= 6.0 * s) {
+        const sub2Y = curY - 2.5 * s - (1.0 - rSub2 / (6.0 * s)) * 15.0 * s;
+        if (py <= sub2Y + 0.8 && (minCeil === null || sub2Y < minCeil)) {
+          minCeil = sub2Y;
+        }
+      }
+    }
+    return minCeil;
+  }
+
+  private resolveFloatingIslandXZ(
+    nx: number,
+    nz: number,
+    radius: number,
+    entityY: number,
+    out: { x: number; z: number }
+  ): void {
+    let rx = nx;
+    let rz = nz;
+    for (let i = 0; i < this.floatingIslandDefs.length; i++) {
+      const isl = this.floatingIslandDefs[i];
+      const s = isl.scale;
+      const curY = isl.group.position.y;
+      const localY = entityY - curY;
+      if (localY > 17.6 * s || localY + 1.75 < -28.0 * s) continue;
+      if (
+        Math.abs(rx - isl.x) > 18.5 * s + radius ||
+        Math.abs(rz - isl.z) > 18.5 * s + radius
+      ) {
+        continue;
+      }
+
+      // 1. Inverted underside rock cones (when below meadow top)
+      if (localY < 0.05 * s) {
+        const hTest = Math.min(-0.05 * s, localY + 0.85);
+        if (hTest >= -28.0 * s) {
+          const rMainCone = ((hTest + 28.0 * s) / (28.0 * s)) * 16.0 * s;
+          const dx = rx - isl.x;
+          const dz = rz - isl.z;
+          const dSq = dx * dx + dz * dz;
+          const lim = rMainCone + radius;
+          if (dSq < lim * lim) {
+            if (dSq > 1e-8) {
+              const d = Math.sqrt(dSq);
+              const k = lim / d;
+              rx = isl.x + dx * k;
+              rz = isl.z + dz * k;
+            } else {
+              rx += lim;
+            }
+          }
+        }
+        if (hTest >= -20.0 * s && hTest <= -2.0 * s) {
+          const r1Cone = ((hTest + 20.0 * s) / (18.0 * s)) * 7.0 * s;
+          const cx1 = isl.x + 8.5 * s;
+          const cz1 = isl.z - 4.0 * s;
+          const dx = rx - cx1;
+          const dz = rz - cz1;
+          const dSq = dx * dx + dz * dz;
+          const lim = r1Cone + radius;
+          if (dSq < lim * lim && dSq > 1e-8) {
+            const d = Math.sqrt(dSq);
+            const k = lim / d;
+            rx = cx1 + dx * k;
+            rz = cz1 + dz * k;
+          }
+        }
+        if (hTest >= -17.5 * s && hTest <= -2.5 * s) {
+          const r2Cone = ((hTest + 17.5 * s) / (15.0 * s)) * 6.0 * s;
+          const cx2 = isl.x - 7.5 * s;
+          const cz2 = isl.z + 5.5 * s;
+          const dx = rx - cx2;
+          const dz = rz - cz2;
+          const dSq = dx * dx + dz * dz;
+          const lim = r2Cone + radius;
+          if (dSq < lim * lim && dSq > 1e-8) {
+            const d = Math.sqrt(dSq);
+            const k = lim / d;
+            rx = cx2 + dx * k;
+            rz = cz2 + dz * k;
+          }
+        }
+      }
+
+      // 2. Meadow Disc Outer Rim (octagonal cylinder y ∈ [-1.4s, +1.4s])
+      if (localY + 1.65 > -1.4 * s && localY < 1.4 * s - 0.45) {
+        const tRim = THREE.MathUtils.clamp((localY + 1.4 * s) / (2.8 * s), 0, 1);
+        const rimRadius = (14.8 + 1.7 * tRim) * s;
+        this.pushOutRegularOctagonXZ(
+          rx,
+          rz,
+          isl.x,
+          isl.z,
+          rimRadius * 0.9238795325,
+          radius,
+          out
+        );
+        rx = out.x;
+        rz = out.z;
+      }
+
+      // 3. Temple Citadel Base Box ([-6s, 6s], y ∈ [1.2s, 4.8s]), allowing -Z staircase ascent
+      if (localY + 1.65 > 1.2 * s && localY < 4.8 * s - 0.42) {
+        const dx = rx - isl.x;
+        const dz = rz - isl.z;
+        const onStairCorridor =
+          Math.abs(dx) <= 2.0 * s && dz >= -10.4 * s && dz <= -5.5 * s;
+        let stairPass = false;
+        if (onStairCorridor) {
+          const stairT = THREE.MathUtils.clamp((dz + 10.4 * s) / (4.4 * s), 0, 1);
+          const stairLocalY = (1.4 + 3.4 * stairT) * s;
+          if (localY >= stairLocalY - 0.65) {
+            stairPass = true;
+          }
+        }
+        if (!stairPass) {
+          const half = 6.0 * s;
+          const cx = THREE.MathUtils.clamp(dx, -half, half);
+          const cz = THREE.MathUtils.clamp(dz, -half, half);
+          const dlx = dx - cx;
+          const dlz = dz - cz;
+          const dSq = dlx * dlx + dlz * dlz;
+          if (dSq < radius * radius) {
+            if (dSq > 1e-8) {
+              const d = Math.sqrt(dSq);
+              const push = radius - d;
+              rx += (dlx / d) * push;
+              rz += (dlz / d) * push;
+            } else {
+              const penX = half - Math.abs(dx);
+              const penZ = half - Math.abs(dz);
+              if (penX < penZ) {
+                rx += (dx >= 0 ? 1 : -1) * (penX + radius);
+              } else {
+                rz += (dz >= 0 ? 1 : -1) * (penZ + radius);
+              }
+            }
+          }
+        }
+      }
+
+      // 4. 4 Corner Towers & Spires at (±4.4s, ±4.4s)
+      if (localY + 1.65 > 2.75 * s && localY < 11.5 * s) {
+        const towerR = localY >= 8.25 * s
+          ? Math.max(0.25 * s, ((11.5 * s - Math.max(8.25 * s, localY)) / (3.4 * s)) * 1.45 * s)
+          : 1.3 * s;
+        const lim = towerR + radius;
+        const limSq = lim * lim;
+        const cOff = 4.4 * s;
+        for (let sx = -1; sx <= 1; sx += 2) {
+          for (let sz = -1; sz <= 1; sz += 2) {
+            const tx = isl.x + sx * cOff;
+            const tz = isl.z + sz * cOff;
+            const dx = rx - tx;
+            const dz = rz - tz;
+            const dSq = dx * dx + dz * dz;
+            if (dSq < limSq && dSq > 1e-8) {
+              const d = Math.sqrt(dSq);
+              const k = lim / d;
+              rx = tx + dx * k;
+              rz = tz + dz * k;
+            }
+          }
+        }
+      }
+
+      // 5. Central Gilded Shikhara Cone (y ∈ [4.75s, 17.25s], base r=4.4s)
+      if (localY + 1.65 > 4.75 * s && localY < 17.25 * s) {
+        const yTest = THREE.MathUtils.clamp(localY + 0.5, 4.75 * s, 17.25 * s);
+        const shikharaR = ((17.25 * s - yTest) / (12.5 * s)) * 4.4 * s;
+        const dx = rx - isl.x;
+        const dz = rz - isl.z;
+        const lim = shikharaR + radius;
+        const dSq = dx * dx + dz * dz;
+        if (dSq < lim * lim) {
+          if (dSq > 1e-8) {
+            const d = Math.sqrt(dSq);
+            const k = lim / d;
+            rx = isl.x + dx * k;
+            rz = isl.z + dz * k;
+          } else {
+            rx += lim;
+          }
+        }
+      }
+    }
+    out.x = rx;
+    out.z = rz;
+  }
+
+  private isPointInsideFloatingIslandSolid(
+    px: number,
+    py: number,
+    pz: number
+  ): boolean {
+    for (let i = 0; i < this.floatingIslandDefs.length; i++) {
+      const isl = this.floatingIslandDefs[i];
+      const s = isl.scale;
+      const curY = isl.group.position.y;
+      const localY = py - curY;
+      if (localY < -28.0 * s || localY > 17.25 * s) continue;
+      const dx = px - isl.x;
+      const dz = pz - isl.z;
+      if (Math.abs(dx) > 17.5 * s || Math.abs(dz) > 17.5 * s) continue;
+
+      if (localY >= -1.4 * s && localY <= 1.4 * s) {
+        const tRim = (localY + 1.4 * s) / (2.8 * s);
+        const rimR = (14.8 + 1.7 * tRim) * s;
+        if (this.isInsideRegularOctagonXZ(dx, dz, rimR * 0.9238795325)) {
+          return true;
+        }
+      }
+      if (localY >= -28.0 * s && localY <= 0) {
+        const rMain = ((localY + 28.0 * s) / (28.0 * s)) * 16.0 * s;
+        if (dx * dx + dz * dz <= rMain * rMain) return true;
+      }
+      if (localY >= -20.0 * s && localY <= -2.0 * s) {
+        const r1 = ((localY + 20.0 * s) / (18.0 * s)) * 7.0 * s;
+        const ddx = dx - 8.5 * s;
+        const ddz = dz + 4.0 * s;
+        if (ddx * ddx + ddz * ddz <= r1 * r1) return true;
+      }
+      if (localY >= -17.5 * s && localY <= -2.5 * s) {
+        const r2 = ((localY + 17.5 * s) / (15.0 * s)) * 6.0 * s;
+        const ddx = dx + 7.5 * s;
+        const ddz = dz - 5.5 * s;
+        if (ddx * ddx + ddz * ddz <= r2 * r2) return true;
+      }
+      if (localY >= 1.2 * s && localY <= 4.8 * s && Math.abs(dx) <= 6.0 * s && Math.abs(dz) <= 6.0 * s) {
+        return true;
+      }
+      if (localY >= 4.75 * s && localY <= 17.25 * s) {
+        const shikharaR = ((17.25 * s - localY) / (12.5 * s)) * 4.4 * s;
+        if (dx * dx + dz * dz <= shikharaR * shikharaR) return true;
+      }
+      if (localY >= 2.75 * s && localY <= 11.5 * s) {
+        const tR = localY >= 8.25 * s ? ((11.5 * s - localY) / (3.4 * s)) * 1.45 * s : 1.3 * s;
+        const tSq = tR * tR;
+        const cOff = 4.4 * s;
+        for (let sx = -1; sx <= 1; sx += 2) {
+          for (let sz = -1; sz <= 1; sz += 2) {
+            const ddx = dx - sx * cOff;
+            const ddz = dz - sz * cOff;
+            if (ddx * ddx + ddz * ddz <= tSq) return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   private triggerThroneAscension(): void {
@@ -6296,11 +6692,9 @@ export class RamayanaWorldEngine {
       targetRig.root.position.set(this.playerX, this.playerY, this.playerZ);
       targetRig.root.rotation.order = 'YXZ';
       targetRig.root.rotation.set(0, this.playerYaw, 0);
-      if (targetRig.headGroup) targetRig.headGroup.visible = false;
-      if (targetRig.backBowGroup) targetRig.backBowGroup.visible = false;
-      if (targetRig.capePivot) targetRig.capePivot.visible = false;
       targetRig.root.visible = true;
       this.ramRig = targetRig;
+      this.syncRigVisibilityForPerspective(this.input.fireHeld || this.bowDrawHoldTimer > 0);
       this.restoreRamStandingClothes();
       if (this.stealthActive) {
         this.setStealthMode(true);
@@ -7023,6 +7417,7 @@ export class RamayanaWorldEngine {
     }
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = Math.min(this.maxAnisotropy, 16);
     const mat = new THREE.SpriteMaterial({
       map: texture,
       transparent: true,
@@ -7953,10 +8348,11 @@ export class RamayanaWorldEngine {
   }
 
   private indoorCeilingLimitAt(px: number, py: number, pz: number): number | null {
+    let bestCeil: number | null = null;
     const stIdx = palaceStoryAt(px, py + 0.72, pz);
     if (stIdx !== null) {
       const st = PALACE_STORIES[stIdx];
-      return st.floorY + st.clearHeight - 0.32;
+      bestCeil = st.floorY + st.clearHeight - 0.32;
     }
     for (let i = 0; i < this.roofOccluders.length; i++) {
       const oc = this.roofOccluders[i];
@@ -7967,10 +8363,20 @@ export class RamayanaWorldEngine {
         pz <= oc.maxZ &&
         py < oc.roofY - 0.25
       ) {
-        return oc.roofY - 0.32;
+        const roofCeil = oc.roofY - 0.32;
+        if (bestCeil === null || roofCeil < bestCeil) {
+          bestCeil = roofCeil;
+        }
       }
     }
-    return null;
+    const islCeil = this.floatingIslandCeilingLimitAt(px, py, pz);
+    if (islCeil !== null) {
+      const safeIslCeil = islCeil - 0.28;
+      if (bestCeil === null || safeIslCeil < bestCeil) {
+        bestCeil = safeIslCeil;
+      }
+    }
+    return bestCeil;
   }
 
   private getNearFrustumSafetyMargin(): number {
@@ -8098,9 +8504,16 @@ export class RamayanaWorldEngine {
       }
     }
 
-    const eyeFloor = this.surfaceHeightAt(eye.x, eye.z, this.playerY) + Math.max(0.18, nearPad + 0.08);
+    // Floating Island Horizontal Solid Collision for Camera
+    _staticRes.x = eye.x;
+    _staticRes.z = eye.z;
+    this.resolveFloatingIslandXZ(eye.x, eye.z, wallPad, eye.y - 0.85, _staticRes);
+    eye.x = _staticRes.x;
+    eye.z = _staticRes.z;
+
+    const eyeFloor = this.surfaceHeightAt(eye.x, eye.z, Math.max(this.playerY, eye.y - 0.3)) + Math.max(0.18, nearPad + 0.08);
     if (eye.y < eyeFloor) eye.y = eyeFloor;
-    const postCeil = this.indoorCeilingLimitAt(this.playerX, this.playerY, this.playerZ);
+    const postCeil = this.indoorCeilingLimitAt(eye.x, eye.y, eye.z) ?? this.indoorCeilingLimitAt(this.playerX, this.playerY, this.playerZ);
     if (postCeil !== null) {
       const ceilClamp = Math.max(eyeFloor, postCeil - nearPad * 0.5);
       if (eye.y > ceilClamp) eye.y = ceilClamp;
@@ -8264,6 +8677,46 @@ export class RamayanaWorldEngine {
     this.clampCameraAgainstEnvironment(out, nearPad);
   }
 
+  public getCameraPerspective(): CameraPerspective {
+    return this.cameraSystem.getPerspective();
+  }
+
+  public setCameraPerspective(next: CameraPerspective): CameraPerspective {
+    const updated = this.cameraSystem.setPerspective(next);
+    const isBowDrawn =
+      this.input.fireHeld ||
+      this.bowDrawHoldTimer > 0 ||
+      this.brahmaSummonPhase === 'AIM_READY' ||
+      this.brahmaSummonPhase === 'LOTUS_APPEAR';
+    this.syncRigVisibilityForPerspective(isBowDrawn);
+    this.syncCameraImmediate();
+    this.emitHud();
+    return updated;
+  }
+
+  public toggleCameraPerspective(): CameraPerspective {
+    const updated = this.cameraSystem.togglePerspective();
+    const isBowDrawn =
+      this.input.fireHeld ||
+      this.bowDrawHoldTimer > 0 ||
+      this.brahmaSummonPhase === 'AIM_READY' ||
+      this.brahmaSummonPhase === 'LOTUS_APPEAR';
+    this.syncRigVisibilityForPerspective(isBowDrawn);
+    this.syncCameraImmediate();
+    this.emitHud();
+    return updated;
+  }
+
+  private syncRigVisibilityForPerspective(isBowDrawn = false): void {
+    if (!this.ramRig) return;
+    const showBodyParts = this.cameraSystem.isSecondPerson();
+    if (this.ramRig.headGroup) this.ramRig.headGroup.visible = showBodyParts;
+    if (this.ramRig.capePivot) this.ramRig.capePivot.visible = showBodyParts;
+    if (this.ramRig.backBowGroup) {
+      this.ramRig.backBowGroup.visible = showBodyParts && !isBowDrawn;
+    }
+  }
+
   private applyFirstPersonCamera(applyShake: boolean): void {
     this.computeFirstPersonEyePosition(_camDesired);
     const cosP = Math.cos(this.camPitch);
@@ -8291,8 +8744,54 @@ export class RamayanaWorldEngine {
     this.camera.lookAt(this.camSmoothLook);
   }
 
+  private applySecondPersonCamera(applyShake: boolean): void {
+    if (!this.ramRig) {
+      this.applyFirstPersonCamera(applyShake);
+      return;
+    }
+    this.ramRig.root.updateMatrixWorld(true);
+    this.ramRig.torso.getWorldPosition(this._spTorsoWorld);
+    const heroScale = HERO_PROFILES[this.activeHeroId].scale;
+    const nearPad = Math.max(0.24, this.camera.near + 0.09);
+
+    computeSecondPersonWaistPose(
+      {
+        torsoWorldPos: this._spTorsoWorld,
+        facingYaw: this.ramRig.root.rotation.y,
+        pitch: this.camPitch,
+        heroScale,
+        fovDeg: this.camera.fov,
+        nearPad,
+      },
+      this._spCamPos,
+      this._spCamTarget,
+      (pos, pad) => this.clampCameraAgainstEnvironment(pos, pad)
+    );
+
+    this.camSmoothPos.copy(this._spCamPos);
+    this.camSmoothLook.copy(this._spCamTarget);
+    this.updateRoofOcclusion(this.camSmoothPos.x, this.camSmoothPos.y, this.camSmoothPos.z);
+
+    this.camera.position.copy(this.camSmoothPos);
+    if (applyShake && this.cameraShakeAmount > 0.01) {
+      const shakeAmp = Math.min(0.06, this.cameraShakeAmount * 0.045);
+      this.camera.position.x += (Math.random() - 0.5) * shakeAmp;
+      this.camera.position.y += (Math.random() - 0.5) * shakeAmp * 0.8;
+      this.camera.position.z += (Math.random() - 0.5) * shakeAmp;
+    }
+    this.camera.lookAt(this.camSmoothLook);
+  }
+
+  private applyActiveCamera(applyShake: boolean): void {
+    if (this.cameraSystem.isFirstPerson()) {
+      this.applyFirstPersonCamera(applyShake);
+    } else {
+      this.applySecondPersonCamera(applyShake);
+    }
+  }
+
   private syncCameraImmediate(): void {
-    this.applyFirstPersonCamera(false);
+    this.applyActiveCamera(false);
   }
 
   /**
@@ -8513,6 +9012,10 @@ export class RamayanaWorldEngine {
           }
         }
       }
+      // 5. Floating Celestial Islands Rigid Collision (cones, meadow rim, temple base, towers & shikhara)
+      this.resolveFloatingIslandXZ(nx, nz, radius, entityY, _staticRes);
+      nx = _staticRes.x;
+      nz = _staticRes.z;
     }
 
     _staticRes.x = nx;
@@ -11608,16 +12111,19 @@ export class RamayanaWorldEngine {
         const nextX = this.playerX + _v1.x * moveSpeed * mag * dt;
         const nextZ = this.playerZ + _v1.z * moveSpeed * mag * dt;
         if (this.isFlying && this.playerY > preGroundY + 5.5) {
-          this.playerX = THREE.MathUtils.clamp(
+          const clampedX = THREE.MathUtils.clamp(
             nextX,
             WORLD_BOUNDS.minX + 1.5,
             WORLD_BOUNDS.maxX - 1.5
           );
-          this.playerZ = THREE.MathUtils.clamp(
+          const clampedZ = THREE.MathUtils.clamp(
             nextZ,
             WORLD_BOUNDS.minZ + 1.5,
             WORLD_BOUNDS.maxZ - 1.5
           );
+          this.resolveFloatingIslandXZ(clampedX, clampedZ, 0.58, this.playerY, _staticRes);
+          this.playerX = _staticRes.x;
+          this.playerZ = _staticRes.z;
           resolvedDist = Math.hypot(this.playerX - prevX, this.playerZ - prevZ);
         } else {
           const resolved = this.moveSweptWithStaticCCD(
@@ -11672,11 +12178,16 @@ export class RamayanaWorldEngine {
         const targetFlyVelY = jumpSurge !== 0 ? jumpSurge : diveDrop !== 0 ? diveDrop : pitchClimb;
         this.input.jumpPressed = false;
         this.playerVelY = THREE.MathUtils.damp(this.playerVelY, targetFlyVelY, 8.0, dt);
+        const flyCeil = this.floatingIslandCeilingLimitAt(this.playerX, this.playerY, this.playerZ);
+        const maxFlyY = flyCeil !== null ? Math.min(215, Math.max(groundY, flyCeil - 1.75)) : 215;
         this.playerY = THREE.MathUtils.clamp(
           this.playerY + this.playerVelY * dt,
           groundY,
-          215
+          maxFlyY
         );
+        if (flyCeil !== null && this.playerY >= maxFlyY - 0.02 && this.playerVelY > 0) {
+          this.playerVelY = 0;
+        }
         if (this.playerY <= groundY + 0.05 && this.playerVelY <= -1.2 && !this.input.sprint) {
           this.playerY = groundY;
           this.playerVelY = 0;
@@ -11782,6 +12293,11 @@ export class RamayanaWorldEngine {
         } else {
           this.playerVelY -= 24 * dt;
           this.playerY += this.playerVelY * dt;
+          const jumpCeil = this.floatingIslandCeilingLimitAt(this.playerX, this.playerY, this.playerZ);
+          if (jumpCeil !== null && this.playerY > jumpCeil - 1.75) {
+            this.playerY = Math.max(groundY, jumpCeil - 1.75);
+            if (this.playerVelY > 0) this.playerVelY = 0;
+          }
           if (this.playerY <= groundY) {
             this.playerY = groundY;
             this.playerVelY = 0;
@@ -12026,7 +12542,7 @@ export class RamayanaWorldEngine {
       !emptyHandsSummon &&
       (this.input.fireHeld || this.bowDrawHoldTimer > 0 || this.brahmaSummonPhase === 'AIM_READY' || this.brahmaSummonPhase === 'LOTUS_APPEAR');
     if (this.ramRig.bowGroup) this.ramRig.bowGroup.visible = showDrawnBow;
-    if (this.ramRig.backBowGroup) this.ramRig.backBowGroup.visible = false;
+    this.syncRigVisibilityForPerspective(showDrawnBow);
 
     if (!summonLocked && this.input.astraPressed) {
       this.input.astraPressed = false;
@@ -12253,14 +12769,17 @@ export class RamayanaWorldEngine {
         }
       }
 
-      // D. Swept Terrain Heightfield Check
+      // D. Swept Terrain & Floating Island Heightfield Check
       for (let s = 1; s <= 4; s++) {
         const ts = s / 4;
         if (ts >= bestT) break;
         const sx = ax + segDx * ts;
         const sy = ay + segDy * ts;
         const sz = az + segDz * ts;
-        if (sy <= groundHeightAt(sx, sz)) {
+        if (
+          sy <= groundHeightAt(sx, sz) ||
+          this.isPointInsideFloatingIslandSolid(sx, sy, sz)
+        ) {
           bestT = ts;
           hitEnemy = null;
           hitEnvironment = true;
@@ -13914,7 +14433,7 @@ export class RamayanaWorldEngine {
       this.ramRig.root.rotation.y = this.playerYaw;
     }
 
-    this.applyFirstPersonCamera(true);
+    this.applyActiveCamera(true);
 
     // 10b. Post-Camera Occlusion Culling, Entity Detail LOD & Transform Sync
     if (this.remotePlayers.size > 0) {
@@ -14000,7 +14519,11 @@ export class RamayanaWorldEngine {
     }
 
     const fog = this.scene.fog as THREE.Fog | null;
-    this.occlusionManager.prepareCullingBasis(this.camera, fog ? fog.far : 280, true);
+    this.occlusionManager.prepareCullingBasis(
+      this.camera,
+      fog ? fog.far : Number.POSITIVE_INFINITY,
+      true
+    );
 
     for (let i = 0; i < this.enemies.length; i++) {
       const e = this.enemies[i];
@@ -14650,15 +15173,9 @@ export class RamayanaWorldEngine {
     }
 
     if (this.cameraSubmerged > 0.01) {
-      const fog = this.scene.fog as THREE.Fog | null;
       const bg = this.scene.background as THREE.Color | null;
       _tmpUnderCol.copy(_colUnderNight).lerp(_colUnderDay, this.daylightFactor);
       if (bg) bg.lerp(_tmpUnderCol, this.cameraSubmerged);
-      if (fog) {
-        fog.color.lerp(_tmpUnderCol, this.cameraSubmerged);
-        fog.near = THREE.MathUtils.lerp(fog.near, 1.5, this.cameraSubmerged);
-        fog.far = THREE.MathUtils.lerp(fog.far, 28.0, this.cameraSubmerged);
-      }
     }
   }
 
@@ -14678,9 +15195,9 @@ export class RamayanaWorldEngine {
 
     if (this.sunDisc) {
       this.sunDisc.position.set(
-        this.playerX + _sunDir.x * 560,
-        _sunDir.y * 560,
-        this.playerZ + _sunDir.z * 560
+        this.playerX + _sunDir.x * 2500,
+        _sunDir.y * 2500,
+        this.playerZ + _sunDir.z * 2500
       );
       this.sunDisc.visible = sunElev > -0.1;
       const sunMat = this.sunDisc.material as THREE.MeshBasicMaterial;
@@ -14689,9 +15206,9 @@ export class RamayanaWorldEngine {
 
     if (this.moonGroup) {
       this.moonGroup.position.set(
-        this.playerX + _moonDir.x * 520,
-        _moonDir.y * 520,
-        this.playerZ + _moonDir.z * 520
+        this.playerX + _moonDir.x * 2320,
+        _moonDir.y * 2320,
+        this.playerZ + _moonDir.z * 2320
       );
       this.moonGroup.visible = _moonDir.y > -0.12;
       if (this.moonHaloSprite) {
@@ -14746,20 +15263,12 @@ export class RamayanaWorldEngine {
     const bg = this.scene.background as THREE.Color;
     if (bg) bg.copy(_tmpMist);
 
-    const fog = this.scene.fog as THREE.Fog | null;
-    if (fog) {
-      fog.color.copy(_tmpMist);
-      const baseFar = THREE.MathUtils.lerp(
-        THREE.MathUtils.lerp(340, 410, this.nightFactor),
-        195,
-        ashT
-      ) * this.qualityManager.getProfile().fogFarScale;
-      fog.near = THREE.MathUtils.lerp(44, 24, ashT) * this.qualityManager.getProfile().fogFarScale;
-      fog.far = baseFar;
+    // Keep fog density strictly zero across the realm
+    if (this.scene.fog !== null) {
+      this.scene.fog = null;
     }
 
-    // Strictly scale daytime IBL at night while keeping moon/star/lamp/bounce GI physical
-    this.scene.environmentIntensity = THREE.MathUtils.lerp(1.15, 0.08, this.nightFactor);
+    this.scene.environmentIntensity = THREE.MathUtils.lerp(1.22, 0.12, this.nightFactor);
 
     // Biome-aware dynamic ground light bounce & Spherical Harmonics L0/L1 Global Illumination probe
     const inWater = isInRiverWater(this.playerX, this.playerZ) || isInsideStepwellBasin(this.playerX, this.playerZ);
@@ -14784,7 +15293,7 @@ export class RamayanaWorldEngine {
     this.bounceLight.color.copy(_tmpBounce);
     this.bounceLight.position.set(this.playerX, this.playerY - 18, this.playerZ);
     this.bounceLight.target.position.set(this.playerX, this.playerY + 4, this.playerZ);
-    this.bounceLight.intensity = THREE.MathUtils.lerp(0.54, 0.1, this.nightFactor);
+    this.bounceLight.intensity = THREE.MathUtils.lerp(0.48, 0.1, this.nightFactor);
 
     const sh = this.giLightProbe.sh;
     sh.zero();
@@ -14805,7 +15314,7 @@ export class RamayanaWorldEngine {
       (_tmpSkySample.g + _tmpBounce.g) * 0.25,
       (_tmpSkySample.b + _tmpBounce.b) * 0.25
     );
-    this.giLightProbe.intensity = THREE.MathUtils.lerp(0.72, 0.24, this.nightFactor);
+    this.giLightProbe.intensity = THREE.MathUtils.lerp(0.68, 0.24, this.nightFactor);
 
     this.hemiLight.color
       .copy(_colHemiDay)
@@ -14815,19 +15324,19 @@ export class RamayanaWorldEngine {
       .copy(_tmpBounce)
       .lerp(_colGroundNight, this.nightFactor * 0.65);
     this.hemiLight.intensity =
-      THREE.MathUtils.lerp(0.78, 0.14, this.nightFactor) * THREE.MathUtils.lerp(1.0, 0.72, ashT);
+      THREE.MathUtils.lerp(0.96, 0.28, this.nightFactor) * THREE.MathUtils.lerp(1.0, 0.78, ashT);
 
-    this.rimLight.color.setHex(0xc8dcf8).lerp(_colKeyMoon, this.nightFactor);
-    this.rimLight.intensity = THREE.MathUtils.lerp(0.9, 0.16, this.nightFactor);
+    this.rimLight.color.setHex(0xd4e6ff).lerp(_colKeyMoon, this.nightFactor);
+    this.rimLight.intensity = THREE.MathUtils.lerp(0.82, 0.22, this.nightFactor);
 
     if (sunStrength >= moonStrength) {
       _shadowDir.set(_sunDir.x, Math.max(0.11, _sunDir.y), _sunDir.z).normalize();
       this.keyLight.color.copy(_colKeyDay).lerp(_colKeySunset, twilight * 0.78).lerp(_colKeyAsh, ashT);
-      this.keyLight.intensity = THREE.MathUtils.lerp(2.25, 1.38, ashT) * sunStrength;
+      this.keyLight.intensity = THREE.MathUtils.lerp(2.25, 1.48, ashT) * sunStrength;
     } else {
       _shadowDir.set(_moonDir.x, Math.max(0.11, _moonDir.y), _moonDir.z).normalize();
       this.keyLight.color.copy(_colKeyMoon).lerp(_colKeyAsh, ashT * 0.5);
-      this.keyLight.intensity = 0.56 * moonStrength;
+      this.keyLight.intensity = 0.62 * moonStrength;
     }
 
     // Snap directional shadow camera target to world shadow-texel grid to prevent shimmering on edges
@@ -14863,10 +15372,6 @@ export class RamayanaWorldEngine {
         this.skyUniforms.uZenithColor.value.lerp(_colSkyZNight, darkBlend * 0.95);
       }
       if (bg) bg.lerp(_colNightMist, darkBlend * 0.92);
-      if (fog) {
-        fog.color.lerp(_colNightMist, darkBlend * 0.92);
-        fog.far = THREE.MathUtils.lerp(fog.far, 72, darkBlend * 0.72);
-      }
       this.keyLight.intensity *= 1 - darkBlend * 0.78;
       this.hemiLight.intensity *= 1 - darkBlend * 0.65;
     }
@@ -15230,7 +15735,8 @@ export class RamayanaWorldEngine {
     const resPct = Math.round(resScaleVal * 100);
     const benchKey = benchSummary ? `${benchSummary.compositeScore}:${benchSummary.lockedTier}` : '0';
     const heroAbCd = Number(this.heroAbilityCooldown.toFixed(1));
-    const hudKey = `${hpVal}|${pranaVal}|${this.karma}|${this.wantedLevel}|${mountKind}|${nearMount?.label ?? ''}|${nearMountFull ? 1 : 0}|${mountedSeatIndex ?? ''}|${mountedOccupantCount}|${mountedPartnerName ?? ''}|${canSwitchSeat ? 1 : 0}|${nearThrone ? 1 : 0}|${this.seatedOnThrone ? 1 : 0}|${this.autoDriveActive ? 1 : 0}|${mountSpeedKmh}|${this.stealthActive ? 1 : 0}|${this.stealthSpotted ? 1 : 0}|${chakraCd}|${district.label}|${pX}|${pZ}|${pYaw}|${this.missionIdx}|${this.missionProgress}|${this.completedMissions}|${demonVillageDistanceM}|${this.ascensionActive ? 1 : 0}|${ascElapsed}|${councilSeated}|${this.worldReady ? 1 : 0}|${roundedProgress}|${this.assetStage}|${this.webglError ?? ''}|${qMode}|${qTier}|${fpsVal}|${targetFpsVal}|${resPct}|${benchKey}|${selAstra ?? ''}|${aEnergy}|${cdKey}|${this.brahmaSummonPhase}|${fAlpha}|${dAlpha}|${questHud.unlockedCount}|${questHud.challengeSubProgress ?? ''}|${questHud.challengeTimerSec ?? ''}|${questHud.underwaterBreath ?? ''}|${questHud.brahmaTrialStage}|${enemySummonWarning?.remainingSec ?? ''}|${unlockPopup?.id ?? ''}|${this.showStoryIntro ? 1 : 0}|${this.activeHeroId}|${this.isFlying ? 1 : 0}|${heroAbCd}|${promptHint ?? ''}`;
+    const camPersp = this.cameraSystem.getPerspective();
+    const hudKey = `${hpVal}|${pranaVal}|${this.karma}|${this.wantedLevel}|${mountKind}|${nearMount?.label ?? ''}|${nearMountFull ? 1 : 0}|${mountedSeatIndex ?? ''}|${mountedOccupantCount}|${mountedPartnerName ?? ''}|${canSwitchSeat ? 1 : 0}|${nearThrone ? 1 : 0}|${this.seatedOnThrone ? 1 : 0}|${this.autoDriveActive ? 1 : 0}|${mountSpeedKmh}|${this.stealthActive ? 1 : 0}|${this.stealthSpotted ? 1 : 0}|${chakraCd}|${district.label}|${pX}|${pZ}|${pYaw}|${this.missionIdx}|${this.missionProgress}|${this.completedMissions}|${demonVillageDistanceM}|${this.ascensionActive ? 1 : 0}|${ascElapsed}|${councilSeated}|${this.worldReady ? 1 : 0}|${roundedProgress}|${this.assetStage}|${this.webglError ?? ''}|${qMode}|${qTier}|${fpsVal}|${targetFpsVal}|${resPct}|${benchKey}|${selAstra ?? ''}|${aEnergy}|${cdKey}|${this.brahmaSummonPhase}|${fAlpha}|${dAlpha}|${questHud.unlockedCount}|${questHud.challengeSubProgress ?? ''}|${questHud.challengeTimerSec ?? ''}|${questHud.underwaterBreath ?? ''}|${questHud.brahmaTrialStage}|${enemySummonWarning?.remainingSec ?? ''}|${unlockPopup?.id ?? ''}|${this.showStoryIntro ? 1 : 0}|${this.activeHeroId}|${this.isFlying ? 1 : 0}|${heroAbCd}|${camPersp}|${promptHint ?? ''}`;
     if (hudKey === this.lastHudKey) {
       return;
     }
@@ -15325,6 +15831,7 @@ export class RamayanaWorldEngine {
       isFlying: this.isFlying,
       heroAbilityCooldown: heroAbCd,
       heroAbilityMaxCooldown: this.heroAbilityMaxCooldown,
+      cameraPerspective: camPersp,
     });
   }
 
@@ -15488,10 +15995,14 @@ export class RamayanaWorldEngine {
         this.isSoftwareGl ? 0.8 : 2.0
       );
 
-      // Run 3-stage Frustum + Fog-Cutoff + Solid AABB Occlusion Culling right before draw
+      // Run Frustum + Solid AABB Occlusion Culling right before draw (zero fog cutoff)
       const fog = this.scene.fog as THREE.Fog | null;
       this.camera.updateMatrixWorld();
-      this.occlusionManager.update(this.camera, fog ? fog.far : 280, true);
+      this.occlusionManager.update(
+        this.camera,
+        fog ? fog.far : Number.POSITIVE_INFINITY,
+        true
+      );
 
       const activeGl = this.renderer.getContext();
       if (!activeGl || activeGl.isContextLost()) {
@@ -15500,7 +16011,7 @@ export class RamayanaWorldEngine {
         return;
       }
 
-      if (this.composer && !this.isSoftwareGl) {
+      if (this.composer && !this.isSoftwareGl && this.cameraSubmerged > 0.002) {
         this.composer.render();
       } else {
         this.renderer.render(this.scene, this.camera);

@@ -274,18 +274,6 @@ function smoothNoise(x: number, y: number): number {
   return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
 
-function fbm(x: number, y: number, octaves = 4): number {
-  let val = 0;
-  let amp = 0.5;
-  let freq = 1;
-  for (let i = 0; i < octaves; i++) {
-    val += amp * smoothNoise(x * freq, y * freq);
-    freq *= 2.02;
-    amp *= 0.5;
-  }
-  return val;
-}
-
 interface TrackedTexEntry {
   tex: THREE.CanvasTexture;
   isColor: boolean;
@@ -335,43 +323,36 @@ function synthSandstone(ctx: TextureSynthContext) {
     const localY = sy - row * 32;
     const xOffset = (row & 1) * 32;
     const rowOff = y * S;
-    const mortarY = localY < 2.2;
-    const bevelY = localY < 4.4 || localY > 29.6;
+    const mortarY = localY < 2.4;
+    const bevelY = localY < 4.5 || localY > 29.5;
     for (let x = 0; x < S; x++) {
       const sx = x * invK;
       const shiftedX = (sx + xOffset) % 256;
       const col = (shiftedX * 0.015625) | 0;
       const localX = shiftedX - col * 64;
-      const mortar = mortarY || localX < 2.2;
-      const bevel = !mortar && (bevelY || localX < 4.4 || localX > 61.6);
-      const grain = fbm(sx * 0.08, sy * 0.08, 4);
-      const strata = Math.sin(sy * 0.24 + grain * 2.8) * 0.06;
-      const pit = smoothNoise(sx * 0.34 + 13, sy * 0.34 - 5) < 0.18 ? -0.1 : 0;
-      const blockVar = hash2d(row, col) * 0.18 - 0.09;
-      const h = mortar
-        ? 0.10
-        : (bevel ? 0.50 : 0.68) + grain * 0.32 + strata + pit + blockVar;
+      const mortar = mortarY || localX < 2.4;
+      const bevel = !mortar && (bevelY || localX < 4.5 || localX > 61.5);
+      // Clean stylized broad tint per stone block with soft gradient (zero grainy pixel static)
+      const softGrad = smoothNoise(sx * 0.035, sy * 0.035) * 0.08;
+      const blockVar = (hash2d(row, col) - 0.5) * 0.14;
+      const h = mortar ? 0.18 : bevel ? 0.56 : 0.72 + softGrad + blockVar * 0.5;
       sandHeight[rowOff + x] = h;
 
-      const aoVal = mortar ? 92 : bevel ? 186 : clampByte((218 + grain * 36 + pit * 180) | 0);
+      const aoVal = mortar ? 148 : bevel ? 218 : 244;
       aoD32[rowOff + x] = packRGBA(aoVal, aoVal, aoVal, 255);
 
-      const weather = smoothNoise(sx * 0.04 + 21, sy * 0.04 + 9);
-      const base = mortar
-        ? 96
-        : 194 + blockVar * 124 + (grain - 0.5) * 44 + strata * 60 + pit * 90 - (1 - weather) * 14;
+      const base = mortar ? 162 : 216 + blockVar * 90 + softGrad * 54;
       sandD32[rowOff + x] = packRGBA(
         clampByte((base * 1.07 + 0.5) | 0),
-        clampByte((base * 0.82 + 0.5) | 0),
-        clampByte((base * 0.53 + 0.5) | 0),
+        clampByte((base * 0.85 + 0.5) | 0),
+        clampByte((base * 0.58 + 0.5) | 0),
         255
       );
     }
   }
   sctx.putImageData(sandImg, 0, 0);
   aoCtx.putImageData(aoImg, 0, 0);
-  const sandstoneAO = trackTex(ctx, buildRoughnessMapFromHeight(sandHeight, S, 0.38, 1.0, false, 2.5, 2.5, maxAniso, ctx.useSecondaryMips));
-  // Use the higher-contrast chiseled AO image directly
+  const sandstoneAO = trackTex(ctx, buildRoughnessMapFromHeight(sandHeight, S, 0.55, 1.0, false, 2.5, 2.5, maxAniso, ctx.useSecondaryMips));
   const aoImgOld = sandstoneAO.image as HTMLCanvasElement;
   sandstoneAO.image = aoCanvas;
   sandstoneAO.needsUpdate = true;
@@ -382,8 +363,8 @@ function synthSandstone(ctx: TextureSynthContext) {
 
   return {
     sandstone: trackTex(ctx, configureColorTexture(sandCanvas, 2.5, 2.5, maxAniso)),
-    sandstoneNormal: trackTex(ctx, buildNormalMapFromHeight(sandHeight, S, 1.32, 2.5, 2.5, maxAniso, ctx.useSecondaryMips)),
-    sandstoneRoughness: trackTex(ctx, buildRoughnessMapFromHeight(sandHeight, S, 0.70, 1.0, true, 2.5, 2.5, maxAniso, ctx.useSecondaryMips)),
+    sandstoneNormal: trackTex(ctx, buildNormalMapFromHeight(sandHeight, S, 0.36, 2.5, 2.5, maxAniso, ctx.useSecondaryMips)),
+    sandstoneRoughness: trackTex(ctx, buildRoughnessMapFromHeight(sandHeight, S, 0.74, 0.96, true, 2.5, 2.5, maxAniso, ctx.useSecondaryMips)),
     sandstoneAO,
   };
 }
@@ -403,34 +384,33 @@ function synthAvenueStone(ctx: TextureSynthContext) {
     const row = (sy * 0.03125) | 0;
     const localY = sy - row * 32;
     const xOff = (row & 1) * 24;
-    const jointY = !borderBand && localY < 1.6;
+    const jointY = !borderBand && localY < 1.8;
     const rowOff = y * S;
     for (let x = 0; x < S; x++) {
       const sx = x * invK;
       const sxMod = (sx + xOff) % 256;
       const col = (sxMod * 0.020833) | 0;
       const localX = sxMod - col * 48;
-      const joint = jointY || (!borderBand && localX < 1.6);
-      const tileTone = hash2d(row * 7, col * 11) * 0.14 - 0.07;
-      const grain = fbm(sx * 0.06, sy * 0.06, 4);
-      const fine = fbm(sx * 0.22 + 7, sy * 0.22 + 3, 2);
-      aveHeight[rowOff + x] = joint ? 0.16 : 0.56 + grain * 0.28 + fine * 0.12 + tileTone;
+      const joint = jointY || (!borderBand && localX < 1.8);
+      const tileTone = (hash2d(row * 7, col * 11) - 0.5) * 0.12;
+      const soft = smoothNoise(sx * 0.04, sy * 0.04) * 0.07;
+      aveHeight[rowOff + x] = joint ? 0.28 : 0.68 + soft + tileTone;
 
       if (borderBand) {
-        const curbGroove = (sx | 0) % 32 < 2 ? 0.84 : 1.0;
-        const bv = (168 + grain * 28) * curbGroove;
+        const curbGroove = (sx | 0) % 32 < 2 ? 0.9 : 1.0;
+        const bv = (192 + soft * 40) * curbGroove;
         aveD32[rowOff + x] = packRGBA(
-          clampByte((bv * 1.09 + 0.5) | 0),
-          clampByte((bv * 0.86 + 0.5) | 0),
-          clampByte((bv * 0.52 + 0.5) | 0),
+          clampByte((bv * 1.1 + 0.5) | 0),
+          clampByte((bv * 0.88 + 0.5) | 0),
+          clampByte((bv * 0.54 + 0.5) | 0),
           255
         );
       } else {
-        const v = joint ? 82 : 126 + (grain - 0.5) * 32 + (fine - 0.5) * 14 + tileTone * 95;
+        const v = joint ? 128 : 168 + tileTone * 85 + soft * 36;
         aveD32[rowOff + x] = packRGBA(
-          clampByte((v * 1.12 + 0.5) | 0),
-          clampByte((v * 0.96 + 0.5) | 0),
-          clampByte((v * 0.74 + 0.5) | 0),
+          clampByte((v * 1.11 + 0.5) | 0),
+          clampByte((v * 0.97 + 0.5) | 0),
+          clampByte((v * 0.78 + 0.5) | 0),
           255
         );
       }
@@ -439,8 +419,8 @@ function synthAvenueStone(ctx: TextureSynthContext) {
   actx.putImageData(aveImg, 0, 0);
   return {
     avenueStone: trackTex(ctx, configureColorTexture(aveCanvas, 24, 24, maxAniso)),
-    avenueNormal: trackTex(ctx, buildNormalMapFromHeight(aveHeight, S, 0.92, 24, 24, maxAniso, ctx.useSecondaryMips)),
-    avenueRoughness: trackTex(ctx, buildRoughnessMapFromHeight(aveHeight, S, 0.70, 0.98, true, 24, 24, maxAniso, ctx.useSecondaryMips)),
+    avenueNormal: trackTex(ctx, buildNormalMapFromHeight(aveHeight, S, 0.30, 24, 24, maxAniso, ctx.useSecondaryMips)),
+    avenueRoughness: trackTex(ctx, buildRoughnessMapFromHeight(aveHeight, S, 0.74, 0.96, true, 24, 24, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -458,15 +438,15 @@ function synthGrassEarth(ctx: TextureSynthContext) {
     const rowOff = y * S;
     for (let x = 0; x < S; x++) {
       const sx = x * invK;
-      const n1 = fbm(sx * 0.055, sy * 0.055, 4);
-      const clover = fbm(sx * 0.16 + 19, sy * 0.16 + 7, 2);
-      const blades = hash2d(x, y) * 0.24;
-      const soil = Math.max(0, 0.42 - n1) * 1.6;
-      grassHeight[rowOff + x] = n1 * 0.68 + clover * 0.14 + blades;
+      // Clean painterly broad emerald-meadow patches without gritty per-pixel static
+      const broad = smoothNoise(sx * 0.035, sy * 0.035);
+      const patch = smoothNoise(sx * 0.08 + 11, sy * 0.08 + 5);
+      const blend = broad * 0.65 + patch * 0.35;
+      grassHeight[rowOff + x] = 0.5 + blend * 0.25;
       grassD32[rowOff + x] = packRGBA(
-        clampByte((58 + n1 * 46 + blades * 34 + soil * 42 + 0.5) | 0),
-        clampByte((84 + n1 * 64 + clover * 22 + blades * 40 - soil * 14 + 0.5) | 0),
-        clampByte((38 + n1 * 28 + soil * 10 + 0.5) | 0),
+        clampByte((84 + blend * 36 + 0.5) | 0),
+        clampByte((148 + blend * 46 + 0.5) | 0),
+        clampByte((58 + blend * 22 + 0.5) | 0),
         255
       );
     }
@@ -474,8 +454,8 @@ function synthGrassEarth(ctx: TextureSynthContext) {
   gctx.putImageData(grassImg, 0, 0);
   return {
     grassEarth: trackTex(ctx, configureColorTexture(grassCanvas, 72, 72, maxAniso)),
-    grassNormal: trackTex(ctx, buildNormalMapFromHeight(grassHeight, S, 0.98, 72, 72, maxAniso, ctx.useSecondaryMips)),
-    grassRoughness: trackTex(ctx, buildRoughnessMapFromHeight(grassHeight, S, 0.78, 1.0, true, 72, 72, maxAniso, ctx.useSecondaryMips)),
+    grassNormal: trackTex(ctx, buildNormalMapFromHeight(grassHeight, S, 0.24, 72, 72, maxAniso, ctx.useSecondaryMips)),
+    grassRoughness: trackTex(ctx, buildRoughnessMapFromHeight(grassHeight, S, 0.80, 0.96, true, 72, 72, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -493,23 +473,22 @@ function synthWater(ctx: TextureSynthContext) {
     const rowOff = y * S;
     for (let x = 0; x < S; x++) {
       const sx = x * invK;
-      const w1 = Math.sin(sx * 0.14 + sy * 0.08) * 0.5 + 0.5;
-      const w2 = fbm(sx * 0.09, sy * 0.15, 3);
-      const caustic = Math.pow(Math.max(0, Math.sin(sx * 0.23 + w2 * 3.2) * Math.cos(sy * 0.21 - w2 * 2.6)), 2.0);
-      const h = w1 * 0.40 + w2 * 0.45 + caustic * 0.25;
+      const w1 = Math.sin(sx * 0.11 + sy * 0.07) * 0.5 + 0.5;
+      const w2 = smoothNoise(sx * 0.07, sy * 0.11);
+      const caustic = Math.pow(Math.max(0, Math.sin(sx * 0.18 + w2 * 2.4) * Math.cos(sy * 0.16 - w2 * 2.0)), 2.0);
+      const h = w1 * 0.38 + w2 * 0.42 + caustic * 0.24;
       waterHeight[rowOff + x] = h;
       waterD32[rowOff + x] = packRGBA(
-        clampByte((24 + h * 38 + caustic * 28 + 0.5) | 0),
-        clampByte((94 + h * 62 + caustic * 42 + 0.5) | 0),
-        clampByte((124 + h * 68 + caustic * 36 + 0.5) | 0),
+        clampByte((38 + h * 42 + caustic * 36 + 0.5) | 0),
+        clampByte((142 + h * 58 + caustic * 44 + 0.5) | 0),
+        clampByte((184 + h * 52 + caustic * 36 + 0.5) | 0),
         255
       );
     }
   }
   wctx.putImageData(waterImg, 0, 0);
 
-  // Vertically-streaked frothy waterfall & rapid foam alpha/luminance texture
-  const foamSize = Math.min(256, S);
+  const foamSize = Math.min(128, S);
   const foamCanvas = document.createElement('canvas');
   foamCanvas.width = foamSize;
   foamCanvas.height = foamSize;
@@ -522,13 +501,13 @@ function synthWater(ctx: TextureSynthContext) {
     const rowOff = y * foamSize;
     for (let x = 0; x < foamSize; x++) {
       const sx = x * fk;
-      const streak = fbm(sx * 0.26, sy * 0.045, 3);
-      const mist = fbm(sx * 0.12 + 17, sy * 0.12 - 9, 3);
-      const foam = Math.min(1, Math.max(0, streak * 0.72 + mist * 0.42 - 0.18));
+      const streak = smoothNoise(sx * 0.16, sy * 0.04);
+      const mist = smoothNoise(sx * 0.09 + 17, sy * 0.09 - 9);
+      const foam = Math.min(1, Math.max(0, streak * 0.68 + mist * 0.42 - 0.14));
       const a = clampByte((foam * 255) | 0);
       fD32[rowOff + x] = packRGBA(
-        clampByte((210 + foam * 45) | 0),
-        clampByte((238 + foam * 17) | 0),
+        clampByte((224 + foam * 31) | 0),
+        clampByte((244 + foam * 11) | 0),
         255,
         a
       );
@@ -539,7 +518,7 @@ function synthWater(ctx: TextureSynthContext) {
 
   return {
     water: trackTex(ctx, configureColorTexture(waterCanvas, 4, 18, maxAniso)),
-    waterNormal: trackTex(ctx, buildNormalMapFromHeight(waterHeight, S, 1.15, 4, 18, maxAniso)),
+    waterNormal: trackTex(ctx, buildNormalMapFromHeight(waterHeight, S, 0.55, 4, 18, maxAniso)),
     waterfallFoam,
   };
 }
@@ -558,15 +537,14 @@ function synthBark(ctx: TextureSynthContext) {
     const rowOff = y * S;
     for (let x = 0; x < S; x++) {
       const sx = x * invK;
-      const ridge = Math.sin(sx * 0.25 + fbm(sx * 0.06, sy * 0.03, 3) * 4.5) * 0.5 + 0.5;
-      const fine = fbm(sx * 0.18, sy * 0.07, 4);
-      const h = ridge * 0.68 + fine * 0.32;
+      const ridge = Math.sin(sx * 0.18 + smoothNoise(sx * 0.04, sy * 0.02) * 2.6) * 0.5 + 0.5;
+      const soft = smoothNoise(sx * 0.09, sy * 0.04);
+      const h = ridge * 0.58 + soft * 0.42;
       barkHeight[rowOff + x] = h;
-      const moss = smoothNoise(sx * 0.05 + 10, sy * 0.05) > 0.70 ? 1 : 0;
       barkD32[rowOff + x] = packRGBA(
-        clampByte((50 + h * 70 - moss * 14 + 0.5) | 0),
-        clampByte((37 + h * 50 + moss * 24 + 0.5) | 0),
-        clampByte((24 + h * 30 - moss * 8 + 0.5) | 0),
+        clampByte((86 + h * 46 + 0.5) | 0),
+        clampByte((58 + h * 34 + 0.5) | 0),
+        clampByte((38 + h * 22 + 0.5) | 0),
         255
       );
     }
@@ -574,7 +552,7 @@ function synthBark(ctx: TextureSynthContext) {
   bctx.putImageData(barkImg, 0, 0);
   return {
     bark: trackTex(ctx, configureColorTexture(barkCanvas, 2, 3, maxAniso)),
-    barkNormal: trackTex(ctx, buildNormalMapFromHeight(barkHeight, S, 1.55, 2, 3, maxAniso)),
+    barkNormal: trackTex(ctx, buildNormalMapFromHeight(barkHeight, S, 0.42, 2, 3, maxAniso)),
   };
 }
 
@@ -588,50 +566,43 @@ function synthFoliage(ctx: TextureSynthContext) {
   fctx.save();
   fctx.scale(K, K);
 
-  for (let i = 0; i < 165; i++) {
+  for (let i = 0; i < 140; i++) {
     const cx = hash2d(i, 3.1) * 256;
     const cy = hash2d(i, 7.7) * 256;
     const distFromCenter = Math.hypot(cx - 128, cy - 128);
     if (distFromCenter > 256 * 0.43) continue;
 
     const angle = hash2d(i, 12.3) * Math.PI * 2;
-    const len = 18 + hash2d(i, 19.1) * 20;
-    const wid = len * 0.42;
+    const len = 21 + hash2d(i, 19.1) * 21;
+    const wid = len * 0.46;
     const shade = hash2d(i, 23.9);
 
     fctx.save();
     fctx.translate(cx, cy);
     fctx.rotate(angle);
 
+    // Clean vibrant stylized leaf petals without noisy center vein lines
     const grad = fctx.createLinearGradient(-len, 0, len, 0);
     if (shade > 0.65) {
-      grad.addColorStop(0, '#2a5621');
-      grad.addColorStop(0.6, '#4f8a36');
-      grad.addColorStop(1, '#7ab84c');
+      grad.addColorStop(0, '#3a862c');
+      grad.addColorStop(0.6, '#5fb843');
+      grad.addColorStop(1, '#8be05a');
     } else if (shade > 0.3) {
-      grad.addColorStop(0, '#1f441a');
-      grad.addColorStop(0.65, '#3b712a');
-      grad.addColorStop(1, '#5d9b3b');
+      grad.addColorStop(0, '#2e6f24');
+      grad.addColorStop(0.65, '#4c9c35');
+      grad.addColorStop(1, '#70c447');
     } else {
-      grad.addColorStop(0, '#173413');
-      grad.addColorStop(0.7, '#2d5b22');
-      grad.addColorStop(1, '#447c2d');
+      grad.addColorStop(0, '#23581c');
+      grad.addColorStop(0.7, '#3c802a');
+      grad.addColorStop(1, '#58a83a');
     }
 
     fctx.fillStyle = grad;
     fctx.beginPath();
-    fctx.moveTo(-len * 0.85, 0);
-    fctx.quadraticCurveTo(0, -wid, len * 0.85, 0);
-    fctx.quadraticCurveTo(0, wid, -len * 0.85, 0);
+    fctx.moveTo(-len * 0.86, 0);
+    fctx.quadraticCurveTo(0, -wid, len * 0.86, 0);
+    fctx.quadraticCurveTo(0, wid, -len * 0.86, 0);
     fctx.fill();
-
-    fctx.strokeStyle = 'rgba(170, 212, 110, 0.45)';
-    fctx.lineWidth = 1.1;
-    fctx.beginPath();
-    fctx.moveTo(-len * 0.72, 0);
-    fctx.lineTo(len * 0.72, 0);
-    fctx.stroke();
-
     fctx.restore();
   }
   fctx.restore();
@@ -641,7 +612,7 @@ function synthFoliage(ctx: TextureSynthContext) {
   }
   return {
     foliage: trackTex(ctx, configureColorTexture(folCanvas, 1, 1, maxAniso, true)),
-    foliageNormal: trackTex(ctx, buildNormalMapFromHeight(folHeight, S, 0.84, 1, 1, maxAniso)),
+    foliageNormal: trackTex(ctx, buildNormalMapFromHeight(folHeight, S, 0.25, 1, 1, maxAniso)),
   };
 }
 
@@ -657,23 +628,21 @@ function synthSilkGold(ctx: TextureSynthContext) {
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
     const border = sy > 256 - 28 || sy < 14;
-    const cosSy = Math.cos(sy * 1.1);
     const rowOff = y * S;
     for (let x = 0; x < S; x++) {
       const sx = x * invK;
-      const weave = (Math.sin(sx * 1.1) * cosSy) * 0.5 + 0.5;
-      const fold = Math.sin(sx * 0.12) * 0.5 + 0.5;
-      const motif = border && (((sx + sy) | 0) % 16 < 6 || (((sx - sy + 256) | 0) % 16 < 6));
-      silkHeight[rowOff + x] = weave * 0.3 + fold * 0.5 + (motif ? 0.25 : 0);
+      const fold = Math.sin(sx * 0.10) * 0.5 + 0.5;
+      const motif = border && (((sx + sy) | 0) % 16 < 7 || (((sx - sy + 256) | 0) % 16 < 7));
+      silkHeight[rowOff + x] = 0.5 + fold * 0.28 + (motif ? 0.18 : 0);
 
       if (border) {
-        silkD32[rowOff + x] = packRGBA(motif ? 248 : 196, motif ? 210 : 142, motif ? 92 : 44, 255);
+        silkD32[rowOff + x] = packRGBA(motif ? 255 : 214, motif ? 222 : 162, motif ? 104 : 52, 255);
       } else {
-        const lum = 0.85 + fold * 0.22 + weave * 0.08;
+        const lum = 0.92 + fold * 0.12;
         silkD32[rowOff + x] = packRGBA(
-          clampByte((226 * lum + 0.5) | 0),
-          clampByte((148 * lum + 0.5) | 0),
-          clampByte((32 * lum + 0.5) | 0),
+          clampByte((242 * lum + 0.5) | 0),
+          clampByte((164 * lum + 0.5) | 0),
+          clampByte((38 * lum + 0.5) | 0),
           255
         );
       }
@@ -682,8 +651,8 @@ function synthSilkGold(ctx: TextureSynthContext) {
   slCtx.putImageData(silkImg, 0, 0);
   return {
     silkGold: trackTex(ctx, configureColorTexture(silkCanvas, 2, 2, maxAniso)),
-    silkNormal: trackTex(ctx, buildNormalMapFromHeight(silkHeight, S, 0.78, 2, 2, maxAniso, ctx.useSecondaryMips)),
-    silkRoughness: trackTex(ctx, buildRoughnessMapFromHeight(silkHeight, S, 0.64, 0.96, true, 2, 2, maxAniso, ctx.useSecondaryMips)),
+    silkNormal: trackTex(ctx, buildNormalMapFromHeight(silkHeight, S, 0.22, 2, 2, maxAniso, ctx.useSecondaryMips)),
+    silkRoughness: trackTex(ctx, buildRoughnessMapFromHeight(silkHeight, S, 0.64, 0.90, true, 2, 2, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -698,20 +667,18 @@ function synthArmorMetal(ctx: TextureSynthContext) {
 
   for (let y = 0; y < S; y++) {
     const sy = y * invK;
-    const sinSy = Math.sin(sy * 0.35);
     const rowOff = y * S;
     for (let x = 0; x < S; x++) {
       const sx = x * invK;
-      const hammer = fbm(sx * 0.18, sy * 0.18, 3);
-      const damascus = Math.sin(sx * 0.28 + hammer * 5.5) * 0.14 + 0.5;
-      const scalePattern = Math.sin(sx * 0.35) * sinSy * 0.35 + 0.5;
-      const h = hammer * 0.45 + scalePattern * 0.35 + damascus * 0.2;
+      const sheen = smoothNoise(sx * 0.05, sy * 0.05) * 0.4 + 0.4;
+      const band = Math.sin(sx * 0.12 + sy * 0.06) * 0.12 + 0.5;
+      const h = sheen * 0.6 + band * 0.4;
       armHeight[rowOff + x] = h;
-      const v = 136 + h * 80;
+      const v = 166 + h * 58;
       armD32[rowOff + x] = packRGBA(
-        clampByte((v * 1.13 + 0.5) | 0),
-        clampByte((v * 0.96 + 0.5) | 0),
-        clampByte((v * 0.68 + 0.5) | 0),
+        clampByte((v * 1.12 + 0.5) | 0),
+        clampByte((v * 0.97 + 0.5) | 0),
+        clampByte((v * 0.66 + 0.5) | 0),
         255
       );
     }
@@ -719,9 +686,9 @@ function synthArmorMetal(ctx: TextureSynthContext) {
   arCtx.putImageData(armImg, 0, 0);
   return {
     armorMetal: trackTex(ctx, configureColorTexture(armCanvas, 2, 2, maxAniso)),
-    armorNormal: trackTex(ctx, buildNormalMapFromHeight(armHeight, S, 1.25, 2, 2, maxAniso, ctx.useSecondaryMips)),
-    armorRoughness: trackTex(ctx, buildRoughnessMapFromHeight(armHeight, S, 0.58, 0.94, true, 2, 2, maxAniso, ctx.useSecondaryMips)),
-    armorMetalness: trackTex(ctx, buildRoughnessMapFromHeight(armHeight, S, 0.74, 0.98, false, 2, 2, maxAniso, ctx.useSecondaryMips)),
+    armorNormal: trackTex(ctx, buildNormalMapFromHeight(armHeight, S, 0.24, 2, 2, maxAniso, ctx.useSecondaryMips)),
+    armorRoughness: trackTex(ctx, buildRoughnessMapFromHeight(armHeight, S, 0.46, 0.72, true, 2, 2, maxAniso, ctx.useSecondaryMips)),
+    armorMetalness: trackTex(ctx, buildRoughnessMapFromHeight(armHeight, S, 0.78, 0.95, false, 2, 2, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -740,20 +707,19 @@ function synthRoyalSkinAndBasalt(ctx: TextureSynthContext) {
     const rowOff = y * S;
     for (let x = 0; x < S; x++) {
       const nx = Math.sin(x * twoPiOverS);
-      const micro = 0.5 + 0.25 * Math.sin(nx * 4.0 + ny * 3.0) + 0.15 * Math.cos(nx * 7.0 - ny * 5.0);
-      const tone = 0.96 + micro * 0.04;
-      scratchHeight[rowOff + x] = 0.5 + micro * 0.04;
+      const tone = 0.98 + 0.02 * Math.sin(nx * 2.0 + ny * 2.0);
+      scratchHeight[rowOff + x] = 0.5;
       skinD32[rowOff + x] = packRGBA(
-        clampByte((42 * tone + 0.5) | 0),
-        clampByte((78 * tone + 0.5) | 0),
-        clampByte((142 * tone + 0.5) | 0),
+        clampByte((52 * tone + 0.5) | 0),
+        clampByte((92 * tone + 0.5) | 0),
+        clampByte((164 * tone + 0.5) | 0),
         255
       );
     }
   }
   skCtx.putImageData(skinImg, 0, 0);
   const royalSkin = trackTex(ctx, configureColorTexture(skinCanvas, 1, 1, maxAniso, false, ctx.useSecondaryMips));
-  const royalSkinNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.16, 1, 1, maxAniso, ctx.useSecondaryMips));
+  const royalSkinNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.05, 1, 1, maxAniso, ctx.useSecondaryMips));
 
   const basCanvas = document.createElement('canvas');
   basCanvas.width = S;
@@ -767,24 +733,23 @@ function synthRoyalSkinAndBasalt(ctx: TextureSynthContext) {
     const rowOff = y * S;
     for (let x = 0; x < S; x++) {
       const sx = x * invK;
-      const vein = Math.sin(sx * 0.05 + fbm(sx * 0.04, sy * 0.04, 3) * 5.2) * 0.5 + 0.5;
-      const grain = fbm(sx * 0.14, sy * 0.14, 3);
-      const h = vein * 0.45 + grain * 0.55;
+      const vein = Math.sin(sx * 0.05 + smoothNoise(sx * 0.03, sy * 0.03) * 3.2) * 0.5 + 0.5;
+      const h = 0.35 + vein * 0.45;
       scratchHeight[rowOff + x] = h;
-      const v = 26 + h * 36;
+      const v = 38 + h * 34;
       basD32[rowOff + x] = packRGBA(
-        (v * 0.96 + 0.5) | 0,
+        (v * 0.95 + 0.5) | 0,
         (v + 0.5) | 0,
-        (v * 1.12 + 0.5) | 0,
+        (v * 1.15 + 0.5) | 0,
         255
       );
     }
   }
   baCtx.putImageData(basImg, 0, 0);
   const darkBasalt = trackTex(ctx, configureColorTexture(basCanvas, 2, 2, maxAniso));
-  const darkBasaltNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.85, 2, 2, maxAniso));
+  const darkBasaltNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.28, 2, 2, maxAniso));
 
-  // Stratified Himalayan granite / mountain cliff texture + deep fissure normal map
+  // Clean stylized cliff rock with smooth broad strata tones
   const cliffCanvas = document.createElement('canvas');
   cliffCanvas.width = S;
   cliffCanvas.height = S;
@@ -796,16 +761,15 @@ function synthRoyalSkinAndBasalt(ctx: TextureSynthContext) {
     const rowOff = y * S;
     for (let x = 0; x < S; x++) {
       const sx = x * invK;
-      const macro = fbm(sx * 0.05, sy * 0.09, 4);
-      const strata = Math.sin(sy * 0.18 + macro * 6.0) * 0.5 + 0.5;
-      const fracture = Math.abs(smoothNoise(sx * 0.14 + 3, sy * 0.14 - 7) - 0.5) * 2.0;
-      const h = macro * 0.5 + strata * 0.35 + fracture * 0.15;
+      const macro = smoothNoise(sx * 0.04, sy * 0.07);
+      const strata = Math.sin(sy * 0.12 + macro * 3.0) * 0.5 + 0.5;
+      const h = macro * 0.6 + strata * 0.4;
       scratchHeight[rowOff + x] = h;
-      const v = 64 + h * 76;
+      const v = 96 + h * 64;
       clD32[rowOff + x] = packRGBA(
         clampByte((v * 1.04 + 0.5) | 0),
-        clampByte((v * 0.98 + 0.5) | 0),
-        clampByte((v * 0.92 + 0.5) | 0),
+        clampByte((v * 0.99 + 0.5) | 0),
+        clampByte((v * 0.94 + 0.5) | 0),
         255
       );
     }
@@ -818,7 +782,7 @@ function synthRoyalSkinAndBasalt(ctx: TextureSynthContext) {
     darkBasalt,
     darkBasaltNormal,
     rockCliff: trackTex(ctx, configureColorTexture(cliffCanvas, 3, 3, maxAniso)),
-    rockCliffNormal: trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 1.48, 3, 3, maxAniso, ctx.useSecondaryMips)),
+    rockCliffNormal: trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.36, 3, 3, maxAniso, ctx.useSecondaryMips)),
   };
 }
 
@@ -888,7 +852,7 @@ function synthEpigraphAndMythArt(ctx: TextureSynthContext) {
     scratchHeight[i] = (epiData[o] + epiData[o + 1] + epiData[o + 2]) * inv765;
   }
   const royalEpigraph = trackTex(ctx, configureColorTexture(epiCanvas, 1, 1, maxAniso, true, ctx.useSecondaryMips));
-  const royalEpigraphNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 1.38, 1, 1, maxAniso, ctx.useSecondaryMips));
+  const royalEpigraphNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.38, 1, 1, maxAniso, ctx.useSecondaryMips));
 
   const mythCanvas = document.createElement('canvas');
   mythCanvas.width = S;
@@ -950,7 +914,7 @@ function synthEpigraphAndMythArt(ctx: TextureSynthContext) {
     scratchHeight[i] = (mythData[o] + mythData[o + 1] + mythData[o + 2]) * inv765;
   }
   const mythologyArt = trackTex(ctx, configureColorTexture(mythCanvas, 2, 2, maxAniso, false, ctx.useSecondaryMips));
-  const mythologyArtNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 1.30, 2, 2, maxAniso, ctx.useSecondaryMips));
+  const mythologyArtNormal = trackTex(ctx, buildNormalMapFromHeight(scratchHeight, S, 0.34, 2, 2, maxAniso, ctx.useSecondaryMips));
 
   return {
     royalEpigraph,
@@ -1002,7 +966,7 @@ function synthVelvetCurtain(ctx: TextureSynthContext) {
   cctx.putImageData(curtImg, 0, 0);
   return {
     velvetCurtain: trackTex(ctx, configureColorTexture(curtCanvas, 1, 1, maxAniso)),
-    velvetCurtainNormal: trackTex(ctx, buildNormalMapFromHeight(curtHeight, S, 1.08, 1, 1, maxAniso)),
+    velvetCurtainNormal: trackTex(ctx, buildNormalMapFromHeight(curtHeight, S, 0.28, 1, 1, maxAniso)),
   };
 }
 
@@ -1021,7 +985,6 @@ function synthRedCarpetAndShadow(ctx: TextureSynthContext) {
     const sy = y * invK;
     const dy = (y - halfS) * invHalfS;
     const dySq = dy * dy;
-    const cosSy = Math.cos(sy * 1.15);
     const edgeY = sy < 14 || sy > 256 - 15;
     const beadYBand = Math.abs(sy - 20) < 2 || Math.abs(sy - (256 - 21)) < 2;
     const deepY = sy < 5 || sy > 256 - 6;
@@ -1031,8 +994,6 @@ function synthRedCarpetAndShadow(ctx: TextureSynthContext) {
       const dx = (x - halfS) * invHalfS;
       const dist = Math.sqrt(dx * dx + dySq);
       const ang = Math.atan2(dy, dx);
-      const pile = fbm(sx * 0.22, sy * 0.22, 3);
-      const warpWeft = (Math.sin(sx * 1.15) * cosSy) * 0.5 + 0.5;
 
       const edgeBand = edgeY || sx < 14 || sx > 256 - 15;
       const innerBead =
@@ -1049,24 +1010,23 @@ function synthRedCarpetAndShadow(ctx: TextureSynthContext) {
         (Math.abs(dist - 0.66) < 0.03 && Math.sin(ang * 16) > 0.35);
       const isGoldMotif = edgeBand || innerBead || lotusPetal || centerBoss || outerRing;
 
-      carpHeight[rowOff + x] = 0.48 + pile * 0.26 + warpWeft * 0.14 + (isGoldMotif ? 0.24 : 0);
+      carpHeight[rowOff + x] = 0.52 + (isGoldMotif ? 0.22 : 0);
 
-      const fiberLum = 0.84 + pile * 0.22 + warpWeft * 0.09;
       if (isGoldMotif) {
         const deepRim = dist < 0.05 || (edgeBand && (deepY || sx < 5 || sx > 256 - 6));
-        const gf = fiberLum * (deepRim ? 0.78 : 1.02);
+        const gf = deepRim ? 0.86 : 1.04;
         carpD32[rowOff + x] = packRGBA(
-          clampByte((234 * gf + 0.5) | 0),
-          clampByte((176 * gf + 0.5) | 0),
-          clampByte((58 * gf + 0.5) | 0),
+          clampByte((242 * gf + 0.5) | 0),
+          clampByte((184 * gf + 0.5) | 0),
+          clampByte((64 * gf + 0.5) | 0),
           255
         );
       } else {
-        const diamond = Math.sin((sx + sy) * 0.19) * Math.cos((sx - sy) * 0.19) > 0.72 ? 1.12 : 1.0;
+        const diamond = Math.sin((sx + sy) * 0.19) * Math.cos((sx - sy) * 0.19) > 0.72 ? 1.09 : 1.0;
         carpD32[rowOff + x] = packRGBA(
-          clampByte((158 * fiberLum * diamond + 0.5) | 0),
-          clampByte((18 * fiberLum + 0.5) | 0),
-          clampByte((26 * fiberLum + 0.5) | 0),
+          clampByte((174 * diamond + 0.5) | 0),
+          clampByte(24),
+          clampByte(34),
           255
         );
       }
@@ -1074,8 +1034,8 @@ function synthRedCarpetAndShadow(ctx: TextureSynthContext) {
   }
   rpCtx.putImageData(carpImg, 0, 0);
   const redCarpet = trackTex(ctx, configureColorTexture(carpCanvas, 1, 1, maxAniso));
-  const redCarpetNormal = trackTex(ctx, buildNormalMapFromHeight(carpHeight, S, 0.92, 1, 1, maxAniso, ctx.useSecondaryMips));
-  const redCarpetRoughness = trackTex(ctx, buildRoughnessMapFromHeight(carpHeight, S, 0.66, 1.0, true, 1, 1, maxAniso, ctx.useSecondaryMips));
+  const redCarpetNormal = trackTex(ctx, buildNormalMapFromHeight(carpHeight, S, 0.26, 1, 1, maxAniso, ctx.useSecondaryMips));
+  const redCarpetRoughness = trackTex(ctx, buildRoughnessMapFromHeight(carpHeight, S, 0.68, 0.94, true, 1, 1, maxAniso, ctx.useSecondaryMips));
 
   const shadCanvas = document.createElement('canvas');
   shadCanvas.width = 256;
@@ -1103,14 +1063,14 @@ function createSynthContext(
   options: AsyncTextureLoadOptions = {}
 ): TextureSynthContext {
   const hwMaxAniso = Math.max(1, renderer.capabilities.getMaxAnisotropy());
-  const requestedCap = options.maxAnisotropy ?? (isSoftwareGl ? 1 : 4);
+  const requestedCap = options.maxAnisotropy ?? (isSoftwareGl ? 1 : 16);
   const maxAniso = Math.max(1, Math.min(hwMaxAniso, requestedCap));
   const maxTexSize = renderer.capabilities.maxTextureSize || 2048;
   const isConstrainedMobile =
     typeof navigator !== 'undefined' &&
     (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) || maxTexSize < 4096);
   const defaultS = !isSoftwareGl && maxTexSize >= 2048 && !isConstrainedMobile ? 1024 : 512;
-  const S = Math.min(maxTexSize, options.textureSize ?? defaultS);
+  const S = Math.min(maxTexSize, Math.min(2048, options.textureSize ?? defaultS));
   const K = S / 256;
   return {
     S,

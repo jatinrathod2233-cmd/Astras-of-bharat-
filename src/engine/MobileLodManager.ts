@@ -34,114 +34,109 @@ export class MobileLodAssetCache {
   constructor(textures: ProceduralTextures) {
     this.unitBoxGeo = this.trackGeo(new THREE.BoxGeometry(1, 1, 1));
     this.pyramidFourGeo = this.trackGeo(new THREE.ConeGeometry(0.71, 1, 4));
-    this.octCylinderGeo = this.trackGeo(new THREE.CylinderGeometry(0.85, 1.0, 1, 8));
+    this.octCylinderGeo = this.trackGeo(new THREE.CylinderGeometry(0.85, 1.0, 1, 6));
     this.coneSixGeo = this.trackGeo(new THREE.ConeGeometry(1.0, 1.0, 6));
-    this.discGeo = this.trackGeo(new THREE.CircleGeometry(1, 16));
-    this.hexPeakGeo = this.trackGeo(new THREE.ConeGeometry(1, 1, 7));
+    this.discGeo = this.trackGeo(new THREE.CircleGeometry(1, 8));
+    this.hexPeakGeo = this.trackGeo(new THREE.ConeGeometry(1, 1, 6));
 
     this.templeStoneMat = this.trackMat(
       new THREE.MeshPhysicalMaterial({
         map: textures.sandstone,
-        normalMap: textures.sandstoneNormal,
-        aoMap: textures.sandstoneAO,
-        aoMapIntensity: 0.72,
-        color: 0xe4bf8e,
-        roughness: 0.84,
-        metalness: 0.05,
-        ior: 1.54,
+        color: 0xf2cfa0,
+        roughness: 0.78,
+        metalness: 0.04,
+        flatShading: true,
+        ior: 1.48,
       })
     );
     this.templeTrimMat = this.trackMat(
       new THREE.MeshPhysicalMaterial({
         map: textures.sandstone,
-        normalMap: textures.sandstoneNormal,
-        aoMap: textures.sandstoneAO,
-        aoMapIntensity: 0.72,
-        color: 0x9f6635,
-        roughness: 0.74,
-        metalness: 0.14,
-        ior: 1.54,
+        color: 0xb8763e,
+        roughness: 0.72,
+        metalness: 0.1,
+        flatShading: true,
+        ior: 1.48,
       })
     );
     this.templeGoldMat = this.trackMat(
       new THREE.MeshPhysicalMaterial({
         map: textures.armorMetal,
-        normalMap: textures.armorNormal,
-        metalnessMap: textures.armorMetalness,
-        color: 0xf4c24e,
-        roughness: 0.30,
-        metalness: 0.92,
-        ior: 1.62,
+        color: 0xffd058,
+        roughness: 0.34,
+        metalness: 0.84,
+        flatShading: true,
+        ior: 1.56,
       })
     );
     this.pavilionWallMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.sandstone,
-        normalMap: textures.sandstoneNormal,
-        aoMap: textures.sandstoneAO,
-        aoMapIntensity: 0.65,
-        color: 0xdfb988,
-        roughness: 0.8,
+        color: 0xecc896,
+        roughness: 0.78,
+        flatShading: true,
       })
     );
     this.pavilionRoofMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.silkGold,
-        normalMap: textures.silkNormal,
-        color: 0xa6462b,
+        color: 0xc24c30,
         roughness: 0.68,
+        flatShading: true,
       })
     );
     this.obsidianMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.darkBasalt,
-        normalMap: textures.darkBasaltNormal,
-        color: 0x1e1b22,
-        roughness: 0.78,
-        metalness: 0.18,
+        color: 0x2b2736,
+        roughness: 0.76,
+        metalness: 0.14,
+        flatShading: true,
       })
     );
     this.emberMat = this.trackMat(
       new THREE.MeshStandardMaterial({
-        color: 0xff5a18,
-        emissive: 0xff3200,
-        emissiveIntensity: 1.6,
-        roughness: 0.32,
+        color: 0xff621e,
+        emissive: 0xff3b06,
+        emissiveIntensity: 1.55,
+        roughness: 0.36,
+        flatShading: true,
       })
     );
     this.volcanoRockMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.rockCliff,
-        normalMap: textures.rockCliffNormal,
-        color: 0x241d26,
-        roughness: 0.9,
-        metalness: 0.08,
+        color: 0x342938,
+        roughness: 0.86,
+        metalness: 0.06,
+        flatShading: true,
       })
     );
     this.foothillRockMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.rockCliff,
-        normalMap: textures.rockCliffNormal,
-        color: 0x5c684d,
-        roughness: 0.88,
-        metalness: 0.04,
+        color: 0x6f7f5c,
+        roughness: 0.84,
+        metalness: 0.03,
+        flatShading: true,
       })
     );
     this.volcanoMagmaMat = this.trackMat(
       new THREE.MeshPhysicalMaterial({
-        color: 0xff5216,
-        emissive: 0xff3b08,
-        emissiveIntensity: 2.35,
-        roughness: 0.32,
+        color: 0xff5a1a,
+        emissive: 0xff420a,
+        emissiveIntensity: 2.2,
+        roughness: 0.36,
+        flatShading: true,
       })
     );
     this.statueGraniteMat = this.trackMat(
       new THREE.MeshStandardMaterial({
         map: textures.darkBasalt,
-        normalMap: textures.darkBasaltNormal,
-        color: 0x3b404c,
-        roughness: 0.62,
-        metalness: 0.16,
+        color: 0x4b5364,
+        roughness: 0.64,
+        metalness: 0.14,
+        flatShading: true,
       })
     );
   }
@@ -444,7 +439,7 @@ export function wrapVolcanoWithLod(
 
   const farGroup = new THREE.Group();
   const coarseConeGeo = cache.trackGeo(
-    new THREE.CylinderGeometry(radius * 0.23, radius, height, 14, 3, false)
+    new THREE.CylinderGeometry(radius * 0.23, radius, height, 8, 1, false)
   );
   const coarseCone = new THREE.Mesh(coarseConeGeo, cache.volcanoRockMat);
   coarseCone.position.y = height * 0.5;

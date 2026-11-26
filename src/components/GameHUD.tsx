@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   AlertTriangle,
+  Camera,
   Eye,
   EyeOff,
   Flame,
@@ -54,6 +55,7 @@ interface GameHUDProps {
   onSwitchSeat: () => void;
   onToggleStealth: () => void;
   onToggleAutoDrive: () => void;
+  onToggleCameraPerspective: () => void;
 }
 
 const STAR_LEVELS = [1, 2, 3, 4, 5] as const;
@@ -87,6 +89,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   onSwitchSeat,
   onToggleStealth,
   onToggleAutoDrive,
+  onToggleCameraPerspective,
 }) => {
   const hpPct = Math.max(0, Math.min(100, (hud.hp / hud.maxHp) * 100));
   const pranaPct = Math.max(0, Math.min(100, (hud.prana / hud.maxPrana) * 100));
@@ -401,14 +404,29 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
           )}
         </div>
 
-        {/* Top-Right Zone: Audio/Pause + Mount Speed / Stealth Status */}
+        {/* Top-Right Zone: Camera View Toggle / Audio / Pause + Mount Speed / Stealth Status */}
         <div className="flex flex-col items-end gap-1 shrink-0">
           <div className="pointer-events-auto flex items-center gap-1">
             <button
               type="button"
+              onClick={onToggleCameraPerspective}
+              title="Toggle Camera Perspective (K)"
+              aria-label={`Camera: ${hud.cameraPerspective === 'SECOND_PERSON' ? 'Second Person waist framing' : 'First Person'}. Click to switch.`}
+              className={`inline-flex h-8 items-center gap-1 rounded-md border px-2 text-[10px] font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                hud.cameraPerspective === 'SECOND_PERSON'
+                  ? 'border-amber-300/65 bg-amber-400/20 text-amber-200'
+                  : 'border-amber-200/15 bg-[#0D1016]/60 text-[#EFE9DC] hover:border-amber-300/50'
+              }`}
+            >
+              <Camera className="h-3.5 w-3.5 text-amber-300 shrink-0" aria-hidden="true" />
+              <span>{hud.cameraPerspective === 'SECOND_PERSON' ? '2P Waist' : '1P View'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={onToggleMute}
               aria-label={muted ? 'Unmute audio' : 'Mute audio'}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/60 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/60 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer shrink-0"
             >
               {muted ? (
                 <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
@@ -421,7 +439,7 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
               type="button"
               onClick={onPause}
               aria-label="Pause game"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/60 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200/15 bg-[#0D1016]/60 text-[#EFE9DC] hover:border-amber-300/50 cursor-pointer shrink-0"
             >
               <Pause className="h-3.5 w-3.5 text-amber-300" aria-hidden="true" />
             </button>

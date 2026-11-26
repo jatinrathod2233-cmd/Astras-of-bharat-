@@ -47,6 +47,7 @@ export interface QualityProfile {
   allowEnvIbl: boolean;
   vramBudgetMb: number;
   bloomEnabled: boolean;
+  motionBlurEnabled: boolean;
   cloudDetailEnabled: boolean;
   waterfallDetailEnabled: boolean;
   shaderSlopeBlendEnabled: boolean;
@@ -74,11 +75,10 @@ export interface FrameScaleAdjustment {
   resolutionChanged: boolean;
 }
 
-const MIN_DYNAMIC_RES_SCALE = 0.55;
+const MIN_DYNAMIC_RES_SCALE = 1.0;
 
-function quantizeResScale(v: number): number {
-  const clamped = Math.max(MIN_DYNAMIC_RES_SCALE, Math.min(1.0, v));
-  return Math.round(clamped * 20) / 20;
+function quantizeResScale(_v: number): number {
+  return 1.0;
 }
 
 function clampTierToCeiling(
@@ -126,43 +126,48 @@ export function buildQualityProfile(
   const vramBudgetMb = envelope?.vramBudgetMb ?? (isMobile ? 150 : 280);
   const maxTex = envelope?.maxTextureSize ?? 4096;
 
+  const maxSamples = envelope?.maxSamples ?? 4;
+  const msaaHigh = isSoftwareGl ? 0 : Math.min(4, maxSamples || 4);
+  const msaaLow = isSoftwareGl ? 0 : Math.min(2, maxSamples || 2);
+
   if (tier === 'HIGH' && !isSoftwareGl) {
     const texSize: TextureResolutionTier =
-      vramBudgetMb < 165 || maxTex < 2048 ? 512 : 1024;
-    const keyShadow = Math.min(
-      maxTex,
-      isMobile ? 1024 : vramBudgetMb < 260 ? 1024 : 1536
-    );
-    const postScale = isMobile ? 0.85 : 0.9;
+      vramBudgetMb >= 380 && !isMobile && maxTex >= 4096
+        ? 2048
+        : vramBudgetMb < 140
+        ? 512
+        : 1024;
+    const keyShadow = Math.min(maxTex, isMobile ? 2048 : 4096);
     return {
       tier: 'HIGH',
-      pixelRatioCap: isMobile ? 1.35 : 1.5,
+      pixelRatioCap: isMobile ? 2.5 : 3.0,
       keyShadowSize: keyShadow,
-      shadowFrustumHalf: isMobile ? 22 : 25,
-      shadowType: THREE.PCFSoftShadowMap,
+      shadowFrustumHalf: isMobile ? 26 : 32,
+      shadowType: THREE.PCFShadowMap,
       shadowsEnabled: true,
-      torchShadowSize: 512,
+      torchShadowSize: Math.min(maxTex, 1024),
       torchShadowEnabled: true,
       maxActiveNightLamps: isMobile ? 3 : 5,
-      composerSamples: 0,
+      composerSamples: msaaHigh,
       composerHalfFloat: vramBudgetMb >= 220 && !isMobile,
-      underwaterScale: postScale,
-      postProcessScale: postScale,
-      sharpnessFactor: 0.38,
-      edgeEnhanceIntensity: 0.38,
-      smoothFilterStrength: 0.62,
+      underwaterScale: 1.0,
+      postProcessScale: 1.0,
+      sharpnessFactor: 1.0,
+      edgeEnhanceIntensity: 1.0,
+      smoothFilterStrength: 0.0,
       toneMapping: THREE.ACESFilmicToneMapping,
       particleScale: isHighEndDesktop ? 1.1 : 0.9,
-      cameraFar: isMobile ? 800 : 980,
-      fogFarScale: isMobile ? 1.0 : 1.1,
+      cameraFar: 4500,
+      fogFarScale: 0.0,
       textureSize: texSize,
-      anisotropyCap: isMobile ? 2 : 4,
-      skipNonEssentialMipmaps: vramBudgetMb < 180,
-      distanceCullScale: isMobile ? 0.95 : 1.15,
+      anisotropyCap: 16,
+      skipNonEssentialMipmaps: false,
+      distanceCullScale: isMobile ? 2.4 : 3.2,
       shaderLevel: 'FULL',
       allowEnvIbl: true,
       vramBudgetMb,
-      bloomEnabled: isHighEndDesktop || (!isMobile && vramBudgetMb >= 200) || (isMobile && vramBudgetMb >= 210),
+      bloomEnabled: false,
+      motionBlurEnabled: false,
       cloudDetailEnabled: true,
       waterfallDetailEnabled: true,
       shaderSlopeBlendEnabled: true,
@@ -170,37 +175,37 @@ export function buildQualityProfile(
   }
 
   if (tier === 'MEDIUM' && !isSoftwareGl) {
-    const texSize: TextureResolutionTier = vramBudgetMb < 105 ? 256 : 512;
-    const postScale = 0.78;
+    const texSize: TextureResolutionTier = vramBudgetMb < 105 ? 512 : 1024;
     return {
       tier: 'MEDIUM',
-      pixelRatioCap: 1.15,
-      keyShadowSize: Math.min(maxTex, 1024),
-      shadowFrustumHalf: 18,
-      shadowType: THREE.PCFSoftShadowMap,
+      pixelRatioCap: 2.0,
+      keyShadowSize: Math.min(maxTex, 2048),
+      shadowFrustumHalf: 22,
+      shadowType: THREE.PCFShadowMap,
       shadowsEnabled: true,
-      torchShadowSize: 256,
+      torchShadowSize: 512,
       torchShadowEnabled: vramBudgetMb >= 120,
       maxActiveNightLamps: 2,
-      composerSamples: 0,
+      composerSamples: msaaHigh,
       composerHalfFloat: false,
-      underwaterScale: postScale,
-      postProcessScale: postScale,
-      sharpnessFactor: 0.36,
-      edgeEnhanceIntensity: 0.36,
-      smoothFilterStrength: 0.64,
+      underwaterScale: 1.0,
+      postProcessScale: 1.0,
+      sharpnessFactor: 1.0,
+      edgeEnhanceIntensity: 1.0,
+      smoothFilterStrength: 0.0,
       toneMapping: THREE.ACESFilmicToneMapping,
       particleScale: 0.55,
-      cameraFar: 600,
-      fogFarScale: 0.85,
+      cameraFar: 3800,
+      fogFarScale: 0.0,
       textureSize: texSize,
-      anisotropyCap: 1,
-      skipNonEssentialMipmaps: true,
-      distanceCullScale: 0.8,
+      anisotropyCap: 16,
+      skipNonEssentialMipmaps: false,
+      distanceCullScale: 2.0,
       shaderLevel: 'BALANCED',
       allowEnvIbl: true,
       vramBudgetMb,
       bloomEnabled: false,
+      motionBlurEnabled: false,
       cloudDetailEnabled: true,
       waterfallDetailEnabled: true,
       shaderSlopeBlendEnabled: true,
@@ -208,38 +213,38 @@ export function buildQualityProfile(
   }
 
   const tightTex: TextureResolutionTier =
-    vramBudgetMb <= 72 ? 128 : 256;
-  const lowPostScale = 0.68;
+    vramBudgetMb <= 72 ? 256 : 512;
 
   return {
     tier: 'LOW',
-    pixelRatioCap: isVeryWeak && !isSoftwareGl ? 0.72 : 0.9,
-    keyShadowSize: Math.min(maxTex, 512),
-    shadowFrustumHalf: 15,
-    shadowType: isVeryWeak ? THREE.BasicShadowMap : THREE.PCFShadowMap,
+    pixelRatioCap: 2.0,
+    keyShadowSize: Math.min(maxTex, 1024),
+    shadowFrustumHalf: 18,
+    shadowType: THREE.PCFShadowMap,
     shadowsEnabled: !isSoftwareGl && (!isVeryWeak || vramBudgetMb >= 64),
     torchShadowSize: 0,
     torchShadowEnabled: false,
     maxActiveNightLamps: isVeryWeak || isSoftwareGl ? 0 : 1,
-    composerSamples: 0,
+    composerSamples: msaaLow,
     composerHalfFloat: false,
-    underwaterScale: lowPostScale,
-    postProcessScale: lowPostScale,
-    sharpnessFactor: 0.35,
-    edgeEnhanceIntensity: 0.35,
-    smoothFilterStrength: 0.65,
-    toneMapping: THREE.LinearToneMapping,
+    underwaterScale: 1.0,
+    postProcessScale: 1.0,
+    sharpnessFactor: 1.0,
+    edgeEnhanceIntensity: 1.0,
+    smoothFilterStrength: 0.0,
+    toneMapping: THREE.ACESFilmicToneMapping,
     particleScale: 0.3,
-    cameraFar: 420,
-    fogFarScale: 0.66,
+    cameraFar: 3200,
+    fogFarScale: 0.0,
     textureSize: tightTex,
-    anisotropyCap: 1,
-    skipNonEssentialMipmaps: true,
-    distanceCullScale: 0.65,
+    anisotropyCap: 16,
+    skipNonEssentialMipmaps: vramBudgetMb < 80,
+    distanceCullScale: 1.6,
     shaderLevel: 'FAST',
     allowEnvIbl: vramBudgetMb >= 70 && !isSoftwareGl,
     vramBudgetMb,
     bloomEnabled: false,
+    motionBlurEnabled: false,
     cloudDetailEnabled: false,
     waterfallDetailEnabled: !isVeryWeak && !isSoftwareGl,
     shaderSlopeBlendEnabled: false,
@@ -525,13 +530,13 @@ export class QualityManager {
     this.thermalLockTimer = Math.max(this.thermalLockTimer, lockDuration);
 
     if (this.activeTier === 'HIGH') {
-      this.dynamicResScale = 0.85;
+      this.dynamicResScale = 1.0;
       this.applyTierInternal('MEDIUM');
       this.resetFrameMetrics(6.5);
       return 'MEDIUM';
     }
     if (this.activeTier === 'MEDIUM') {
-      this.dynamicResScale = 0.85;
+      this.dynamicResScale = 1.0;
       this.applyTierInternal('LOW');
       this.resetFrameMetrics(6.5);
       return 'LOW';

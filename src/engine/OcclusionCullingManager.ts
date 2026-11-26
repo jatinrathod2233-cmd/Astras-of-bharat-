@@ -359,7 +359,10 @@ export class OcclusionCullingManager {
     this.cachedCamY = camPos.y;
     this.cachedCamZ = camPos.z;
 
-    if (isLinearFog) {
+    if (!Number.isFinite(fogDensityOrFar) || fogDensityOrFar <= 0) {
+      // Fog density is zero / disabled -> maximize render distance without fog-horizon cutoff
+      this.cachedFogCutoffBase = 1e6;
+    } else if (isLinearFog) {
       this.cachedFogCutoffBase = Math.max(90, fogDensityOrFar * 1.06);
     } else {
       // Conservative exponential fog extinction range: exp(-(d * fogDensity)^2) < 0.004 at d * density >= 2.4
